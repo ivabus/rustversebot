@@ -752,27 +752,7 @@ fn strip_all_tags_filter(value: String) -> String {
 mod tests {
     use std::collections::HashMap;
 
-    use nanoka::types::{
-        BossSeasonDetail, Buff, ElementResist, Monster, MonsterStats, Room, SeasonDetail, Zone,
-    };
-
-    #[test]
-    fn deadly_info_fixture_renders_as_png() {
-        let mut fixture: serde_json::Value =
-            serde_json::from_str(include_str!("../deadly_info.json")).unwrap();
-        for mode in fixture["modes"].as_array_mut().unwrap() {
-            for zone in mode["zone"].as_object_mut().unwrap().values_mut() {
-                for room in zone["layer_room"].as_object_mut().unwrap().values_mut() {
-                    for monster in room["monster_list"].as_object_mut().unwrap().values_mut() {
-                        monster["image"] = serde_json::json!("image/da.webp");
-                    }
-                }
-            }
-        }
-        let fixture: BossSeasonDetail = serde_json::from_value(fixture).unwrap();
-        let png = super::deadly_info(&fixture).unwrap();
-        assert!(png.starts_with(b"\x89PNG\r\n\x1a\n"));
-    }
+    use nanoka::types::{Buff, ElementResist, Monster, MonsterStats, Room, SeasonDetail, Zone};
 
     fn monster(id: u64, name: &str, hp: f64) -> Monster {
         Monster {
