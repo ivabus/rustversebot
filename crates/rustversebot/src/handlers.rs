@@ -689,24 +689,22 @@ async fn send_da(bot: &Bot, chat_id: ChatId, uid: &str, state: &BotState) -> any
         .db
         .get_latest_result_json(uid, "deadly_assault")
         .await?
+        && let Ok(data) = serde_json::from_str::<rustverse::models::zzz::ZZZDeadlyAssault>(&json)
+        && data.has_data.unwrap_or(true)
     {
-        if let Ok(data) = serde_json::from_str::<rustverse::models::zzz::ZZZDeadlyAssault>(&json) {
-            if data.has_data.unwrap_or(true) {
-                let nick = resolve_nickname(state, uid, data.nick_name.as_deref()).await?;
-                let png = rustverse_svg::da(&data);
-                send_detail_photo(
-                    bot,
-                    state,
-                    chat_id,
-                    InputFile::memory(png),
-                    "da",
-                    &nick,
-                    uid,
-                )
-                .await?;
-                return Ok(());
-            }
-        }
+        let nick = resolve_nickname(state, uid, data.nick_name.as_deref()).await?;
+        let png = rustverse_svg::da(&data);
+        send_detail_photo(
+            bot,
+            state,
+            chat_id,
+            InputFile::memory(png),
+            "da",
+            &nick,
+            uid,
+        )
+        .await?;
+        return Ok(());
     }
 
     // Fallback: live API
@@ -781,24 +779,22 @@ async fn send_shiyu(bot: &Bot, chat_id: ChatId, uid: &str, state: &BotState) -> 
         .db
         .get_latest_result_json(uid, "shiyu_defense")
         .await?
+        && let Ok(data) = serde_json::from_str::<rustverse::models::zzz::ZZZShiyuDefense>(&json)
+        && data.hadal_begin_time.is_some()
     {
-        if let Ok(data) = serde_json::from_str::<rustverse::models::zzz::ZZZShiyuDefense>(&json) {
-            if data.hadal_begin_time.is_some() {
-                let nick = resolve_nickname(state, uid, None).await?;
-                let png = rustverse_svg::shiyu(&data);
-                send_detail_photo(
-                    bot,
-                    state,
-                    chat_id,
-                    InputFile::memory(png),
-                    "sd",
-                    &nick,
-                    uid,
-                )
-                .await?;
-                return Ok(());
-            }
-        }
+        let nick = resolve_nickname(state, uid, None).await?;
+        let png = rustverse_svg::shiyu(&data);
+        send_detail_photo(
+            bot,
+            state,
+            chat_id,
+            InputFile::memory(png),
+            "sd",
+            &nick,
+            uid,
+        )
+        .await?;
+        return Ok(());
     }
 
     // Fallback: live API
@@ -1239,14 +1235,11 @@ async fn resolve_nickname(
         .db
         .get_latest_result_json(uid, "deadly_assault")
         .await?
+        && let Ok(v) = serde_json::from_str::<serde_json::Value>(&json)
+        && let Some(n) = v.get("nick_name").and_then(|s| s.as_str())
+        && !n.is_empty()
     {
-        if let Ok(v) = serde_json::from_str::<serde_json::Value>(&json) {
-            if let Some(n) = v.get("nick_name").and_then(|s| s.as_str()) {
-                if !n.is_empty() {
-                    return Ok(n.to_string());
-                }
-            }
-        }
+        return Ok(n.to_string());
     }
     Ok(uid.to_string())
 }

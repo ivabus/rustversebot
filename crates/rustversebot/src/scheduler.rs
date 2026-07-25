@@ -48,40 +48,40 @@ impl Default for SchedulerSettings {
 impl SchedulerSettings {
     fn from_env() -> Self {
         let mut settings = Self::default();
-        if let Ok(value) = std::env::var("BOT_SCHEDULER_INTERVAL_SECS") {
-            if let Ok(seconds) = value.parse::<u64>() {
-                settings.tick_interval = Duration::from_secs(seconds.max(1));
-            }
+        if let Ok(value) = std::env::var("BOT_SCHEDULER_INTERVAL_SECS")
+            && let Ok(seconds) = value.parse::<u64>()
+        {
+            settings.tick_interval = Duration::from_secs(seconds.max(1));
         }
-        if let Ok(value) = std::env::var("BOT_CHECKPOINT_WINDOW_SECS") {
-            if let Ok(seconds) = value.parse::<u64>() {
-                settings.checkpoint_window = Duration::from_secs(seconds.max(1));
-            }
+        if let Ok(value) = std::env::var("BOT_CHECKPOINT_WINDOW_SECS")
+            && let Ok(seconds) = value.parse::<u64>()
+        {
+            settings.checkpoint_window = Duration::from_secs(seconds.max(1));
         }
-        if let Ok(value) = std::env::var("BOT_REQUEST_SPACING_MS") {
-            if let Ok(milliseconds) = value.parse() {
-                settings.request_spacing = Duration::from_millis(milliseconds);
-            }
+        if let Ok(value) = std::env::var("BOT_REQUEST_SPACING_MS")
+            && let Ok(milliseconds) = value.parse()
+        {
+            settings.request_spacing = Duration::from_millis(milliseconds);
         }
-        if let Ok(value) = std::env::var("BOT_RETRY_ATTEMPTS") {
-            if let Ok(attempts) = value.parse::<usize>() {
-                settings.retry_attempts = attempts.max(1);
-            }
+        if let Ok(value) = std::env::var("BOT_RETRY_ATTEMPTS")
+            && let Ok(attempts) = value.parse::<usize>()
+        {
+            settings.retry_attempts = attempts.max(1);
         }
-        if let Ok(value) = std::env::var("BOT_RETENTION_DAYS") {
-            if let Ok(days) = value.parse::<i64>() {
-                settings.retention_days = days.max(1);
-            }
+        if let Ok(value) = std::env::var("BOT_RETENTION_DAYS")
+            && let Ok(days) = value.parse::<i64>()
+        {
+            settings.retention_days = days.max(1);
         }
-        if let Ok(value) = std::env::var("BOT_ANNOUNCEMENT_LEAD_HOURS") {
-            if let Ok(hours) = value.parse::<i64>() {
-                settings.announcement_lead = ChronoDuration::hours(hours.max(1));
-            }
+        if let Ok(value) = std::env::var("BOT_ANNOUNCEMENT_LEAD_HOURS")
+            && let Ok(hours) = value.parse::<i64>()
+        {
+            settings.announcement_lead = ChronoDuration::hours(hours.max(1));
         }
-        if let Ok(value) = std::env::var("BOT_ANNOUNCEMENT_POLL_SECS") {
-            if let Ok(seconds) = value.parse::<u64>() {
-                settings.announcement_poll_interval = Duration::from_secs(seconds.max(60));
-            }
+        if let Ok(value) = std::env::var("BOT_ANNOUNCEMENT_POLL_SECS")
+            && let Ok(seconds) = value.parse::<u64>()
+        {
+            settings.announcement_poll_interval = Duration::from_secs(seconds.max(60));
         }
         settings
     }
@@ -228,13 +228,15 @@ async fn fetch_one_inner(
                     .await?;
                 any_stored = true;
 
-                if let Some(ref nick) = data.nick_name {
-                    if !nick.is_empty() && user.nickname.is_none() && user.chat_id != 0 {
-                        state
-                            .db
-                            .add_user(user.chat_id, user.telegram_user_id, uid, Some(nick))
-                            .await?;
-                    }
+                if let Some(ref nick) = data.nick_name
+                    && !nick.is_empty()
+                    && user.nickname.is_none()
+                    && user.chat_id != 0
+                {
+                    state
+                        .db
+                        .add_user(user.chat_id, user.telegram_user_id, uid, Some(nick))
+                        .await?;
                 }
             }
         }
@@ -510,8 +512,8 @@ async fn check_deadly_assault_announcement(
             }
         }
 
-        if delivered {
-            if let Err(error) = state
+        if delivered
+            && let Err(error) = state
                 .db
                 .mark_season_announcement_posted(
                     chat_id,
@@ -520,11 +522,10 @@ async fn check_deadly_assault_announcement(
                     &starts_at_storage,
                 )
                 .await
-            {
-                log::error!(
-                    "Could not persist DA announcement {season_id} for chat {chat_id}: {error}"
-                );
-            }
+        {
+            log::error!(
+                "Could not persist DA announcement {season_id} for chat {chat_id}: {error}"
+            );
         }
         tokio::time::sleep(settings.request_spacing).await;
     }
@@ -625,8 +626,8 @@ async fn check_shiyu_defense_announcement(
             }
         }
 
-        if delivered {
-            if let Err(error) = state
+        if delivered
+            && let Err(error) = state
                 .db
                 .mark_season_announcement_posted(
                     chat_id,
@@ -635,11 +636,10 @@ async fn check_shiyu_defense_announcement(
                     &starts_at_storage,
                 )
                 .await
-            {
-                log::error!(
-                    "Could not persist Shiyu announcement {season_id} for chat {chat_id}: {error}"
-                );
-            }
+        {
+            log::error!(
+                "Could not persist Shiyu announcement {season_id} for chat {chat_id}: {error}"
+            );
         }
         tokio::time::sleep(settings.request_spacing).await;
     }

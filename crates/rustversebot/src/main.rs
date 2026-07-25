@@ -182,10 +182,10 @@ async fn main() -> anyhow::Result<()> {
     if let Err(error) = scheduler_task.await {
         log::error!("Scheduler task could not be joined: {error}");
     }
-    if let Some(task) = web_task {
-        if let Err(error) = task.await {
-            log::error!("Web dashboard task could not be joined: {error}");
-        }
+    if let Some(task) = web_task
+        && let Err(error) = task.await
+    {
+        log::error!("Web dashboard task could not be joined: {error}");
     }
 
     Ok(())

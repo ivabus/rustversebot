@@ -432,10 +432,10 @@ impl Cli {
 
                 // 0. Always try to get nickname from game record card (lightweight).
                 //    This only works for the authenticated user's own games.
-                if let Ok(cards) = client.get_game_record_cards().await {
-                    if let Some(card) = cards.iter().find(|c| c.game_role_id == uid) {
-                        nickname = Some(card.nickname.clone());
-                    }
+                if let Ok(cards) = client.get_game_record_cards().await
+                    && let Some(card) = cards.iter().find(|c| c.game_role_id == uid)
+                {
+                    nickname = Some(card.nickname.clone());
                 }
 
                 if self.resolve_names {
@@ -454,14 +454,12 @@ impl Cli {
                             );
                             if !agent_cache::is_cached() {
                                 let cards = client.get_game_record_cards().await?;
-                                if let Some(own) = cards.iter().find(|c| c.game_id == 8) {
-                                    if let Ok(list) =
+                                if let Some(own) = cards.iter().find(|c| c.game_id == 8)
+                                    && let Ok(list) =
                                         client.get_avatar_list(&own.game_role_id, None).await
-                                    {
-                                        if !list.avatar_list.is_empty() {
-                                            full_avatars = Some(list.avatar_list);
-                                        }
-                                    }
+                                    && !list.avatar_list.is_empty()
+                                {
+                                    full_avatars = Some(list.avatar_list);
                                 }
                             }
                         }
@@ -510,16 +508,16 @@ impl Cli {
                         );
 
                         // Shiyu summary
-                        if let Some(ref hadal) = stats.hadal_brief {
-                            if let Some(ref v2) = hadal.v2 {
-                                let rp = v2.rank_percent.unwrap_or(0) as f64 / 100.0;
-                                println!(
-                                    "  Shiyu Defense:       {} / {}  Rating: {}  Top: {rp:.2}%",
-                                    v2.score.unwrap_or(0),
-                                    v2.max_score.unwrap_or(0),
-                                    v2.rating.as_deref().unwrap_or("?"),
-                                );
-                            }
+                        if let Some(ref hadal) = stats.hadal_brief
+                            && let Some(ref v2) = hadal.v2
+                        {
+                            let rp = v2.rank_percent.unwrap_or(0) as f64 / 100.0;
+                            println!(
+                                "  Shiyu Defense:       {} / {}  Rating: {}  Top: {rp:.2}%",
+                                v2.score.unwrap_or(0),
+                                v2.max_score.unwrap_or(0),
+                                v2.rating.as_deref().unwrap_or("?"),
+                            );
                         }
 
                         // Deadly Assault summary
