@@ -13,20 +13,22 @@ jobs:
   build:
     name: Build and cache (aarch64-darwin)
     runs-on: macos-26
+    environment: Actions
+    env:
+      ATTIC_CACHE: ${{ secrets.ATTIC_CACHE || 'rustversebot' }}
     steps:
       - uses: actions/checkout@v4
       - uses: DeterminateSystems/determinate-nix-action@v3
       - name: Configure Attic cache
         env:
-          ATTIC_CACHE: ${{ secrets.ATTIC_CACHE }}
           ATTIC_SERVER: ${{ secrets.ATTIC_SERVER }}
           ATTIC_TOKEN: ${{ secrets.ATTIC_TOKEN }}
         run: |
+          : "${ATTIC_SERVER:?ATTIC_SERVER secret is required}"
+          : "${ATTIC_TOKEN:?ATTIC_TOKEN secret is required}"
           nix run .#attic -- login github-actions "$ATTIC_SERVER" "$ATTIC_TOKEN"
           nix run .#attic -- use "$ATTIC_CACHE"
       - name: Build bot
         run: nix build .#rustversebot --print-build-logs
       - name: Push closure to Attic
-        env:
-          ATTIC_CACHE: ${{ secrets.ATTIC_CACHE }}
         run: nix run .#attic -- push "$ATTIC_CACHE" ./result

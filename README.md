@@ -128,11 +128,14 @@ nix run .#rustversebot
 
 GitHub Actions подключает Attic как substituter перед сборкой, собирает тот же
 пакет на нативном ARM64 macOS runner и отправляет недостающий полный Nix closure
-обратно в Attic. В настройках репозитория создайте secrets:
+обратно в Attic. Workflow использует GitHub Environment с именем `Actions`.
+Создайте в нём environment secrets:
 
 - `ATTIC_SERVER` — URL сервера, например `https://attic.example.org`;
-- `ATTIC_CACHE` — имя кэша, например `rustversebot`;
 - `ATTIC_TOKEN` — токен с правом push в этот кэш.
+
+Необязательный `ATTIC_CACHE` переопределяет имя кэша; без него workflow
+использует `rustversebot`.
 
 Для использования публичного кэша узнайте его endpoint и public key у
 администратора Attic:
