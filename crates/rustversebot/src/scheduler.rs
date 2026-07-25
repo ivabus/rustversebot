@@ -6,9 +6,9 @@ use std::sync::Arc;
 use std::time::Duration;
 use teloxide::{prelude::*, types::InputFile};
 
+use crate::BotState;
 use crate::bot_templates::BotTemplateSender;
 use crate::handlers;
-use crate::BotState;
 
 const CHECKPOINTS: [(&str, ChronoDuration); 3] = [
     ("6h", ChronoDuration::hours(6)),
@@ -822,12 +822,14 @@ mod tests {
         assert!(
             current_checkpoints(start, start + ChronoDuration::hours(6), window).contains(&"6h")
         );
-        assert!(!current_checkpoints(
-            start,
-            start + ChronoDuration::hours(6) - ChronoDuration::seconds(1),
-            window,
-        )
-        .contains(&"6h"));
+        assert!(
+            !current_checkpoints(
+                start,
+                start + ChronoDuration::hours(6) - ChronoDuration::seconds(1),
+                window,
+            )
+            .contains(&"6h")
+        );
     }
 
     #[test]

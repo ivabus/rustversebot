@@ -1,6 +1,6 @@
 pub use crate::templates::RenderedTemplate;
 use crate::templates::TemplateEngine;
-use anyhow::{bail, Context};
+use anyhow::{Context, bail};
 use serde::Serialize;
 use teloxide::{
     prelude::*,
@@ -175,7 +175,7 @@ fn validate_length(
 
 #[cfg(test)]
 mod tests {
-    use super::{selected_parse_mode, validate_length, RenderedTemplate};
+    use super::{RenderedTemplate, selected_parse_mode, validate_length};
     use crate::templates::TemplateFormat;
     use teloxide::types::ParseMode;
 

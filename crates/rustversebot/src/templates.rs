@@ -164,7 +164,7 @@ impl TemplateEngine {
 
 #[cfg(test)]
 mod tests {
-    use super::{TemplateEngine, TemplateFormat, TEMPLATES};
+    use super::{TEMPLATES, TemplateEngine, TemplateFormat};
     use minijinja::{AutoEscape, Environment};
     use serde_json::json;
     use std::{collections::BTreeSet, fs, path::PathBuf};

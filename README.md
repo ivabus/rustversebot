@@ -5,7 +5,6 @@ Shiyu Defense.
 
 ## Требования
 
-- Rust 1.80+;
 - Telegram bot token от [@BotFather](https://t.me/BotFather);
 - Telegram user ID администратора.
 

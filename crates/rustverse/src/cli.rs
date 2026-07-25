@@ -174,7 +174,8 @@ impl Cli {
                         "private"
                     };
                     let region_label = card.region_name.as_deref().unwrap_or(&card.region);
-                    println!("[{game}] {nickname} | UID: {uid} | Lvl: {level} | {region_label} | {public_label}",
+                    println!(
+                        "[{game}] {nickname} | UID: {uid} | Lvl: {level} | {region_label} | {public_label}",
                         nickname = card.nickname,
                         uid = card.game_role_id,
                         level = card.level,
@@ -275,9 +276,14 @@ impl Cli {
                         }
                     }
                     if let Some(end) = &data.hadal_end_time {
-                        println!("  Ends: {year}-{month:02}-{day:02} {hour:02}:{minute:02}:{second:02} (UTC+8)",
-                            year = end.year, month = end.month, day = end.day,
-                            hour = end.hour, minute = end.minute, second = end.second,
+                        println!(
+                            "  Ends: {year}-{month:02}-{day:02} {hour:02}:{minute:02}:{second:02} (UTC+8)",
+                            year = end.year,
+                            month = end.month,
+                            day = end.day,
+                            hour = end.hour,
+                            minute = end.minute,
+                            second = end.second,
                         );
                     }
                     println!("\nUse --json for full response data.");

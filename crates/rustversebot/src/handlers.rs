@@ -9,10 +9,10 @@ use teloxide::{
     },
 };
 
-use crate::bot_templates::{BotTemplateSender, RenderedTemplate};
-use crate::scheduler;
 use crate::BotState;
 use crate::Command;
+use crate::bot_templates::{BotTemplateSender, RenderedTemplate};
+use crate::scheduler;
 
 /// Main command dispatcher.
 pub async fn command_handler(
@@ -1680,14 +1680,16 @@ mod tests {
         ]);
         let now = Utc.with_ymd_and_hms(2026, 6, 20, 0, 0, 0).unwrap();
 
-        assert!(select_indexed_season(
-            &seasons,
-            EndgameType::DeadlyAssault,
-            9,
-            SeasonPosition::Next,
-            now,
-        )
-        .is_none());
+        assert!(
+            select_indexed_season(
+                &seasons,
+                EndgameType::DeadlyAssault,
+                9,
+                SeasonPosition::Next,
+                now,
+            )
+            .is_none()
+        );
     }
 
     #[test]

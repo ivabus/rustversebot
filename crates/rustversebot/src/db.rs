@@ -1,5 +1,5 @@
-use anyhow::{bail, Context};
-use libsql::{params, Builder, Connection, Database};
+use anyhow::{Context, bail};
+use libsql::{Builder, Connection, Database, params};
 use serde::Serialize;
 
 const SCHEMA_VERSION: i64 = 4;
@@ -55,7 +55,9 @@ impl Db {
         let version = rows.next().await?.map_or(Ok(0), |row| row.get(0))?;
         drop(rows);
         if version > SCHEMA_VERSION {
-            bail!("database schema version {version} is newer than supported version {SCHEMA_VERSION}");
+            bail!(
+                "database schema version {version} is newer than supported version {SCHEMA_VERSION}"
+            );
         }
         if version < 1 {
             tx.execute_batch(
@@ -585,26 +587,30 @@ mod tests {
         db.mark_checkpoint_posted(10, "deadly_assault", "season", "6h")
             .await
             .unwrap();
-        assert!(db
-            .is_checkpoint_posted(10, "deadly_assault", "season", "6h")
-            .await
-            .unwrap());
-        assert!(!db
-            .is_checkpoint_posted(20, "deadly_assault", "season", "6h")
-            .await
-            .unwrap());
+        assert!(
+            db.is_checkpoint_posted(10, "deadly_assault", "season", "6h")
+                .await
+                .unwrap()
+        );
+        assert!(
+            !db.is_checkpoint_posted(20, "deadly_assault", "season", "6h")
+                .await
+                .unwrap()
+        );
         assert!(db.cleanup_old_results(0).await.is_err());
 
         db.mark_season_announcement_posted(10, "deadly_assault", "69041", "2026-07-25 06:00:00")
             .await
             .unwrap();
-        assert!(db
-            .is_season_announcement_posted(10, "deadly_assault", "69041")
-            .await
-            .unwrap());
-        assert!(!db
-            .is_season_announcement_posted(20, "deadly_assault", "69041")
-            .await
-            .unwrap());
+        assert!(
+            db.is_season_announcement_posted(10, "deadly_assault", "69041")
+                .await
+                .unwrap()
+        );
+        assert!(
+            !db.is_season_announcement_posted(20, "deadly_assault", "69041")
+                .await
+                .unwrap()
+        );
     }
 }

@@ -5,11 +5,11 @@
 
 use crate::BotState;
 use axum::{
+    Json, Router,
     extract::{Path, State},
-    http::{header, StatusCode},
+    http::{StatusCode, header},
     response::{Html, IntoResponse, Response},
     routing::get,
-    Json, Router,
 };
 use serde::Serialize;
 use std::{net::SocketAddr, sync::Arc};
@@ -154,7 +154,7 @@ impl IntoResponse for PublicApiError {
 mod tests {
     use super::*;
     use axum::{
-        body::{to_bytes, Body},
+        body::{Body, to_bytes},
         http::Request,
     };
     use tower::ServiceExt;

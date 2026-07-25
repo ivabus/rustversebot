@@ -93,7 +93,7 @@ impl ZZZClient {
     /// Build common headers for requests that need DS.
     fn headers_with_ds(&self) -> reqwest::header::HeaderMap {
         use reqwest::header::{
-            HeaderMap, HeaderValue, ACCEPT, ACCEPT_LANGUAGE, COOKIE, ORIGIN, REFERER, USER_AGENT,
+            ACCEPT, ACCEPT_LANGUAGE, COOKIE, HeaderMap, HeaderValue, ORIGIN, REFERER, USER_AGENT,
         };
 
         let mut headers = HeaderMap::new();
@@ -227,7 +227,7 @@ impl ZZZClient {
                     return Err(HoyoverseError::Api {
                         retcode: api_resp.retcode,
                         message: api_resp.message,
-                    })
+                    });
                 }
             }
         };
