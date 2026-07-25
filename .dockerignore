@@ -1,0 +1,13 @@
+.git
+.gitignore
+target
+bot.db
+bot.db-*
+*.sqlite
+*.sqlite-*
+*.db
+*.db-*
+.env
+*.log
+*.zip
+.DS_Store

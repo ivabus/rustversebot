@@ -1,0 +1,7 @@
+Shiyu Defense — {{ nick_name }}
+{% if score %}Score: {{ score }} / {{ max_score }} | Rating: {{ rating }} | Top: {{ rank_percent }}%
+{% endif %}
+{% for room in rooms %}Room {{ room.index }} — {{ room.score }} / {{ room.max_score }} | Rating: {{ room.rating }}
+{% if room.agents %}  Agents: {{ room.agents }}
+{% endif %}{% if room.buff %}  Buff: {{ room.buff }}
+{% endif %}{% endfor %}

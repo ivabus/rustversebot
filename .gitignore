@@ -1,0 +1,32 @@
+# Rust build output
+/target/
+/result
+/result-*
+/image/
+
+# Local runtime state (contains Telegram users and HoYoLAB credentials)
+*.db
+*.db-*
+*.sqlite
+*.sqlite3
+
+# Secrets and machine-local environment
+.env
+.env.*
+!.env.example
+
+# Local logs, backups, and archives
+*.log
+*.bak
+*.backup
+*.zip
+
+# Machine-specific Cargo configuration
+/.cargo/
+
+# Editor and OS metadata
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*~

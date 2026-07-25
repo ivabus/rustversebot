@@ -1,0 +1,60 @@
+{% set width = 640 %}
+{% set height = 480 %}
+{% set total_score = height * 4 %}
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 640 360" fill="black">
+	<style>
+		text {
+			stroke-width: 0.5;
+		}
+	</style>
+
+	{% include "defs.j2" %}
+
+	<rect fill="black" x="0" y="0" width="640" height="480" />
+	<rect fill="url(#background)" x="0" y="0" width="640" height="480"/>
+	<rect fill="#222" mask="url(#bg-img)" x="0" y="0" width="640" height="480" />
+	{% for room in list %}
+		<svg y="255" x="{{16 + loop.index0 * 208}}">
+			<rect x="-5" y="-5" width="200" height="95" rx="17.5" ry="17.5" fill="url(#box-bg)" stroke="url(#box-stroke)" />
+			<rect x="-5" y="-5" width="200" height="95" rx="17.5" ry="17.5" fill="url(#box-pattern)" stroke="url(#box-stroke)" />
+			<image width="200" mask="url(#art)" x="-5" y="-186" href="{{ room.boss[0].icon }}" />
+			{% for agent in room.avatar_list %}
+				<svg x="{{ 5 + loop.index0 * 65 }}" y="0" width="50" height="50" >
+					<circle cx="25" cy="25" r="25" fill="url(#Gradient5)"/>
+
+					<circle cx="25" cy="25" r="24" fill="url(#Gradient6)"/>
+
+
+					<svg viewBox="0 0 50 50" x="0" y="0" width="50" height="50" clip-path="url(#square_avatar)" >
+						<image href="{{ agent.role_square_url  }}" x="0" y="0" width="50" height="50" preserveAspectRatio="xMidYMid slice"/>
+					</svg>
+				</svg>
+
+				{% if agent.rank != 0 %}
+					<text text-anchor="middle" font-size="8" y="8" x="{{ loop.index0 * 65 + 51}}" fill="url(#Gradient3)" style="stroke: url(#Gradient4); stroke-width: 0.4" font-family="'inpin hongmengti'">{{agent.rank}}</text>
+				{% endif %}
+			{% endfor %}
+			<text text-anchor="middle" dominant-baseline="middle" font-size="25" x="95" y="73" fill="url(#Gradient3)" style="stroke: url(#Gradient4); stroke-width: 1.25" font-family="'inpin hongmengti'">{{ room.score }}</text>
+			{% if room.score >= 20000 %}
+				<image href="image/star-icon.png" width="20" x="60" y="-200"/>
+				<image href="image/star-icon.png" width="20" x="85" y="-200"/>
+				<image href="image/star-icon.png" width="20" x="110" y="-200"/>
+			{% elif room.score >= 14000 %}
+
+			<image href="image/star-icon.png" width="20" x="72.5" y="-200"/>
+			<image href="image/star-icon.png" width="20" x="97.5" y="-200"/>
+
+			{% elif room.score >= 6000 %}
+				<image href="image/star-icon.png" width="20" x="85" y="-195"/>
+			{% endif %}
+			<circle cx="177.5" cy="72.5" r="13.5" fill="url(#box-stroke)" />
+			<circle cx="177.5" cy="72.5" r="12.5" fill="url(#box-bg)" />
+			<image width="25" y="60" x="165" href="{{ room.buffer[0].icon }}" />
+		</svg>
+	{% endfor %}
+
+	<text text-anchor="start" dominant-baseline="middle" font-size="15" x="10" y="23" fill="url(#Gradient3)" style="stroke: url(#Gradient4); stroke-width: 0.5" font-family="'inpin hongmengti'">{{ total_score }}</text>
+	<text text-anchor="end" dominant-baseline="middle" font-size="15" x="630" y="23" fill="url(#Gradient3)" style="stroke: url(#Gradient4); stroke-width: 0.5" font-family="'inpin hongmengti'">{{ rank_percent / 100.0 }}%</text>
+	<text class="watermark" text-anchor="end" font-size="8" x="630" y="355">@rustversebot</text>
+
+</svg>

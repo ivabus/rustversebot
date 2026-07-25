@@ -1,0 +1,16 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/nanoka",
+    "crates/rustverse",
+    "crates/rustverse_svg",
+    "crates/rustversebot",
+]
+default-members = ["crates/rustversebot"]
+
+[profile.dev]
+incremental = true
+
+[profile.release]
+strip = true
+lto = "thin"

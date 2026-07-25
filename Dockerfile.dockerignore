@@ -1,0 +1,12 @@
+**/.git
+**/target
+**/.env
+**/*.log
+**/*.zip
+**/.DS_Store
+rustversebot/bot.db
+rustversebot/bot.db-*
+rustversebot/*.sqlite
+rustversebot/*.sqlite-*
+rustversebot/*.db
+rustversebot/*.db-*

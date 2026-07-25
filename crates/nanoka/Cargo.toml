@@ -1,0 +1,25 @@
+[package]
+name = "nanoka"
+version = "0.1.0"
+edition = "2024"
+description = "Async Rust API for Zenless Zone Zero Shiyu Defence / Deadly Assault data from nanoka.cc"
+license = "MIT"
+repository = "https://github.com/ivabus/nanoka"
+
+[dependencies]
+reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-features = false }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["full"] }
+regex = "1"
+tracing = "0.1"
+thiserror = "2"
+clap = { version = "4", features = ["derive"], optional = true }
+
+[features]
+default = ["cli"]
+cli = ["clap"]
+
+[[bin]]
+name = "nanoka"
+required-features = ["cli"]

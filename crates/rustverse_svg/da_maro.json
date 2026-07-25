@@ -1,0 +1,227 @@
+{
+  "start_time": {
+    "year": 2026,
+    "month": 7,
+    "day": 17,
+    "hour": 4,
+    "minute": 0,
+    "second": 0
+  },
+  "end_time": {
+    "year": 2026,
+    "month": 7,
+    "day": 29,
+    "hour": 3,
+    "minute": 59,
+    "second": 59
+  },
+  "rank_percent": 4300.0,
+  "total_score": 68427,
+  "total_star": 7,
+  "total_max_score": 195000,
+  "room_max_score": 65000,
+  "zone_id": 69041,
+  "has_data": true,
+  "nick_name": "маро",
+  "avatar_icon": "https://act-webstatic.hoyoverse.com/darkmatter/nap/prod_gf_cn/item_icon_u7f11d/5780f3ac3061c25a651c133fda08060c.png",
+  "list": [
+    {
+      "score": 22734,
+      "star": 3,
+      "total_star": 3,
+      "challenge_time": {
+        "year": 2026,
+        "month": 7,
+        "day": 17,
+        "hour": 6,
+        "minute": 48,
+        "second": 10
+      },
+      "avatar_list": [
+        {
+          "id": 1541,
+          "level": 60,
+          "rank": 0,
+          "rarity": "S",
+          "element_type": 202,
+          "avatar_profession": 3,
+          "sub_element_type": 0,
+          "role_square_url": "https://act-webstatic.hoyoverse.com/game_record/zzzv2/role_square_avatar/role_square_avatar_1541.png"
+        },
+        {
+          "id": 1561,
+          "level": 60,
+          "rank": 1,
+          "rarity": "S",
+          "element_type": 204,
+          "avatar_profession": 3,
+          "sub_element_type": 0,
+          "role_square_url": "https://act-webstatic.hoyoverse.com/game_record/zzzv2/role_square_avatar/role_square_avatar_1561.png"
+        },
+        {
+          "id": 1411,
+          "level": 60,
+          "rank": 0,
+          "rarity": "S",
+          "element_type": 200,
+          "avatar_profession": 4,
+          "sub_element_type": 0,
+          "role_square_url": "https://act-webstatic.hoyoverse.com/game_record/zzzv2/role_square_avatar/role_square_avatar_1411_3114111.png"
+        }
+      ],
+      "buddy": {
+        "id": 54004,
+        "level": 60,
+        "rarity": "S",
+        "bangboo_rectangle_url": "https://act-webstatic.hoyoverse.com/darkmatter/nap/prod_gf_cn/item_icon_u7f11d/d0931e00b2dbd5eebe7155a263a897b6.png"
+      },
+      "boss": [
+        {
+          "name": "Phaethon of the Scorched Horizon",
+          "icon": "https://act-webstatic.hoyoverse.com/darkmatter/nap/prod_gf_cn/item_icon_u7f11d/3c797f02e3d1300c1a6c690a37867058.png",
+          "bg_icon": "https://act-webstatic.hoyoverse.com/game_record/zzzv2/boss_bg/boss_bg_4.png",
+          "race_icon": "https://act-webstatic.hoyoverse.com/darkmatter/nap/prod_gf_cn/item_icon_u7f11d/2be8cb8b884dab184682b00478f7f471.png"
+        }
+      ],
+      "buffer": [
+        {
+          "title": "Frostbite Breath",
+          "description": "· Agent's <color=#A6C5FD>Wind DMG</color> and <color=#98EFF0>Ice DMG</color> <color=#2BAD00>increase by 20%</color>, and their Anomaly Proficiency <color=#2BAD00>increases by 20</color>.\\n· When an <color=#FFFFFF>Attribute Anomaly</color> is inflicted on an enemy, the enemy's All-DMG RES <color=#2BAD00> is reduced by 10%</color>, and Attribute Anomaly DMG dealt by the whole squad <color=#2BAD00>increases by 10%</color> for 15s. Repeated triggers reset the duration.",
+          "icon": "https://act-webstatic.hoyoverse.com/darkmatter/nap/prod_gf_cn/item_icon_u7f11d/43f73ffc46f6696a31f6cb60b966febc.png"
+        }
+      ]
+    },
+    {
+      "score": 13908,
+      "star": 1,
+      "total_star": 3,
+      "challenge_time": {
+        "year": 2026,
+        "month": 7,
+        "day": 17,
+        "hour": 6,
+        "minute": 53,
+        "second": 10
+      },
+      "avatar_list": [
+        {
+          "id": 1431,
+          "level": 60,
+          "rank": 0,
+          "rarity": "S",
+          "element_type": 200,
+          "avatar_profession": 1,
+          "sub_element_type": 4,
+          "role_square_url": "https://act-webstatic.hoyoverse.com/game_record/zzzv2/role_square_avatar/role_square_avatar_1431.png"
+        },
+        {
+          "id": 1341,
+          "level": 60,
+          "rank": 0,
+          "rarity": "S",
+          "element_type": 202,
+          "avatar_profession": 5,
+          "sub_element_type": 0,
+          "role_square_url": "https://act-webstatic.hoyoverse.com/game_record/zzzv2/role_square_avatar/role_square_avatar_1341.png"
+        },
+        {
+          "id": 1451,
+          "level": 60,
+          "rank": 0,
+          "rarity": "S",
+          "element_type": 205,
+          "avatar_profession": 4,
+          "sub_element_type": 0,
+          "role_square_url": "https://act-webstatic.hoyoverse.com/game_record/zzzv2/role_square_avatar/role_square_avatar_1451.png"
+        }
+      ],
+      "buddy": {
+        "id": 54021,
+        "level": 60,
+        "rarity": "S",
+        "bangboo_rectangle_url": "https://act-webstatic.hoyoverse.com/darkmatter/nap/prod_gf_cn/item_icon_u7f11d/7d95f4f7097bf282b447f4296461760e.png"
+      },
+      "boss": [
+        {
+          "name": "Notorious - Pompey",
+          "icon": "https://act-webstatic.hoyoverse.com/darkmatter/nap/prod_gf_cn/item_icon_u7f11d/5829096fba6dea2463ee45be690a43fb.png",
+          "bg_icon": "https://act-webstatic.hoyoverse.com/game_record/zzzv2/boss_bg/boss_bg_4.png",
+          "race_icon": "https://act-webstatic.hoyoverse.com/darkmatter/nap/prod_gf_cn/item_icon_u7f11d/2be8cb8b884dab184682b00478f7f471.png"
+        }
+      ],
+      "buffer": [
+        {
+          "title": "Oblivion",
+          "description": "· Daze inflicted by the Agent increases by <color=#2BAD00>20%</color>. <color=#FFFFFF>Ultimate</color>/<color=#FFFFFF>Chain Attack</color> ignore <color=#2BAD00>30%</color> of the enemy's All-Attribute RES.\\n· After launching a <color=#FFFFFF>Chain Attack</color>, the whole squad's ATK increases by <color=#2BAD00>10%</color> and CRIT DMG increases by <color=#2BAD00>15%</color> for 20s, stacking up to 3 times. Repeated triggers reset the duration.",
+          "icon": "https://act-webstatic.hoyoverse.com/darkmatter/nap/prod_gf_cn/item_icon_u7f11d/a6e7a008548e5f0ff4b59f7670840385.png"
+        }
+      ]
+    },
+    {
+      "score": 31785,
+      "star": 3,
+      "total_star": 3,
+      "challenge_time": {
+        "year": 2026,
+        "month": 7,
+        "day": 17,
+        "hour": 6,
+        "minute": 42,
+        "second": 56
+      },
+      "avatar_list": [
+        {
+          "id": 1501,
+          "level": 60,
+          "rank": 1,
+          "rarity": "S",
+          "element_type": 205,
+          "avatar_profession": 3,
+          "sub_element_type": 0,
+          "role_square_url": "https://act-webstatic.hoyoverse.com/game_record/zzzv2/role_square_avatar/role_square_avatar_1501.png"
+        },
+        {
+          "id": 1491,
+          "level": 60,
+          "rank": 0,
+          "rarity": "S",
+          "element_type": 200,
+          "avatar_profession": 4,
+          "sub_element_type": 0,
+          "role_square_url": "https://act-webstatic.hoyoverse.com/game_record/zzzv2/role_square_avatar/role_square_avatar_1491_3114911.png"
+        },
+        {
+          "id": 1511,
+          "level": 60,
+          "rank": 0,
+          "rarity": "S",
+          "element_type": 205,
+          "avatar_profession": 2,
+          "sub_element_type": 0,
+          "role_square_url": "https://act-webstatic.hoyoverse.com/game_record/zzzv2/role_square_avatar/role_square_avatar_1511_3115111.png"
+        }
+      ],
+      "buddy": {
+        "id": 54010,
+        "level": 60,
+        "rarity": "S",
+        "bangboo_rectangle_url": "https://act-webstatic.hoyoverse.com/darkmatter/nap/prod_gf_cn/item_icon_u7f11d/92cfd828e3e9aca149e883b4d00da9ee.png"
+      },
+      "boss": [
+        {
+          "name": "Miasmic Fiend - Unfathomable",
+          "icon": "https://act-webstatic.hoyoverse.com/darkmatter/nap/prod_gf_cn/item_icon_u7f11d/8b51e440e361c444780c1e4d600ebbbe.png",
+          "bg_icon": "https://act-webstatic.hoyoverse.com/game_record/zzzv2/boss_bg/boss_bg_4.png",
+          "race_icon": "https://act-webstatic.hoyoverse.com/darkmatter/nap/prod_gf_cn/item_icon_u7f11d/2be8cb8b884dab184682b00478f7f471.png"
+        }
+      ],
+      "buffer": [
+        {
+          "title": "Deconstruction",
+          "description": "· Agent Anomaly Proficiency <color=#2BAD00>increases by 45</color>.\\n· After inflicting an <color=#FFFFFF>Attribute Anomaly</color> on an enemy, the enemy's DEF <color=#2BAD00>is reduced by 10%</color> for 10s. After triggering <color=#FFFFFF>Disorder</color>, the enemy's DEF <color=#2BAD00>is additionally reduced by 15%</color> for 10s. Repeated triggers reset the duration.",
+          "icon": "https://act-webstatic.hoyoverse.com/darkmatter/nap/prod_gf_cn/item_icon_u7f11d/43f73ffc46f6696a31f6cb60b966febc.png"
+        }
+      ]
+    }
+  ]
+}

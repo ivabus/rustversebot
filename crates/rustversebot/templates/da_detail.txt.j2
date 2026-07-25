@@ -1,0 +1,8 @@
+Deadly Assault — {{ nick_name }}
+Total: {{ total_star }}★ | Score: {{ total_score }}
+{% if rank_percent %}Top: {{ rank_percent }}%
+{% endif %}
+{% for room in rooms %}Room {{ room.index }} — {{ room.boss_name }} | {{ room.star }}★ | Score: {{ room.score }}
+{% if room.buffs %}  Buffs: {{ room.buffs }}
+{% endif %}  Agents: {{ room.agents }}
+{% endfor %}

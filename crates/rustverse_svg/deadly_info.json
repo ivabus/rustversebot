@@ -1,0 +1,1173 @@
+{
+  "id": 69039,
+  "name": "Trial",
+  "priority": 9,
+  "boss_adjust": {
+    "401302": {
+      "atk": 0,
+      "hp": 250,
+      "points": 5000
+    },
+    "900101": {
+      "atk": 0,
+      "hp": 3000,
+      "points": 3000
+    },
+    "900111": {
+      "atk": 0,
+      "hp": 3000,
+      "points": 3000
+    },
+    "1025": {
+      "atk": 2500,
+      "hp": 5000,
+      "points": 2700
+    },
+    "1021": {
+      "atk": 2500,
+      "hp": 5000,
+      "points": 2600
+    },
+    "1317": {
+      "atk": 2500,
+      "hp": 10000,
+      "points": 3500
+    },
+    "401208": {
+      "atk": 0,
+      "hp": 625,
+      "points": 12500
+    },
+    "1020": {
+      "atk": 2500,
+      "hp": 3000,
+      "points": 2600
+    },
+    "400308": {
+      "atk": 0,
+      "hp": 1250,
+      "points": 12500
+    },
+    "1315": {
+      "atk": 2000,
+      "hp": 8000,
+      "points": 3500
+    },
+    "400205": {
+      "atk": 0,
+      "hp": 1000,
+      "points": 10000
+    },
+    "1322": {
+      "atk": 2500,
+      "hp": 10000,
+      "points": 3500
+    },
+    "900117": {
+      "atk": 0,
+      "hp": 3000,
+      "points": 3000
+    },
+    "2019": {
+      "atk": 0,
+      "hp": 2500,
+      "points": 3000
+    },
+    "1018": {
+      "atk": 2500,
+      "hp": 3000,
+      "points": 2600
+    },
+    "400102": {
+      "atk": 0,
+      "hp": 500,
+      "points": 5000
+    },
+    "401215": {
+      "atk": 0,
+      "hp": 1000,
+      "points": 100000
+    },
+    "401306": {
+      "atk": 0,
+      "hp": 500,
+      "points": 10000
+    },
+    "2015": {
+      "atk": 0,
+      "hp": 2500,
+      "points": 3000
+    },
+    "401309": {
+      "atk": 0,
+      "hp": 750,
+      "points": 15000
+    },
+    "900110": {
+      "atk": 0,
+      "hp": 3000,
+      "points": 3000
+    },
+    "3012": {
+      "atk": 0,
+      "hp": 9000,
+      "points": 1500
+    },
+    "400310": {
+      "atk": 0,
+      "hp": 1500,
+      "points": 15000
+    },
+    "400301": {
+      "atk": 0,
+      "hp": 500,
+      "points": 5000
+    },
+    "1316": {
+      "atk": 2000,
+      "hp": 10000,
+      "points": 3500
+    },
+    "1013": {
+      "atk": 2000,
+      "hp": 2500,
+      "points": 2400
+    },
+    "401102": {
+      "atk": 0,
+      "hp": 250,
+      "points": 5000
+    },
+    "900116": {
+      "atk": 0,
+      "hp": 3000,
+      "points": 3000
+    },
+    "400204": {
+      "atk": 0,
+      "hp": 750,
+      "points": 7500
+    },
+    "400309": {
+      "atk": 0,
+      "hp": 1500,
+      "points": 15000
+    },
+    "1028": {
+      "atk": 2500,
+      "hp": 5000,
+      "points": 2700
+    },
+    "401310": {
+      "atk": 0,
+      "hp": 750,
+      "points": 15000
+    },
+    "900122": {
+      "atk": 0,
+      "hp": 3000,
+      "points": 3000
+    },
+    "900203": {
+      "atk": 0,
+      "hp": 3400,
+      "points": 3400
+    },
+    "3022": {
+      "atk": 0,
+      "hp": 9000,
+      "points": 1500
+    },
+    "400101": {
+      "atk": 0,
+      "hp": 500,
+      "points": 5000
+    },
+    "401205": {
+      "atk": 0,
+      "hp": 500,
+      "points": 10000
+    },
+    "1015": {
+      "atk": 2000,
+      "hp": 2500,
+      "points": 2400
+    },
+    "900123": {
+      "atk": 0,
+      "hp": 3000,
+      "points": 3000
+    },
+    "400107": {
+      "atk": 0,
+      "hp": 1250,
+      "points": 12500
+    },
+    "1012": {
+      "atk": 1500,
+      "hp": 2200,
+      "points": 1800
+    },
+    "400202": {
+      "atk": 0,
+      "hp": 500,
+      "points": 5000
+    },
+    "401108": {
+      "atk": 0,
+      "hp": 625,
+      "points": 12500
+    },
+    "3014": {
+      "atk": 0,
+      "hp": 9000,
+      "points": 1500
+    },
+    "900120": {
+      "atk": 0,
+      "hp": 3000,
+      "points": 3000
+    },
+    "400201": {
+      "atk": 0,
+      "hp": 500,
+      "points": 5000
+    },
+    "1305": {
+      "atk": 1300,
+      "hp": 3600,
+      "points": 1000
+    },
+    "401315": {
+      "atk": 0,
+      "hp": 1000,
+      "points": 100000
+    },
+    "1318": {
+      "atk": 2500,
+      "hp": 10000,
+      "points": 3500
+    },
+    "401214": {
+      "atk": 0,
+      "hp": 1000,
+      "points": 100000
+    },
+    "400304": {
+      "atk": 0,
+      "hp": 750,
+      "points": 7500
+    },
+    "900127": {
+      "atk": 0,
+      "hp": 3000,
+      "points": 3000
+    },
+    "1306": {
+      "atk": 1300,
+      "hp": 3600,
+      "points": 1000
+    },
+    "2018": {
+      "atk": 0,
+      "hp": 2500,
+      "points": 3000
+    },
+    "401110": {
+      "atk": 0,
+      "hp": 750,
+      "points": 15000
+    },
+    "3013": {
+      "atk": 0,
+      "hp": 9000,
+      "points": 1500
+    },
+    "401311": {
+      "atk": 0,
+      "hp": 1000,
+      "points": 100000
+    },
+    "3017": {
+      "atk": 0,
+      "hp": 9000,
+      "points": 1500
+    },
+    "3021": {
+      "atk": 0,
+      "hp": 9000,
+      "points": 1500
+    },
+    "401103": {
+      "atk": 0,
+      "hp": 375,
+      "points": 7500
+    },
+    "1019": {
+      "atk": 2500,
+      "hp": 3000,
+      "points": 2600
+    },
+    "401305": {
+      "atk": 0,
+      "hp": 500,
+      "points": 10000
+    },
+    "401314": {
+      "atk": 0,
+      "hp": 1000,
+      "points": 100000
+    },
+    "3024": {
+      "atk": 0,
+      "hp": 9000,
+      "points": 1500
+    },
+    "401106": {
+      "atk": 0,
+      "hp": 500,
+      "points": 10000
+    },
+    "400103": {
+      "atk": 0,
+      "hp": 750,
+      "points": 7500
+    },
+    "401308": {
+      "atk": 0,
+      "hp": 625,
+      "points": 12500
+    },
+    "1313": {
+      "atk": 2000,
+      "hp": 6000,
+      "points": 3500
+    },
+    "1310": {
+      "atk": 1500,
+      "hp": 3600,
+      "points": 1500
+    },
+    "1001": {
+      "atk": -5000,
+      "hp": 1200,
+      "points": 1000
+    },
+    "1008": {
+      "atk": -2000,
+      "hp": 1700,
+      "points": 1200
+    },
+    "3023": {
+      "atk": 0,
+      "hp": 9000,
+      "points": 1500
+    },
+    "1023": {
+      "atk": 2500,
+      "hp": 5000,
+      "points": 2600
+    },
+    "900125": {
+      "atk": 0,
+      "hp": 3000,
+      "points": 3000
+    },
+    "900126": {
+      "atk": 0,
+      "hp": 3000,
+      "points": 3000
+    },
+    "900129": {
+      "atk": 0,
+      "hp": 3000,
+      "points": 3000
+    },
+    "1029": {
+      "atk": 2500,
+      "hp": 5000,
+      "points": 2700
+    },
+    "401212": {
+      "atk": 0,
+      "hp": 1000,
+      "points": 100000
+    },
+    "401301": {
+      "atk": 0,
+      "hp": 250,
+      "points": 5000
+    },
+    "900107": {
+      "atk": 0,
+      "hp": 3000,
+      "points": 3000
+    },
+    "1308": {
+      "atk": 1300,
+      "hp": 3600,
+      "points": 1000
+    },
+    "401209": {
+      "atk": 0,
+      "hp": 750,
+      "points": 15000
+    },
+    "1026": {
+      "atk": 2500,
+      "hp": 5000,
+      "points": 2700
+    },
+    "1027": {
+      "atk": 2500,
+      "hp": 5000,
+      "points": 2700
+    },
+    "3019": {
+      "atk": 0,
+      "hp": 9000,
+      "points": 1500
+    },
+    "401105": {
+      "atk": 0,
+      "hp": 500,
+      "points": 10000
+    },
+    "401114": {
+      "atk": 0,
+      "hp": 1000,
+      "points": 100000
+    },
+    "1314": {
+      "atk": 2000,
+      "hp": 6000,
+      "points": 3500
+    },
+    "1017": {
+      "atk": 2500,
+      "hp": 3000,
+      "points": 2600
+    },
+    "400207": {
+      "atk": 0,
+      "hp": 1250,
+      "points": 12500
+    },
+    "401112": {
+      "atk": 0,
+      "hp": 1000,
+      "points": 100000
+    },
+    "1309": {
+      "atk": 1500,
+      "hp": 3600,
+      "points": 1500
+    },
+    "900115": {
+      "atk": 0,
+      "hp": 3000,
+      "points": 3000
+    },
+    "900121": {
+      "atk": 0,
+      "hp": 3000,
+      "points": 3000
+    },
+    "1024": {
+      "atk": 2500,
+      "hp": 5000,
+      "points": 2700
+    },
+    "400302": {
+      "atk": 0,
+      "hp": 500,
+      "points": 5000
+    },
+    "1014": {
+      "atk": 2000,
+      "hp": 2500,
+      "points": 2400
+    },
+    "1005": {
+      "atk": -2500,
+      "hp": 1700,
+      "points": 1200
+    },
+    "900104": {
+      "atk": 0,
+      "hp": 3000,
+      "points": 3000
+    },
+    "900114": {
+      "atk": 0,
+      "hp": 3000,
+      "points": 3000
+    },
+    "401307": {
+      "atk": 0,
+      "hp": 625,
+      "points": 12500
+    },
+    "2017": {
+      "atk": 0,
+      "hp": 2500,
+      "points": 3000
+    },
+    "1022": {
+      "atk": 2500,
+      "hp": 5000,
+      "points": 2600
+    },
+    "1319": {
+      "atk": 2500,
+      "hp": 10000,
+      "points": 3500
+    },
+    "401312": {
+      "atk": 0,
+      "hp": 1000,
+      "points": 100000
+    },
+    "900119": {
+      "atk": 0,
+      "hp": 3000,
+      "points": 3000
+    },
+    "1301": {
+      "atk": 0,
+      "hp": 3600,
+      "points": 750
+    },
+    "1324": {
+      "atk": 2500,
+      "hp": 10000,
+      "points": 4000
+    },
+    "3018": {
+      "atk": 0,
+      "hp": 9000,
+      "points": 1500
+    },
+    "1320": {
+      "atk": 2500,
+      "hp": 10000,
+      "points": 3500
+    },
+    "400203": {
+      "atk": 0,
+      "hp": 750,
+      "points": 7500
+    },
+    "400208": {
+      "atk": 0,
+      "hp": 1250,
+      "points": 12500
+    },
+    "1323": {
+      "atk": 2500,
+      "hp": 10000,
+      "points": 4000
+    },
+    "2001": {
+      "atk": 8000,
+      "hp": 5000,
+      "points": 200
+    },
+    "3015": {
+      "atk": 0,
+      "hp": 9000,
+      "points": 1500
+    },
+    "400105": {
+      "atk": 0,
+      "hp": 1000,
+      "points": 10000
+    },
+    "400106": {
+      "atk": 0,
+      "hp": 1000,
+      "points": 10000
+    },
+    "401201": {
+      "atk": 0,
+      "hp": 250,
+      "points": 5000
+    },
+    "900102": {
+      "atk": 0,
+      "hp": 3000,
+      "points": 3000
+    },
+    "1004": {
+      "atk": -3000,
+      "hp": 1200,
+      "points": 1000
+    },
+    "1003": {
+      "atk": -3000,
+      "hp": 1200,
+      "points": 1000
+    },
+    "400104": {
+      "atk": 0,
+      "hp": 750,
+      "points": 7500
+    },
+    "400110": {
+      "atk": 0,
+      "hp": 1500,
+      "points": 15000
+    },
+    "401104": {
+      "atk": 0,
+      "hp": 375,
+      "points": 7500
+    },
+    "401107": {
+      "atk": 0,
+      "hp": 625,
+      "points": 12500
+    },
+    "1304": {
+      "atk": 0,
+      "hp": 3600,
+      "points": 750
+    },
+    "900109": {
+      "atk": 0,
+      "hp": 3000,
+      "points": 3000
+    },
+    "401111": {
+      "atk": 0,
+      "hp": 1000,
+      "points": 100000
+    },
+    "401206": {
+      "atk": 0,
+      "hp": 500,
+      "points": 10000
+    },
+    "2010": {
+      "atk": 0,
+      "hp": 2500,
+      "points": 3000
+    },
+    "1006": {
+      "atk": -2500,
+      "hp": 1700,
+      "points": 1200
+    },
+    "401303": {
+      "atk": 0,
+      "hp": 375,
+      "points": 7500
+    },
+    "401204": {
+      "atk": 0,
+      "hp": 375,
+      "points": 7500
+    },
+    "3025": {
+      "atk": 0,
+      "hp": 9000,
+      "points": 1500
+    },
+    "900108": {
+      "atk": 0,
+      "hp": 3000,
+      "points": 3000
+    },
+    "900124": {
+      "atk": 0,
+      "hp": 3000,
+      "points": 3000
+    },
+    "401202": {
+      "atk": 0,
+      "hp": 250,
+      "points": 5000
+    },
+    "2002": {
+      "atk": 11000,
+      "hp": 16000,
+      "points": 200
+    },
+    "400305": {
+      "atk": 0,
+      "hp": 1000,
+      "points": 10000
+    },
+    "900105": {
+      "atk": 0,
+      "hp": 3000,
+      "points": 3000
+    },
+    "401101": {
+      "atk": 0,
+      "hp": 250,
+      "points": 5000
+    },
+    "900112": {
+      "atk": 0,
+      "hp": 3000,
+      "points": 3000
+    },
+    "900106": {
+      "atk": 0,
+      "hp": 3000,
+      "points": 3000
+    },
+    "400210": {
+      "atk": 0,
+      "hp": 1500,
+      "points": 15000
+    },
+    "401304": {
+      "atk": 0,
+      "hp": 375,
+      "points": 7500
+    },
+    "1312": {
+      "atk": 1500,
+      "hp": 6000,
+      "points": 3500
+    },
+    "1009": {
+      "atk": -1000,
+      "hp": 2200,
+      "points": 1800
+    },
+    "3020": {
+      "atk": 0,
+      "hp": 9000,
+      "points": 1500
+    },
+    "1002": {
+      "atk": -3000,
+      "hp": 1200,
+      "points": 1000
+    },
+    "900103": {
+      "atk": 0,
+      "hp": 3000,
+      "points": 3000
+    },
+    "900201": {
+      "atk": 0,
+      "hp": 3300,
+      "points": 3300
+    },
+    "3011": {
+      "atk": 0,
+      "hp": 9000,
+      "points": 1500
+    },
+    "1016": {
+      "atk": 2000,
+      "hp": 2500,
+      "points": 2400
+    },
+    "900202": {
+      "atk": 0,
+      "hp": 3300,
+      "points": 3300
+    },
+    "2014": {
+      "atk": 0,
+      "hp": 2500,
+      "points": 3000
+    },
+    "1302": {
+      "atk": 0,
+      "hp": 3600,
+      "points": 750
+    },
+    "2012": {
+      "atk": 0,
+      "hp": 2500,
+      "points": 3000
+    },
+    "400109": {
+      "atk": 0,
+      "hp": 1500,
+      "points": 15000
+    },
+    "400209": {
+      "atk": 0,
+      "hp": 1500,
+      "points": 15000
+    },
+    "400303": {
+      "atk": 0,
+      "hp": 750,
+      "points": 7500
+    },
+    "1321": {
+      "atk": 2500,
+      "hp": 10000,
+      "points": 3500
+    },
+    "2013": {
+      "atk": 0,
+      "hp": 2500,
+      "points": 3000
+    },
+    "401210": {
+      "atk": 0,
+      "hp": 750,
+      "points": 15000
+    },
+    "900130": {
+      "atk": 0,
+      "hp": 3000,
+      "points": 3000
+    },
+    "400307": {
+      "atk": 0,
+      "hp": 1250,
+      "points": 12500
+    },
+    "401115": {
+      "atk": 0,
+      "hp": 1000,
+      "points": 100000
+    },
+    "1011": {
+      "atk": 800,
+      "hp": 2200,
+      "points": 1800
+    },
+    "401313": {
+      "atk": 0,
+      "hp": 1000,
+      "points": 100000
+    },
+    "900113": {
+      "atk": 0,
+      "hp": 3000,
+      "points": 3000
+    },
+    "401213": {
+      "atk": 0,
+      "hp": 1000,
+      "points": 100000
+    },
+    "900118": {
+      "atk": 0,
+      "hp": 3000,
+      "points": 3000
+    },
+    "401109": {
+      "atk": 0,
+      "hp": 750,
+      "points": 15000
+    },
+    "401113": {
+      "atk": 0,
+      "hp": 1000,
+      "points": 100000
+    },
+    "1007": {
+      "atk": -2000,
+      "hp": 1700,
+      "points": 1200
+    },
+    "1303": {
+      "atk": 0,
+      "hp": 3600,
+      "points": 750
+    },
+    "3016": {
+      "atk": 0,
+      "hp": 9000,
+      "points": 1500
+    },
+    "2011": {
+      "atk": 0,
+      "hp": 2500,
+      "points": 3000
+    },
+    "1307": {
+      "atk": 1300,
+      "hp": 3600,
+      "points": 1000
+    },
+    "401203": {
+      "atk": 0,
+      "hp": 375,
+      "points": 7500
+    },
+    "900128": {
+      "atk": 0,
+      "hp": 3000,
+      "points": 3000
+    },
+    "2016": {
+      "atk": 0,
+      "hp": 2500,
+      "points": 3000
+    },
+    "1010": {
+      "atk": 0,
+      "hp": 2200,
+      "points": 1800
+    },
+    "400306": {
+      "atk": 0,
+      "hp": 1000,
+      "points": 10000
+    },
+    "1311": {
+      "atk": 1500,
+      "hp": 6000,
+      "points": 3500
+    },
+    "401207": {
+      "atk": 0,
+      "hp": 625,
+      "points": 12500
+    },
+    "400108": {
+      "atk": 0,
+      "hp": 1250,
+      "points": 12500
+    },
+    "400206": {
+      "atk": 0,
+      "hp": 1000,
+      "points": 10000
+    },
+    "401211": {
+      "atk": 0,
+      "hp": 1000,
+      "points": 100000
+    }
+  },
+  "zone_type": 1001,
+  "modes": [
+    {
+      "id": 69039,
+      "zone_type": 1001,
+      "zone": {
+        "6903902": {
+          "name": "Notorious - Marionette",
+          "stage_num": 2,
+          "monster_level": 70,
+          "layer_buff": {
+            "69013502": {
+              "title": "",
+              "desc": ""
+            },
+            "69011204": {
+              "title": "",
+              "desc": "· DMG dealt by Boss enemies increases by 25%. When a clone is <color=#FFAF2C>destroyed</color> or when the main body is <color=#FFAF2C>stunned</color>, 1/5 stacks of <color=#FFFFFF>On Thin Ice</color> is inflicted on Boss enemies respectively. Each stack of <color=#FFFFFF>On Thin Ice</color> decreases the DMG dealt by the Boss by 5% and increases the <color=#98EFF0>Ice DMG</color> and <color=#FE437E>Ether DMG</color> dealt to the Boss by Agents by <color=#FFAF2C>10%</color>. <color=#FFFFFF>On Thin Ice</color> stacks will be reset when the enemy recovers from Stun."
+            },
+            "69010109": {
+              "title": "",
+              "desc": "· Successfully <color=#FFAF2C>destroying a dance partner</color> grants <color=#FFAF2C>200 Performance Points</color>. A maximum of 5,000 Performance Points can be obtained."
+            }
+          },
+          "selectable_buff": {
+            "69013902": {
+              "title": "Onslaught",
+              "desc": "· <color=#FFFFFF>Attack</color> specialty Agents' <color=#FE437E>Ether DMG</color> and <color=#98EFF0>Ice DMG</color> <color=#2BAD00>increases by 35%</color>.\n· <color=#FFFFFF>Basic Attack</color> and <color=#FFFFFF>Ultimate</color> <color=#2BAD00>deal 20%</color> more DMG, ignoring <color=#2BAD00>10%</color> of the enemy's <color=#2BAD00>DEF</color>. After launching a <color=#FFFFFF>Chain Attack</color>/<color=#FFFFFF>EX Special Attack</color>, the Agent's CRIT DMG <color=#2BAD00>increases by 45%</color> for 20s. Repeated triggers reset the duration."
+            },
+            "69014102": {
+              "title": "Shatter",
+              "desc": "· Agent Sheer DMG <color=#2BAD00>increases by 20%</color>, and HP <color=#2BAD00>increases by 15%</color>.\n· After launching <color=#FFFFFF>EX Special Attack</color>, Agents with the <color=#FFFFFF>Rupture</color> specialty deal <color=#2BAD00>40% bonus</color> CRIT DMG, and their <color=#FFFFFF>EX Special Attack</color> as well as <color=#FFFFFF>Ultimate</color> ignore <color=#2BAD00>15%</color> of enemy <color=#F0D12B>Physical RES</color> and <color=#FE437E>Ether RES</color> for 15s. Repeated triggers reset the duration."
+            },
+            "69013901": {
+              "title": "Northern Wind",
+              "desc": "· Agent ATK <color=#2BAD00>increases by 10%</color>. After inflicting <color=#FFFFFF>Vortex</color> on an enemy, the whole squad's ATK <color=#2BAD00>increases by 5%</color>, and Anomaly Proficiency <color=#2BAD00>increases by 10</color>, lasting for 15s, stacking up to 3 times. Repeated triggers reset the duration.\n· After inflicting a <color=#A6C5FD>Wind</color> or <color=#98EFF0>Ice</color> Attribute Anomaly on an enemy, the enemy's DEF <color=#2BAD00> decreases by 10%</color> for 20s. Repeated triggers reset the duration."
+            }
+          },
+          "child": [],
+          "layer_room": {
+            "69039021": {
+              "monster_icon": "https://static.nanoka.cc/assets/zzz/IconMonster_NotoriousMarionette.webp",
+              "monster_list": {
+                "11861": {
+                  "id": 300121,
+                  "name": "Notorious - Marionette",
+                  "image": "https://static.nanoka.cc/assets/zzz/Monster_NotoriousMarionette.webp",
+                  "element": {
+                    "ice": 1,
+                    "fire": 0,
+                    "electric": 0,
+                    "ether": 1,
+                    "physical": 0,
+                    "wind": 0
+                  },
+                  "stats": {
+                    "hp": 194466335.0,
+                    "attack": 4108.0,
+                    "defence": 952.8,
+                    "stun": 14327.95,
+                    "attribute_infliction": 10.0
+                  }
+                }
+              },
+              "monster_weakness": {
+                "202": "Ice",
+                "205": "Ether"
+              },
+              "waves_num": 1
+            }
+          },
+          "goal_type": 2,
+          "ss_rank_goal": 0,
+          "s_rank_goal": 2700,
+          "a_rank_goal": 1889,
+          "b_rank_goal": 810
+        },
+        "6903903": {
+          "name": "Ye Shiyuan the Thrall",
+          "stage_num": 3,
+          "monster_level": 70,
+          "layer_buff": {
+            "69012604": {
+              "title": "",
+              "desc": "· When Sobek and The Thrall alternate turns, The Thrall gains 1 stack of <color=#FFFFFF>Contract</color> and <color=#FFFFFF>Self-Sacrifice</color>. Contract and Self-Sacrifice can stack up to 3 times. Each stack of Contract increases All-Attribute Anomaly Buildup RES by <color=#FFAF2C>15%</color>, each stack of Self-Sacrifice increases The Thrall's Stun DMG Multiplier by <color=#FFAF2C>10%</color>. When The Thrall is Stunned, CRIT DMG taken increases by <color=#FFAF2C>50%</color>."
+            },
+            "69012603": {
+              "title": "",
+              "desc": "· When Agents inflict <color=#FFAF2C>Weakened</color> on Sobek and The Thrall, <color=#FFAF2C>1,500 Performance Points</color> will be awarded. When an Agent <color=#FFAF2C>eliminates Sobek</color>, <color=#FFAF2C>2,000 Performance Points</color> will be awarded. Up to a maximum of 5,000 Performance Points can be earned."
+            },
+            "69012102": {
+              "title": "",
+              "desc": ""
+            },
+            "69013004": {
+              "title": "",
+              "desc": "· Suitable for Agents with <IconMap:Icon_AvatarClass_Stun><color=#FFAF2C>Stun</color> specialty."
+            }
+          },
+          "selectable_buff": {
+            "69013901": {
+              "title": "Northern Wind",
+              "desc": "· Agent ATK <color=#2BAD00>increases by 10%</color>. After inflicting <color=#FFFFFF>Vortex</color> on an enemy, the whole squad's ATK <color=#2BAD00>increases by 5%</color>, and Anomaly Proficiency <color=#2BAD00>increases by 10</color>, lasting for 15s, stacking up to 3 times. Repeated triggers reset the duration.\n· After inflicting a <color=#A6C5FD>Wind</color> or <color=#98EFF0>Ice</color> Attribute Anomaly on an enemy, the enemy's DEF <color=#2BAD00> decreases by 10%</color> for 20s. Repeated triggers reset the duration."
+            },
+            "69013902": {
+              "title": "Onslaught",
+              "desc": "· <color=#FFFFFF>Attack</color> specialty Agents' <color=#FE437E>Ether DMG</color> and <color=#98EFF0>Ice DMG</color> <color=#2BAD00>increases by 35%</color>.\n· <color=#FFFFFF>Basic Attack</color> and <color=#FFFFFF>Ultimate</color> <color=#2BAD00>deal 20%</color> more DMG, ignoring <color=#2BAD00>10%</color> of the enemy's <color=#2BAD00>DEF</color>. After launching a <color=#FFFFFF>Chain Attack</color>/<color=#FFFFFF>EX Special Attack</color>, the Agent's CRIT DMG <color=#2BAD00>increases by 45%</color> for 20s. Repeated triggers reset the duration."
+            },
+            "69014102": {
+              "title": "Shatter",
+              "desc": "· Agent Sheer DMG <color=#2BAD00>increases by 20%</color>, and HP <color=#2BAD00>increases by 15%</color>.\n· After launching <color=#FFFFFF>EX Special Attack</color>, Agents with the <color=#FFFFFF>Rupture</color> specialty deal <color=#2BAD00>40% bonus</color> CRIT DMG, and their <color=#FFFFFF>EX Special Attack</color> as well as <color=#FFFFFF>Ultimate</color> ignore <color=#2BAD00>15%</color> of enemy <color=#F0D12B>Physical RES</color> and <color=#FE437E>Ether RES</color> for 15s. Repeated triggers reset the duration."
+            }
+          },
+          "child": [],
+          "layer_room": {
+            "69039031": {
+              "monster_icon": "https://static.nanoka.cc/assets/zzz/IconMonster_Awakener.webp",
+              "monster_list": {
+                "31353": {
+                  "id": 30042,
+                  "name": "Ye Shiyuan the Thrall",
+                  "image": "https://static.nanoka.cc/assets/zzz/Monster_Awakener.webp",
+                  "element": {
+                    "ice": 1,
+                    "fire": 0,
+                    "electric": -1,
+                    "ether": 0,
+                    "physical": 1,
+                    "wind": 1
+                  },
+                  "stats": {
+                    "hp": 197396989.0,
+                    "attack": 4108.0,
+                    "defence": 952.8,
+                    "stun": 14068.040000000005,
+                    "attribute_infliction": 10.0
+                  }
+                }
+              },
+              "monster_weakness": {
+                "204": "Wind",
+                "200": "Physical",
+                "202": "Ice"
+              },
+              "waves_num": 1
+            }
+          },
+          "goal_type": 2,
+          "ss_rank_goal": 0,
+          "s_rank_goal": 2700,
+          "a_rank_goal": 1889,
+          "b_rank_goal": 810
+        },
+        "6903901": {
+          "name": "Girtablullu",
+          "stage_num": 1,
+          "monster_level": 70,
+          "layer_buff": {
+            "69013903": {
+              "title": "69013903_Title",
+              "desc": "· Whenever an Agent inflicts an Anomaly on the Boss, they apply 1 stack of Shadow to it. Each stack of Shadow increases the Boss's <color=#2BAD00>Anomaly DMG taken by 7.5%</color> and additionally increases its Vortex DMG taken <color=#2BAD00>by 5%</color> for <color=#2BAD00>10s</color>. Shadow can stack up to <color=#2BAD00>3 times</color>. The duration of each stack is calculated separately. During <Term:2000001>Corruptive Barrier</Term>, applying Shadow to the Boss additionally reduces the <color=#FFAF2C>Corruptive Barrier</color> by <color=#2BAD00>20% of its max value</color> and accumulates <color=#2BAD00>15% Daze</color> (cannot be repeatedly triggered within 15s). When the <color=#FFAF2C>Corruptive Barrier</color> is broken, the Boss immediately gains max stacks of Shadow. When the Boss is Stunned, all Shadow stacks are removed and an equal number of Laceration stacks are applied. Each stack of Laceration reduces the Boss's <color=#2BAD00>Anomaly Buildup RES by 5%</color> and increases its <color=#2BAD00>Stun DMG Multiplier by 10%</color>. When the Boss's Stunned state ends, all Laceration stacks are removed."
+            },
+            "69013904": {
+              "title": "69013904_Title",
+              "desc": "· Each successful parry against Girtablullu's consecutive downward smashes after it activates Corruptive Barrier grants <color=#FFAF2C>1,000 Performance Points</color>. Successfully triggering a <Term:2000004>Chain Parry</Term> against the final slam grants an additional <color=#FFAF2C>1,000 Performance Points</color>. <color=#FFAF2C>Successfully breaking the Corruptive Barrier</color> grants <color=#FFAF2C>1,500 Performance Points</color>. Maximum obtainable Performance Points: 5,000."
+            },
+            "69013003": {
+              "title": "",
+              "desc": "· Suitable for Agents with <IconMap:Icon_AvatarClass_Anomaly><color=#FFAF2C>Anomaly</color> specialty."
+            }
+          },
+          "selectable_buff": {
+            "69014102": {
+              "title": "Shatter",
+              "desc": "· Agent Sheer DMG <color=#2BAD00>increases by 20%</color>, and HP <color=#2BAD00>increases by 15%</color>.\n· After launching <color=#FFFFFF>EX Special Attack</color>, Agents with the <color=#FFFFFF>Rupture</color> specialty deal <color=#2BAD00>40% bonus</color> CRIT DMG, and their <color=#FFFFFF>EX Special Attack</color> as well as <color=#FFFFFF>Ultimate</color> ignore <color=#2BAD00>15%</color> of enemy <color=#F0D12B>Physical RES</color> and <color=#FE437E>Ether RES</color> for 15s. Repeated triggers reset the duration."
+            },
+            "69013901": {
+              "title": "Northern Wind",
+              "desc": "· Agent ATK <color=#2BAD00>increases by 10%</color>. After inflicting <color=#FFFFFF>Vortex</color> on an enemy, the whole squad's ATK <color=#2BAD00>increases by 5%</color>, and Anomaly Proficiency <color=#2BAD00>increases by 10</color>, lasting for 15s, stacking up to 3 times. Repeated triggers reset the duration.\n· After inflicting a <color=#A6C5FD>Wind</color> or <color=#98EFF0>Ice</color> Attribute Anomaly on an enemy, the enemy's DEF <color=#2BAD00> decreases by 10%</color> for 20s. Repeated triggers reset the duration."
+            },
+            "69013902": {
+              "title": "Onslaught",
+              "desc": "· <color=#FFFFFF>Attack</color> specialty Agents' <color=#FE437E>Ether DMG</color> and <color=#98EFF0>Ice DMG</color> <color=#2BAD00>increases by 35%</color>.\n· <color=#FFFFFF>Basic Attack</color> and <color=#FFFFFF>Ultimate</color> <color=#2BAD00>deal 20%</color> more DMG, ignoring <color=#2BAD00>10%</color> of the enemy's <color=#2BAD00>DEF</color>. After launching a <color=#FFFFFF>Chain Attack</color>/<color=#FFFFFF>EX Special Attack</color>, the Agent's CRIT DMG <color=#2BAD00>increases by 45%</color> for 20s. Repeated triggers reset the duration."
+            }
+          },
+          "child": [],
+          "layer_room": {
+            "69039011": {
+              "monster_icon": "https://static.nanoka.cc/assets/zzz/IconMonster_Girtablu.webp",
+              "monster_list": {
+                "31661": {
+                  "id": 40006,
+                  "name": "Girtablullu",
+                  "image": "https://static.nanoka.cc/assets/zzz/Monster_Girtablu.webp",
+                  "element": {
+                    "ice": 0,
+                    "fire": 0,
+                    "electric": 0,
+                    "ether": 0,
+                    "physical": 0,
+                    "wind": 1
+                  },
+                  "stats": {
+                    "hp": 166501754.0,
+                    "attack": 4108.0,
+                    "defence": 952.8,
+                    "stun": 21037.2,
+                    "attribute_infliction": 10.0
+                  }
+                }
+              },
+              "monster_weakness": {
+                "204": "Wind"
+              },
+              "waves_num": 1
+            }
+          },
+          "goal_type": 2,
+          "ss_rank_goal": 0,
+          "s_rank_goal": 2700,
+          "a_rank_goal": 1889,
+          "b_rank_goal": 810
+        }
+      }
+    }
+  ]
+}

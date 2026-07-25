@@ -1,0 +1,27 @@
+{% set width = 384 %}
+{% set height = 144 + 65 * (top | length) %}
+{% set total_score = height * 4 %}
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {{width}} {{height}}" fill="black">
+	{% include "defs.j2" %}
+
+
+	<rect fill="black" x="0" y="0" width="{{width}}" height="{{height}}" />
+	<rect fill="url(#background)" x="0" y="0" width="{{width}}" height="{{height}}"/>
+	<rect fill="#222" mask="url(#bg-img)" x="0" y="0" width="{{width}}" height="{{height}}" />
+
+	<image href="image/da.webp" width="{{ width | int / 2 }}" x="{{ width | int / 4 }}" y="25" />
+
+
+	{% for player in top %}
+		<svg y="{{150 + loop.index0 * 65}}" x="10">
+			<rect x="-5" y="-5" width="{{width - 10}}" height="55" rx="17.5" ry="17.5" fill="url(#box-bg)" stroke="url(#box-stroke)" />
+			<rect x="-5" y="-5" width="{{width - 10}}" height="55" rx="17.5" ry="17.5" fill="url(#box-pattern)" stroke="url({% if (loop.index0 == 0) %}#Rating-S+{% else %}#box-stroke{% endif %})" />
+			<text text-anchor="start" dominant-baseline="middle" {% if (loop.index0 == 0) %} style="fill: url(#Rating-S+) !important" {% endif %}font-size="25" x="4" y="25" >{{loop.index0 + 1}}</text>
+			<text font-family="Mont" text-anchor="start" dominant-baseline="middle" style="stroke-width: 0.5; {% if (loop.index0 == 0) %} fill: url(#Rating-S+) !important; {% endif %}"  font-size="20" x="30" y="25" >{{player.nickname}}</text>
+			<text text-anchor="end" dominant-baseline="middle" style="stroke-width: 0.5; {% if (loop.index0 == 0) %} fill: url(#Rating-S+) !important; {% endif %}"  font-size="20" x="{{width | int - 25}}" y="25" >{{player.score}}</text>
+			<text text-anchor="end" dominant-baseline="middle" style="stroke-width: 0.5; {% if (loop.index0 == 0) %} fill: url(#Rating-S+) !important; {% endif %}"  font-size="20" x="{{width | int - 140}}" y="25" >{{player.stars}} ×</text>
+			<image href="image/star-icon.png" width="25" x="250" y="10" />
+		</svg>
+	{% endfor %}
+	<text class="watermark" text-anchor="end" dominant-baseline="middle" font-size="8" x="{{width-4}}" y="{{height - 4}}">@rustversebot</text>
+</svg>
