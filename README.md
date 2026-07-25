@@ -126,9 +126,13 @@ nix build .#rustversebot
 nix run .#rustversebot
 ```
 
-GitHub Actions подключает Attic как substituter перед сборкой, собирает тот же
-пакет на нативном ARM64 macOS runner и отправляет недостающий полный Nix closure
-обратно в Attic. Workflow использует GitHub Environment с именем `Actions`.
+GitHub Actions подключает Attic как substituter перед сборкой. Сначала workflow
+собирает и отправляет отдельный `cargoArtifacts` со скомпилированными Cargo
+dependencies, затем собирает бота и отправляет его runtime closure. Пока
+`Cargo.lock`, Cargo manifests, toolchain и системные build inputs не меняются,
+следующие сборки получают dependency artifacts из Attic и компилируют только
+изменившийся код workspace. Сборка выполняется на нативном ARM64 macOS runner.
+Workflow использует GitHub Environment с именем `Actions`.
 Создайте в нём environment secrets:
 
 - `ATTIC_SERVER` — URL сервера, например `https://attic.example.org`;

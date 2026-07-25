@@ -28,7 +28,11 @@ jobs:
           : "${ATTIC_TOKEN:?ATTIC_TOKEN secret is required}"
           nix run .#attic -- login github-actions "$ATTIC_SERVER" "$ATTIC_TOKEN"
           nix run .#attic -- use "$ATTIC_CACHE"
+      - name: Build cached Cargo dependencies
+        run: nix build .#cargoArtifacts --out-link result-deps --print-build-logs
+      - name: Push Cargo dependency closure to Attic
+        run: nix run .#attic -- push "$ATTIC_CACHE" ./result-deps
       - name: Build bot
         run: nix build .#rustversebot --print-build-logs
-      - name: Push closure to Attic
+      - name: Push bot closure to Attic
         run: nix run .#attic -- push "$ATTIC_CACHE" ./result
