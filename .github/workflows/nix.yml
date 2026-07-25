@@ -16,13 +16,16 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: DeterminateSystems/determinate-nix-action@v3
-      - name: Build bot
-        run: nix build .#rustversebot --print-build-logs
-      - name: Log in to Attic
+      - name: Configure Attic cache
         env:
+          ATTIC_CACHE: ${{ secrets.ATTIC_CACHE }}
           ATTIC_SERVER: ${{ secrets.ATTIC_SERVER }}
           ATTIC_TOKEN: ${{ secrets.ATTIC_TOKEN }}
-        run: nix run .#attic -- login github-actions "$ATTIC_SERVER" "$ATTIC_TOKEN"
+        run: |
+          nix run .#attic -- login github-actions "$ATTIC_SERVER" "$ATTIC_TOKEN"
+          nix run .#attic -- use "$ATTIC_CACHE"
+      - name: Build bot
+        run: nix build .#rustversebot --print-build-logs
       - name: Push closure to Attic
         env:
           ATTIC_CACHE: ${{ secrets.ATTIC_CACHE }}

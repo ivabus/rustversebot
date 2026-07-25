@@ -126,8 +126,9 @@ nix build .#rustversebot
 nix run .#rustversebot
 ```
 
-GitHub Actions собирает тот же пакет на нативном ARM64 macOS runner и отправляет
-полное Nix closure в Attic. В настройках репозитория создайте secrets:
+GitHub Actions подключает Attic как substituter перед сборкой, собирает тот же
+пакет на нативном ARM64 macOS runner и отправляет недостающий полный Nix closure
+обратно в Attic. В настройках репозитория создайте secrets:
 
 - `ATTIC_SERVER` — URL сервера, например `https://attic.example.org`;
 - `ATTIC_CACHE` — имя кэша, например `rustversebot`;

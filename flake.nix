@@ -3,14 +3,10 @@
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-26.05";
-    attic = {
-      url = "github:zhaofengli/attic";
-      inputs.nixpkgs.follows = "nixpkgs";
-    };
   };
 
   outputs =
-    { nixpkgs, attic, ... }:
+    { nixpkgs, ... }:
     let
       system = "aarch64-darwin";
       pkgs = import nixpkgs { inherit system; };
@@ -74,7 +70,7 @@
         };
         attic = {
           type = "app";
-          program = "${attic.packages.${system}.attic-client}/bin/attic";
+          program = "${pkgs.attic-client}/bin/attic";
         };
       };
 
@@ -87,7 +83,7 @@
           pkgs.rustc
           pkgs.rustfmt
           pkgs.clippy
-          attic.packages.${system}.attic-client
+          pkgs.attic-client
         ];
       };
     };
