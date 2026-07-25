@@ -78,6 +78,8 @@ impl SeasonPosition {
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct IndexedSeason {
     id: u64,
+    sequence_id: u64,
+    is_test: bool,
     begin_time: String,
     starts_at: DateTime<Utc>,
     ends_at: Option<DateTime<Utc>>,
@@ -98,7 +100,7 @@ fn indexed_season(
     endgame_type: EndgameType,
     sort: u32,
 ) -> Option<IndexedSeason> {
-    if id.len() != 5 || meta.sort != sort {
+    if !(id.len() == 5 || id.len() == 6) || meta.sort != sort {
         return None;
     }
     let id = id.parse::<u64>().ok()?;
@@ -116,8 +118,14 @@ fn indexed_season(
         .as_deref()
         .or(meta.end.as_deref())
         .and_then(parse_nanoka_datetime);
+    let is_test = id >= 100_000;
+    // Test-server IDs are the nominal season ID followed by one extra digit:
+    // 690421 follows 69041, and 620541 follows 62053.
+    let sequence_id = if is_test { id / 10 } else { id };
     Some(IndexedSeason {
         id,
+        sequence_id,
+        is_test,
         begin_time,
         starts_at,
         ends_at,
@@ -131,21 +139,42 @@ fn select_indexed_season(
     position: SeasonPosition,
     now: DateTime<Utc>,
 ) -> Option<IndexedSeason> {
-    let mut entries = seasons
+    let mut production_entries = seasons
         .iter()
         .filter_map(|(id, meta)| indexed_season(id, meta, endgame_type, sort))
+        .filter(|season| !season.is_test)
         .collect::<Vec<_>>();
-    entries.sort_by_key(|season| season.starts_at);
+    production_entries.sort_by_key(|season| season.starts_at);
 
-    let current_index = entries.iter().rposition(|season| {
+    let current_index = production_entries.iter().rposition(|season| {
         season.starts_at <= now && season.ends_at.is_none_or(|end| now < end)
     })?;
-    let selected_index = match position {
-        SeasonPosition::Previous => current_index.checked_sub(1)?,
-        SeasonPosition::Current => current_index,
-        SeasonPosition::Next => current_index.checked_add(1)?,
-    };
-    entries.get(selected_index).cloned()
+    let current = &production_entries[current_index];
+    match position {
+        SeasonPosition::Previous => production_entries
+            .get(current_index.checked_sub(1)?)
+            .cloned(),
+        SeasonPosition::Current => Some(current.clone()),
+        SeasonPosition::Next => {
+            let mut test_entries = seasons
+                .iter()
+                .filter_map(|(id, meta)| indexed_season(id, meta, endgame_type, sort))
+                .filter(|season| season.is_test && season.sequence_id > current.sequence_id)
+                .collect::<Vec<_>>();
+            test_entries.sort_by_key(|season| season.sequence_id);
+
+            if let Some(test) = test_entries.first() {
+                // Beta IDs encode their production counterpart with one
+                // trailing digit. Do not jump from 69041 to 690431 when the
+                // immediate 690421 preview is unavailable.
+                return (test.sequence_id == current.sequence_id + 1).then(|| test.clone());
+            }
+
+            // Outside a beta window, retain the established production index
+            // behaviour: its direct chronological neighbour is /next.
+            production_entries.get(current_index + 1).cloned()
+        }
+    }
 }
 
 fn indexed_season_date(season: &IndexedSeason) -> &str {
@@ -1672,6 +1701,68 @@ mod tests {
             ),
         ]);
         let now = Utc.with_ymd_and_hms(2026, 6, 20, 0, 0, 0).unwrap();
+
+        assert!(
+            select_indexed_season(
+                &seasons,
+                EndgameType::DeadlyAssault,
+                9,
+                SeasonPosition::Next,
+                now,
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn next_season_uses_the_immediate_test_server_preview() {
+        let seasons = HashMap::from([
+            (
+                "69040".to_owned(),
+                season_meta(9, "2026-07-03 04:00:00", "2026-07-17 04:00:00"),
+            ),
+            (
+                "69041".to_owned(),
+                season_meta(9, "2026-07-17 04:00:00", "2026-07-29 04:00:00"),
+            ),
+            (
+                "690421".to_owned(),
+                season_meta(9, "2026-06-10 04:00:00", "2026-08-19 03:59:59"),
+            ),
+            (
+                "690431".to_owned(),
+                season_meta(9, "2026-06-10 04:00:00", "2026-08-19 03:59:59"),
+            ),
+        ]);
+        let now = Utc.with_ymd_and_hms(2026, 7, 25, 0, 0, 0).unwrap();
+
+        assert_eq!(
+            select_indexed_season(
+                &seasons,
+                EndgameType::DeadlyAssault,
+                9,
+                SeasonPosition::Next,
+                now,
+            )
+            .unwrap()
+            .id,
+            690421
+        );
+    }
+
+    #[test]
+    fn next_season_does_not_skip_a_missing_test_preview() {
+        let seasons = HashMap::from([
+            (
+                "69041".to_owned(),
+                season_meta(9, "2026-07-17 04:00:00", "2026-07-29 04:00:00"),
+            ),
+            (
+                "690431".to_owned(),
+                season_meta(9, "2026-06-10 04:00:00", "2026-08-19 03:59:59"),
+            ),
+        ]);
+        let now = Utc.with_ymd_and_hms(2026, 7, 25, 0, 0, 0).unwrap();
 
         assert!(
             select_indexed_season(

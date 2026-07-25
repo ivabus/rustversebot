@@ -193,6 +193,7 @@ pub struct EndgameInfoMonster {
 #[derive(Debug, Clone, Serialize, PartialEq)]
 pub struct DeadlyInfoRoom {
     pub id: String,
+    pub is_complex: bool,
     pub name: String,
     pub monster: EndgameInfoMonster,
     pub mechanics: Vec<String>,
@@ -249,7 +250,9 @@ pub struct ShiyuInfoView {
 
 const SHIYU_MECHANICS_WRAP_WIDTH: usize = 90;
 const SHIYU_TITLE_TOP_GAP: u32 = 4;
-const DEADLY_MECHANICS_Y: u32 = 58;
+const DEADLY_BUFF_WRAP_WIDTH: usize = 38;
+const DEADLY_MECHANICS_Y: u32 = 59;
+const DEADLY_MECHANICS_WITHOUT_ELEMENTS_Y: u32 = 43;
 
 fn season_date(value: Option<&str>) -> Option<String> {
     let date = value?.split_whitespace().next()?;
@@ -330,20 +333,33 @@ pub fn prepare_deadly_info_with_begin_time(
     data: &BossSeasonDetail,
     begin_time: Option<&str>,
 ) -> anyhow::Result<DeadlyInfoView> {
-    let mode = data
-        .modes
-        .first()
-        .context("Deadly Assault season has no modes")?;
+    anyhow::ensure!(!data.modes.is_empty(), "Deadly Assault season has no modes");
 
-    let mut zones = mode.zone.iter().collect::<Vec<_>>();
-    zones.sort_by(|(left_key, left), (right_key, right)| {
-        left.stage_num
-            .cmp(&right.stage_num)
-            .then_with(|| left_key.cmp(right_key))
-    });
+    // The primary mode has the season ID.  Beta seasons may prepend a second
+    // mode for the complex boss; render it as an additional room after the
+    // regular three rooms rather than silently dropping either mode.
+    let mut zones = data
+        .modes
+        .iter()
+        .flat_map(|mode| {
+            mode.zone
+                .iter()
+                .map(move |(zone_id, zone)| (mode.id != data.id, mode.id, zone_id, zone))
+        })
+        .collect::<Vec<_>>();
+    zones.sort_by(
+        |(left_is_extra, left_mode, left_key, left),
+         (right_is_extra, right_mode, right_key, right)| {
+            left_is_extra
+                .cmp(right_is_extra)
+                .then_with(|| left.stage_num.cmp(&right.stage_num))
+                .then_with(|| left_mode.cmp(right_mode))
+                .then_with(|| left_key.cmp(right_key))
+        },
+    );
 
     let mut buffs = BTreeMap::new();
-    for (_, zone) in &zones {
+    for (_, _, _, zone) in &zones {
         for (id, buff) in &zone.selectable_buff {
             if !buff.title.is_empty() || !buff.desc.is_empty() {
                 buffs
@@ -354,7 +370,7 @@ pub fn prepare_deadly_info_with_begin_time(
     }
 
     let mut rooms = Vec::new();
-    for (zone_id, zone) in zones {
+    for (is_complex, _, zone_id, zone) in zones {
         let monster = sorted_monsters(zone)
             .into_iter()
             .next()
@@ -368,14 +384,22 @@ pub fn prepare_deadly_info_with_begin_time(
             .map(|(_, buff)| buff.desc.clone())
             .collect();
 
+        let monster = info_monster(monster);
+        let mechanics_y = if monster.weaknesses.is_empty() && monster.resistances.is_empty() {
+            DEADLY_MECHANICS_WITHOUT_ELEMENTS_Y
+        } else {
+            DEADLY_MECHANICS_Y
+        };
+
         rooms.push(DeadlyInfoRoom {
             id: zone_id.clone(),
+            is_complex,
             name: normalise_deadly_name(&zone.name, &monster.name),
-            monster: info_monster(monster),
+            monster,
             mechanics,
             layout_y: 0,
             layout_height: 0,
-            mechanics_y: 0,
+            mechanics_y,
         });
     }
 
@@ -383,14 +407,13 @@ pub fn prepare_deadly_info_with_begin_time(
     let buffs = buffs.into_values().collect::<Vec<_>>();
     let buff_cards_height = buffs
         .iter()
-        .map(|buff| 36 + wrap_game_text_lines(&buff.desc, 40).len() as u32 * 9)
+        .map(|buff| 36 + wrap_game_text_lines(&buff.desc, DEADLY_BUFF_WRAP_WIDTH).len() as u32 * 9)
         .max()
         .unwrap_or(90)
         .max(110);
     let rooms_start = 100 + buff_cards_height + 10;
     let mut next_y = 0;
     for room in &mut rooms {
-        room.mechanics_y = DEADLY_MECHANICS_Y;
         let mechanic_lines = room
             .mechanics
             .iter()
@@ -730,7 +753,42 @@ fn wrap_game_text_lines(text: &str, max_width: usize) -> Vec<String> {
             lines.push(current_line.trim_end().to_owned());
         }
     }
+    close_and_reopen_colors_at_line_breaks(lines)
+}
+
+/// A color span may cover several words and therefore several wrapped lines.
+/// SVG `<tspan>` elements cannot cross the sibling tspans used for line
+/// positioning, so close it on the current line and reopen it on the next.
+fn close_and_reopen_colors_at_line_breaks(lines: Vec<String>) -> Vec<String> {
+    let mut active_colors = Vec::new();
+
     lines
+        .into_iter()
+        .map(|line| {
+            let mut rendered: String = active_colors.concat();
+            rendered.push_str(&line);
+
+            let mut remainder = line.as_str();
+            while let Some(tag_start) = remainder.find('<') {
+                let Some(tag_end) = remainder[tag_start..].find('>') else {
+                    break;
+                };
+                let tag_end = tag_start + tag_end + 1;
+                let tag = &remainder[tag_start..tag_end];
+                if tag.starts_with("<color=") {
+                    active_colors.push(tag.to_owned());
+                } else if tag == "</color>" {
+                    active_colors.pop();
+                }
+                remainder = &remainder[tag_end..];
+            }
+
+            for _ in 0..active_colors.len() {
+                rendered.push_str("</color>");
+            }
+            rendered
+        })
+        .collect()
 }
 
 fn format_game_text(value: String) -> String {
@@ -752,7 +810,25 @@ fn strip_all_tags_filter(value: String) -> String {
 mod tests {
     use std::collections::HashMap;
 
-    use nanoka::types::{Buff, ElementResist, Monster, MonsterStats, Room, SeasonDetail, Zone};
+    use nanoka::types::{
+        BossMode, BossSeasonDetail, Buff, ElementResist, Monster, MonsterStats, Room, SeasonDetail,
+        Zone,
+    };
+
+    use super::wrap_game_text_lines;
+
+    #[test]
+    fn wrapped_colored_text_keeps_its_color_on_every_line() {
+        let lines = wrap_game_text_lines("<color=#2BAD00>increases by 30% faster</color>", 12);
+
+        assert_eq!(
+            lines,
+            vec![
+                "<color=#2BAD00>increases by</color>",
+                "<color=#2BAD00>30% faster</color>",
+            ]
+        );
+    }
 
     fn monster(id: u64, name: &str, hp: f64) -> Monster {
         Monster {
@@ -883,5 +959,54 @@ mod tests {
     fn shiyu_info_fixture_renders_as_png() {
         let png = super::shiyu_info(&shiyu_fixture()).unwrap();
         assert!(png.starts_with(b"\x89PNG\r\n\x1a\n"));
+    }
+
+    #[test]
+    fn deadly_view_includes_the_complex_boss_mode() {
+        let mut regular_zones = HashMap::new();
+        for (index, id) in [69043101, 69043102, 69043103].into_iter().enumerate() {
+            let (key, mut zone) = child_zone(id, index + 1);
+            zone.stage_num = index as u32 + 1;
+            regular_zones.insert(key, zone);
+        }
+        let (complex_key, mut complex_zone) = child_zone(69043201, 4);
+        for room in complex_zone.layer_room.values_mut() {
+            for monster in room.monster_list.values_mut() {
+                monster.element = ElementResist {
+                    ice: 0,
+                    fire: 0,
+                    electric: 0,
+                    ether: 0,
+                    physical: 0,
+                    wind: 0,
+                };
+            }
+        }
+        let detail = BossSeasonDetail {
+            id: 690431,
+            name: "Trial".to_owned(),
+            priority: 9,
+            boss_adjust: HashMap::new(),
+            zone_type: 1001,
+            modes: vec![
+                BossMode {
+                    id: 690432,
+                    zone_type: 1002,
+                    zone: HashMap::from([(complex_key, complex_zone)]),
+                },
+                BossMode {
+                    id: 690431,
+                    zone_type: 1001,
+                    zone: regular_zones,
+                },
+            ],
+        };
+
+        let view = super::prepare_deadly_info(&detail).unwrap();
+        assert_eq!(view.rooms.len(), 4);
+        assert_eq!(view.rooms.last().unwrap().id, "69043201");
+        assert!(view.rooms.last().unwrap().is_complex);
+        assert!(view.rooms[..3].iter().all(|room| !room.is_complex));
+        assert_eq!(view.rooms.last().unwrap().mechanics_y, 43);
     }
 }

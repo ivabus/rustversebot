@@ -249,7 +249,7 @@ impl NanokaClient {
         level: Option<usize>,
     ) -> Result<BossSeasonDetail, Error> {
         let mut detail = self.get_boss_detail(id).await?;
-        detail.scale_stats_in_place(level, 0);
+        detail.scale_all_modes_in_place(level);
         for mode in &mut detail.modes {
             Self::resolve_zone_images(&self.image_base_url, &mut mode.zone);
         }
@@ -308,7 +308,7 @@ impl NanokaClient {
             }
             AnySeasonDetail::Boss(d) => {
                 // Scale stats first, then resolve images
-                d.scale_stats_in_place(None, 0);
+                d.scale_all_modes_in_place(None);
                 for mode in &mut d.modes {
                     Self::resolve_zone_images(&self.image_base_url, &mut mode.zone);
                 }
@@ -513,6 +513,49 @@ mod tests {
         assert_eq!(range.hp_max, (api_hp * 2400.0 / 10000.0).floor());
         assert_eq!(range.points_min, 1000); // last level entry
         assert_eq!(range.points_max, 2000); // cumulative
+    }
+
+    #[test]
+    fn test_complex_boss_uses_dedicated_scaling_series() {
+        let mut boss_adjust = HashMap::new();
+        // `1002` is the advertised complex-mode zone type, but its values
+        // are not the complex boss's level table.
+        boss_adjust.insert(
+            "1002".into(),
+            serde_json::json!({"hp": 1200, "atk": -3000, "points": 1000}),
+        );
+        boss_adjust.insert(
+            "1301".into(),
+            serde_json::json!({"hp": 3600, "atk": 0, "points": 750}),
+        );
+        boss_adjust.insert(
+            "1302".into(),
+            serde_json::json!({"hp": 3600, "atk": 0, "points": 750}),
+        );
+
+        let detail = BossSeasonDetail {
+            id: 690431,
+            name: "Trial".into(),
+            priority: 9,
+            boss_adjust,
+            zone_type: 1002,
+            modes: vec![BossMode {
+                id: 690432,
+                zone_type: 1002,
+                zone: HashMap::new(),
+            }],
+        };
+
+        let rates = detail.level_rates(0);
+        assert_eq!(rates.len(), 2);
+        assert_eq!(rates[0].hp_rate, 3600);
+        assert_eq!(rates[0].points, 750);
+
+        // At level two, this must use 1301 + 1302 rather than key 1002.
+        let scaled = detail.scale_stats(1_000.0, 2_000.0, 2, 0).unwrap();
+        assert_eq!(scaled.hp, 720.0);
+        assert_eq!(scaled.atk, 2_000.0);
+        assert_eq!(scaled.points, 1_500);
     }
 
     #[test]

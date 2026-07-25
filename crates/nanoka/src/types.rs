@@ -333,6 +333,9 @@ impl BossSeasonDetail {
     }
 
     /// Convenience: extract all zones from the first mode.
+    ///
+    /// A beta season can contain an additional mode for its complex boss;
+    /// callers which present the complete season must iterate [`modes`](Self::modes).
     pub fn zones(&self) -> Option<&HashMap<String, Zone>> {
         self.modes.first().map(|m| &m.zone)
     }
@@ -348,9 +351,16 @@ impl BossSeasonDetail {
             None => return Vec::new(),
         };
 
-        // The base key is the zone_type itself (e.g. 1001 for zone_type 1001).
-        // There's an at-mapping in the web UI, but most zone_types map 1:1.
-        let base = mode.zone_type;
+        // The base key usually equals the zone type (e.g. 1001 for the
+        // standard Trial mode). The complex Trial mode advertises zone type
+        // 1002, but its 24-level scaling table is stored under 1301..=1324.
+        // Keep the zone-type fallback for older payloads that do not include
+        // that dedicated table.
+        let base = if mode.zone_type == 1002 && self.boss_adjust.contains_key("1301") {
+            1301
+        } else {
+            mode.zone_type
+        };
 
         let mut rates = Vec::new();
         for offset in 0i64.. {
@@ -479,15 +489,27 @@ impl BossSeasonDetail {
             .sum();
         let atk_mult = 1.0 + rate.atk_rate as f64 / 10000.0;
 
-        for mode in &mut self.modes {
-            for zone in mode.zone.values_mut() {
-                for room in zone.layer_room.values_mut() {
-                    for monster in room.monster_list.values_mut() {
-                        monster.stats.hp = (monster.stats.hp * hp_cumul_mult).floor();
-                        monster.stats.attack = (monster.stats.attack * atk_mult).floor();
-                    }
+        let Some(mode) = self.modes.get_mut(mode_index) else {
+            return;
+        };
+        for zone in mode.zone.values_mut() {
+            for room in zone.layer_room.values_mut() {
+                for monster in room.monster_list.values_mut() {
+                    monster.stats.hp = (monster.stats.hp * hp_cumul_mult).floor();
+                    monster.stats.attack = (monster.stats.attack * atk_mult).floor();
                 }
             }
+        }
+    }
+
+    /// Scale every mode with the adjustment series assigned to that mode.
+    ///
+    /// Most production seasons have one mode. Beta seasons may include a
+    /// separate complex-boss mode with a different `zone_type`, so applying
+    /// the first mode's rates to every room would show incorrect stats.
+    pub fn scale_all_modes_in_place(&mut self, level: Option<usize>) {
+        for mode_index in 0..self.modes.len() {
+            self.scale_stats_in_place(level, mode_index);
         }
     }
 }
