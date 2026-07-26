@@ -14,6 +14,14 @@ use crate::Command;
 use crate::bot_templates::{BotTemplateSender, RenderedTemplate};
 use crate::scheduler;
 
+fn endgame_name(endgame_type: &str) -> &str {
+    match endgame_type {
+        "deadly_assault" => "Deadly Assault",
+        "shiyu_defense" => "Shiyu Defense",
+        other => other,
+    }
+}
+
 /// Main command dispatcher.
 pub async fn command_handler(
     bot: Bot,
@@ -87,8 +95,8 @@ struct IndexedSeason {
 
 fn parse_nanoka_datetime(value: &str) -> Option<DateTime<Utc>> {
     let local = chrono::NaiveDateTime::parse_from_str(value, "%Y-%m-%d %H:%M:%S").ok()?;
-    let api_timezone = FixedOffset::east_opt(8 * 60 * 60)?;
-    api_timezone
+    let nanoka_timezone = FixedOffset::east_opt(60 * 60)?;
+    nanoka_timezone
         .from_local_datetime(&local)
         .single()
         .map(|date| date.with_timezone(&Utc))
@@ -424,15 +432,22 @@ async fn cmd_unregister(
 // ── /status ──
 
 async fn cmd_status(bot: &Bot, chat_id: ChatId, state: &BotState) -> anyhow::Result<()> {
+    let tracked = state.db.get_all_users().await?.len();
+    let now = Utc::now().to_rfc3339();
+    let active_events = state.db.active_season_events(&now).await?;
     let mut seasons = Vec::new();
-
-    for event in &state.config.events {
-        let (active, start, end, tracked) = get_season_info(state, event).await?;
+    for (endgame_type, name) in [
+        ("deadly_assault", "Deadly Assault"),
+        ("shiyu_defense", "Shiyu Defense"),
+    ] {
+        let event = active_events
+            .iter()
+            .find(|event| event.endgame_type == endgame_type);
         seasons.push(serde_json::json!({
-            "name": event.name,
-            "active": active,
-            "start": start,
-            "end": end,
+            "name": name,
+            "active": event.is_some(),
+            "start": event.map(|event| event.starts_at.as_str()).unwrap_or("—"),
+            "end": event.and_then(|event| event.ends_at.as_deref()).unwrap_or("—"),
             "tracked": tracked,
         }));
     }
@@ -1347,69 +1362,6 @@ async fn verify_uid(state: &BotState, uid: &str) -> Result<Option<String>, Verif
     }
 }
 
-/// Get current season info for an event type.
-async fn get_season_info(
-    state: &BotState,
-    event: &crate::config::RecurringEvent,
-) -> anyhow::Result<(bool, String, String, usize)> {
-    let et = event.endgame_type();
-    let users = state.db.get_all_users().await?;
-    let tracked = users.len();
-
-    let cookie = match state.db.get_cookie().await? {
-        Some(c) => c,
-        None => return Ok((false, "—".into(), "—".into(), tracked)),
-    };
-
-    let client = match rustverse::client::zzz::ZZZClient::from_cookie_string(&cookie) {
-        Ok(c) => c,
-        Err(_) => return Ok((false, "—".into(), "—".into(), tracked)),
-    };
-
-    // We need at least one tracked user to query
-    if users.is_empty() {
-        return Ok((false, "—".into(), "—".into(), 0));
-    }
-
-    let uid = &users[0].uid;
-
-    match et {
-        "deadly_assault" => match client.get_deadly_assault(uid, None, "1").await {
-            Ok(data) => {
-                let start = data
-                    .start_time
-                    .as_ref()
-                    .map(|t| t.to_string())
-                    .unwrap_or_default();
-                let end = data
-                    .end_time
-                    .as_ref()
-                    .map(|t| t.to_string())
-                    .unwrap_or_default();
-                Ok((true, start, end, tracked))
-            }
-            Err(_) => Ok((false, "—".into(), "—".into(), tracked)),
-        },
-        "shiyu_defense" => match client.get_shiyu_defense(uid, None, "1").await {
-            Ok(data) => {
-                let start = data
-                    .hadal_begin_time
-                    .as_ref()
-                    .map(|t| t.to_string())
-                    .unwrap_or_default();
-                let end = data
-                    .hadal_end_time
-                    .as_ref()
-                    .map(|t| t.to_string())
-                    .unwrap_or_default();
-                Ok((true, start, end, tracked))
-            }
-            Err(_) => Ok((false, "—".into(), "—".into(), tracked)),
-        },
-        _ => Ok((false, "—".into(), "—".into(), tracked)),
-    }
-}
-
 /// Build a top leaderboard message for the given endgame type.
 /// Build the image and caption for a top leaderboard. Returns (PNG bytes, caption text).
 pub async fn build_top_image_and_caption(
@@ -1418,13 +1370,7 @@ pub async fn build_top_image_and_caption(
     endgame_type: &str,
     checkpoint: &str,
 ) -> anyhow::Result<(Vec<u8>, RenderedTemplate)> {
-    let event_name = state
-        .config
-        .events
-        .iter()
-        .find(|e| e.endgame_type() == endgame_type)
-        .map(|e| e.name.as_str())
-        .unwrap_or(endgame_type);
+    let event_name = endgame_name(endgame_type);
 
     let season_start = match state.db.get_latest_season_start(endgame_type).await? {
         Some(s) => s,
@@ -1519,13 +1465,7 @@ pub async fn build_top_message(
     endgame_type: &str,
     checkpoint: &str,
 ) -> anyhow::Result<String> {
-    let event_name = state
-        .config
-        .events
-        .iter()
-        .find(|e| e.endgame_type() == endgame_type)
-        .map(|e| e.name.as_str())
-        .unwrap_or(endgame_type);
+    let event_name = endgame_name(endgame_type);
 
     // Get the latest season start from DB
     let season_start = match state.db.get_latest_season_start(endgame_type).await? {

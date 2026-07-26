@@ -1,7 +1,5 @@
 use anyhow::Context;
 use chrono::{DateTime, Duration as ChronoDuration, FixedOffset, TimeZone, Utc};
-use nanoka::types::SeasonMeta;
-use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 use teloxide::{prelude::*, types::InputFile};
@@ -26,7 +24,6 @@ struct SchedulerSettings {
     retention_interval_ticks: u64,
     retention_days: i64,
     announcement_lead: ChronoDuration,
-    announcement_poll_interval: Duration,
 }
 
 impl Default for SchedulerSettings {
@@ -40,7 +37,6 @@ impl Default for SchedulerSettings {
             retention_interval_ticks: 12,
             retention_days: 90,
             announcement_lead: ChronoDuration::hours(24),
-            announcement_poll_interval: Duration::from_secs(60 * 60),
         }
     }
 }
@@ -78,16 +74,12 @@ impl SchedulerSettings {
         {
             settings.announcement_lead = ChronoDuration::hours(hours.max(1));
         }
-        if let Ok(value) = std::env::var("BOT_ANNOUNCEMENT_POLL_SECS")
-            && let Ok(seconds) = value.parse::<u64>()
-        {
-            settings.announcement_poll_interval = Duration::from_secs(seconds.max(60));
-        }
         settings
     }
 }
 
-/// Main scheduler loop: periodically fetch data and post checkpoint tops.
+/// Main scheduler loop. Player snapshots are polled, while Nanoka work sleeps
+/// until the active season ends before refreshing the following rotation.
 pub async fn run(
     bot: Bot,
     state: Arc<BotState>,
@@ -97,8 +89,14 @@ pub async fn run(
     let settings = SchedulerSettings::from_env();
     let mut interval = tokio::time::interval(settings.tick_interval);
     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-    let mut announcement_interval = tokio::time::interval(settings.announcement_poll_interval);
-    announcement_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    if let Err(error) = refresh_season_events(&state).await {
+        // Keep player refreshes and checkpoint delivery alive when Nanoka is
+        // temporarily unavailable; an existing DB index remains usable.
+        log::error!("Initial Nanoka season refresh failed: {error:#}");
+    }
+    check_announcements(&bot, &state, &settings).await;
+    let mut next_event_at =
+        tokio::time::Instant::now() + next_season_transition_delay(&state, &settings).await?;
     let mut ticks = 0_u64;
     loop {
         tokio::select! {
@@ -115,17 +113,13 @@ pub async fn run(
                     }
                 }
             }
-            _ = announcement_interval.tick() => {
-                if let Err(error) =
-                    check_deadly_assault_announcement(&bot, &state, &settings).await
-                {
-                    log::error!("Deadly Assault announcement error: {error:#}");
+            _ = tokio::time::sleep_until(next_event_at) => {
+                if let Err(error) = refresh_season_events(&state).await {
+                    log::error!("Nanoka season refresh failed: {error:#}");
                 }
-                if let Err(error) =
-                    check_shiyu_defense_announcement(&bot, &state, &settings).await
-                {
-                    log::error!("Shiyu Defense announcement error: {error:#}");
-                }
+                check_announcements(&bot, &state, &settings).await;
+                next_event_at = tokio::time::Instant::now()
+                    + next_season_transition_delay(&state, &settings).await?;
             }
             result = shutdown.changed() => {
                 if result.is_err() || *shutdown.borrow() {
@@ -134,6 +128,96 @@ pub async fn run(
                 }
             }
         }
+    }
+}
+
+const EVENT_TYPES: [(&str, &str); 2] = [
+    ("deadly_assault", "Deadly Assault"),
+    ("shiyu_defense", "Shiyu Defense"),
+];
+
+/// Fetch only the small Nanoka indexes and upsert their production schedule.
+/// We cache no season details: a card is fetched only when it will be delivered.
+async fn refresh_season_events(state: &BotState) -> anyhow::Result<()> {
+    let deadly = state.nanoka.get_boss_seasons().await?;
+    let shiyu = state.nanoka.get_seasons().await?;
+    let mut events = Vec::new();
+    for (endgame_type, seasons, expected_sort, prefix) in [
+        ("deadly_assault", deadly, 9, "69"),
+        ("shiyu_defense", shiyu, 1, "62"),
+    ] {
+        for (season_id, meta) in seasons {
+            if season_id.len() != 5 || !season_id.starts_with(prefix) || meta.sort != expected_sort
+            {
+                continue;
+            }
+            let Some(starts_at) = meta.live_begin.as_deref().and_then(parse_nanoka_datetime) else {
+                continue;
+            };
+            let ends_at = meta
+                .live_end
+                .as_deref()
+                .and_then(parse_nanoka_datetime)
+                .map(|time| time.to_rfc3339());
+            events.push(crate::db::SeasonEvent {
+                endgame_type: endgame_type.to_owned(),
+                season_id,
+                starts_at: starts_at.to_rfc3339(),
+                ends_at,
+                name: meta.en,
+            });
+        }
+    }
+    state.db.cache_season_events(&events).await
+}
+
+/// Wake at the later of the current season's end and the next card's normal
+/// lead-time. Thus the next rotation is fetched only after the current one
+/// ends, but its announcement still follows the configured timing whenever
+/// that window is available.
+async fn next_season_transition_delay(
+    state: &BotState,
+    settings: &SchedulerSettings,
+) -> anyhow::Result<Duration> {
+    let now = Utc::now();
+    let active = state.db.active_season_events(&now.to_rfc3339()).await?;
+    let mut earliest = None;
+    for (endgame_type, _) in EVENT_TYPES {
+        let current_end = active
+            .iter()
+            .find(|event| event.endgame_type == endgame_type)
+            .and_then(|event| event.ends_at.as_deref())
+            .and_then(|time| DateTime::parse_from_rfc3339(time).ok())
+            .map(|time| time.with_timezone(&Utc))
+            .filter(|time| *time > now);
+        if let Some(event) = state
+            .db
+            .next_season_event(endgame_type, &now.to_rfc3339())
+            .await?
+            && let Ok(starts_at) = DateTime::parse_from_rfc3339(&event.starts_at)
+        {
+            let trigger = starts_at.with_timezone(&Utc) - settings.announcement_lead;
+            let wake_at = current_end.map_or(trigger, |end| end.max(trigger));
+            earliest =
+                Some(earliest.map_or(wake_at, |current: DateTime<Utc>| current.min(wake_at)));
+        } else if let Some(end) = current_end {
+            earliest = Some(earliest.map_or(end, |current: DateTime<Utc>| current.min(end)));
+        }
+    }
+    // A daily fallback only covers an incomplete index (for example a missing
+    // live_end); normal operation waits for an actual season transition.
+    Ok(earliest
+        .and_then(|time| (time - now).to_std().ok())
+        .filter(|delay| !delay.is_zero())
+        .unwrap_or(Duration::from_secs(24 * 60 * 60)))
+}
+
+async fn check_announcements(bot: &Bot, state: &Arc<BotState>, settings: &SchedulerSettings) {
+    if let Err(error) = check_deadly_assault_announcement(bot, state, settings).await {
+        log::error!("Deadly Assault announcement error: {error:#}");
+    }
+    if let Err(error) = check_shiyu_defense_announcement(bot, state, settings).await {
+        log::error!("Shiyu Defense announcement error: {error:#}");
     }
 }
 
@@ -353,17 +437,47 @@ async fn fetch_all_bg(state: &Arc<BotState>) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn parse_api_datetime(value: &str) -> Option<DateTime<Utc>> {
+/// Nanoka season indexes use the Europe game-server time (UTC+1).
+fn parse_nanoka_datetime(value: &str) -> Option<DateTime<Utc>> {
     let local = chrono::NaiveDateTime::parse_from_str(value, "%Y-%m-%d %H:%M:%S").ok()?;
-    let api_timezone = FixedOffset::east_opt(8 * 60 * 60)?;
-    api_timezone
+    let nanoka_timezone = FixedOffset::east_opt(60 * 60)?;
+    nanoka_timezone
         .from_local_datetime(&local)
         .single()
         .map(|date| date.with_timezone(&Utc))
 }
 
-fn upcoming_endgame_season(
-    seasons: &HashMap<String, SeasonMeta>,
+/// HoYoLAB player-result timestamps retain their API UTC+8 interpretation.
+fn parse_hoyolab_datetime(value: &str) -> Option<DateTime<Utc>> {
+    let local = chrono::NaiveDateTime::parse_from_str(value, "%Y-%m-%d %H:%M:%S").ok()?;
+    let hoyolab_timezone = FixedOffset::east_opt(8 * 60 * 60)?;
+    hoyolab_timezone
+        .from_local_datetime(&local)
+        .single()
+        .map(|date| date.with_timezone(&Utc))
+}
+
+async fn upcoming_season(
+    state: &BotState,
+    endgame_type: &str,
+    now: DateTime<Utc>,
+    lead: ChronoDuration,
+) -> anyhow::Result<Option<(u64, DateTime<Utc>)>> {
+    let Some(event) = state
+        .db
+        .next_season_event(endgame_type, &now.to_rfc3339())
+        .await?
+    else {
+        return Ok(None);
+    };
+    let season_id = event.season_id.parse()?;
+    let starts_at = DateTime::parse_from_rfc3339(&event.starts_at)?.with_timezone(&Utc);
+    Ok((starts_at <= now + lead).then_some((season_id, starts_at)))
+}
+
+#[cfg(test)]
+fn upcoming_from_index(
+    seasons: &std::collections::HashMap<String, nanoka::types::SeasonMeta>,
     now: DateTime<Utc>,
     lead: ChronoDuration,
     endgame_type: nanoka::types::EndgameType,
@@ -372,26 +486,23 @@ fn upcoming_endgame_season(
     seasons
         .iter()
         .filter_map(|(id, meta)| {
-            if id.len() != 5 || meta.sort != sort {
-                return None;
-            }
-            let id = id.parse::<u64>().ok()?;
-            if nanoka::types::EndgameType::from_id(id) != Some(endgame_type) {
-                return None;
-            }
-            parse_api_datetime(meta.live_begin.as_deref()?)
-                .filter(|starts_at| *starts_at > now && *starts_at <= now + lead)
-                .map(|starts_at| (id, starts_at))
+            (id.len() == 5 && meta.sort == sort)
+                .then(|| id.parse::<u64>().ok())
+                .flatten()
+                .filter(|id| nanoka::types::EndgameType::from_id(*id) == Some(endgame_type))
+                .zip(parse_nanoka_datetime(meta.live_begin.as_deref()?))
         })
+        .filter(|(_, starts_at)| *starts_at > now && *starts_at <= now + lead)
         .min_by_key(|(_, starts_at)| *starts_at)
 }
 
+#[cfg(test)]
 fn upcoming_deadly_assault(
-    seasons: &HashMap<String, SeasonMeta>,
+    seasons: &std::collections::HashMap<String, nanoka::types::SeasonMeta>,
     now: DateTime<Utc>,
     lead: ChronoDuration,
 ) -> Option<(u64, DateTime<Utc>)> {
-    upcoming_endgame_season(
+    upcoming_from_index(
         seasons,
         now,
         lead,
@@ -400,12 +511,13 @@ fn upcoming_deadly_assault(
     )
 }
 
+#[cfg(test)]
 fn upcoming_shiyu_defense(
-    seasons: &HashMap<String, SeasonMeta>,
+    seasons: &std::collections::HashMap<String, nanoka::types::SeasonMeta>,
     now: DateTime<Utc>,
     lead: ChronoDuration,
 ) -> Option<(u64, DateTime<Utc>)> {
-    upcoming_endgame_season(
+    upcoming_from_index(
         seasons,
         now,
         lead,
@@ -424,13 +536,13 @@ async fn check_deadly_assault_announcement(
         return Ok(());
     }
 
-    let seasons = state
-        .nanoka
-        .get_boss_seasons()
-        .await
-        .context("fetching Deadly Assault season index from Nanoka")?;
-    let Some((season_id, starts_at)) =
-        upcoming_deadly_assault(&seasons, Utc::now(), settings.announcement_lead)
+    let Some((season_id, starts_at)) = upcoming_season(
+        state,
+        "deadly_assault",
+        Utc::now(),
+        settings.announcement_lead,
+    )
+    .await?
     else {
         return Ok(());
     };
@@ -461,9 +573,9 @@ async fn check_deadly_assault_announcement(
         .get_boss_detail_resolved(season_id, None)
         .await
         .with_context(|| format!("fetching resolved Deadly Assault season {season_id}"))?;
-    let api_timezone = FixedOffset::east_opt(8 * 60 * 60).context("invalid API offset")?;
+    let nanoka_timezone = FixedOffset::east_opt(60 * 60).context("invalid Nanoka offset")?;
     let begin_time = starts_at
-        .with_timezone(&api_timezone)
+        .with_timezone(&nanoka_timezone)
         .format("%Y-%m-%d %H:%M:%S")
         .to_string();
     let png = tokio::task::spawn_blocking(move || {
@@ -542,13 +654,13 @@ async fn check_shiyu_defense_announcement(
         return Ok(());
     }
 
-    let seasons = state
-        .nanoka
-        .get_seasons()
-        .await
-        .context("fetching Shiyu Defense season index from Nanoka")?;
-    let Some((season_id, starts_at)) =
-        upcoming_shiyu_defense(&seasons, Utc::now(), settings.announcement_lead)
+    let Some((season_id, starts_at)) = upcoming_season(
+        state,
+        "shiyu_defense",
+        Utc::now(),
+        settings.announcement_lead,
+    )
+    .await?
     else {
         return Ok(());
     };
@@ -719,16 +831,14 @@ async fn check_checkpoints(
         return Ok(());
     }
 
-    for event in &state.config.events {
-        let et = event.endgame_type();
-
+    for (et, _) in EVENT_TYPES {
         // Get the latest season start from results
         let season_start = match state.db.get_latest_season_start(et).await? {
             Some(s) => s,
             None => continue,
         };
 
-        let Some(season_start_dt) = parse_api_datetime(&season_start) else {
+        let Some(season_start_dt) = parse_hoyolab_datetime(&season_start) else {
             log::warn!("Invalid season start returned by API: {season_start}");
             continue;
         };
@@ -800,6 +910,8 @@ async fn check_checkpoints(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use nanoka::types::SeasonMeta;
+    use std::collections::HashMap;
 
     fn utc(value: &str) -> DateTime<Utc> {
         DateTime::parse_from_rfc3339(value)
@@ -808,9 +920,25 @@ mod tests {
     }
 
     #[test]
-    fn api_timestamp_is_interpreted_as_utc_plus_eight() {
+    fn nanoka_live_begin_is_interpreted_as_europe_server_time() {
+        let msk = FixedOffset::east_opt(3 * 60 * 60).unwrap();
+        // Production index examples 69041 and 62053 currently use 04:00:00.
+        let start = parse_nanoka_datetime("2026-07-24 04:00:00").unwrap();
         assert_eq!(
-            parse_api_datetime("2026-07-03 04:00:00"),
+            start,
+            utc("2026-07-24T03:00:00Z"),
+            "04:00 Europe-server time must be stored as 03:00 UTC"
+        );
+        assert_eq!(
+            start.with_timezone(&msk).format("%H:%M").to_string(),
+            "06:00"
+        );
+    }
+
+    #[test]
+    fn hoyolab_timestamp_remains_utc_plus_eight() {
+        assert_eq!(
+            parse_hoyolab_datetime("2026-07-03 04:00:00"),
             Some(utc("2026-07-02T20:00:00Z"))
         );
     }
@@ -864,7 +992,8 @@ mod tests {
 
     #[test]
     fn invalid_api_timestamp_is_rejected() {
-        assert_eq!(parse_api_datetime("not a timestamp"), None);
+        assert_eq!(parse_nanoka_datetime("not a timestamp"), None);
+        assert_eq!(parse_hoyolab_datetime("not a timestamp"), None);
     }
 
     fn season(begin: Option<&str>, live_begin: Option<&str>) -> SeasonMeta {
@@ -883,7 +1012,7 @@ mod tests {
 
     #[test]
     fn selects_nearest_da_only_during_the_day_before_start() {
-        let now = utc("2026-07-24T00:00:00Z");
+        let now = utc("2026-07-24T06:00:00Z");
         let mut seasons = HashMap::new();
         seasons.insert(
             "69040".to_owned(),
@@ -900,7 +1029,7 @@ mod tests {
 
         assert_eq!(
             upcoming_deadly_assault(&seasons, now, ChronoDuration::hours(24)),
-            Some((69041, utc("2026-07-24T23:00:00Z")))
+            Some((69041, utc("2026-07-25T06:00:00Z")))
         );
         let started = HashMap::from([(
             "69041".to_owned(),
@@ -909,7 +1038,7 @@ mod tests {
         assert_eq!(
             upcoming_deadly_assault(
                 &started,
-                utc("2026-07-24T23:00:00Z"),
+                utc("2026-07-25T06:00:00Z"),
                 ChronoDuration::hours(24)
             ),
             None,
@@ -919,20 +1048,20 @@ mod tests {
 
     #[test]
     fn live_begin_can_select_a_rerun_of_an_old_season() {
-        let now = utc("2026-07-24T00:00:00Z");
+        let now = utc("2026-07-24T05:00:00Z");
         let seasons = HashMap::from([(
             "69041".to_owned(),
             season(Some("2026-01-01 06:00:00"), Some("2026-07-25 06:00:00")),
         )]);
         assert_eq!(
             upcoming_deadly_assault(&seasons, now, ChronoDuration::hours(24)),
-            Some((69041, utc("2026-07-24T22:00:00Z")))
+            Some((69041, utc("2026-07-25T05:00:00Z")))
         );
     }
 
     #[test]
     fn selects_nearest_critical_node_for_shiyu() {
-        let now = utc("2026-07-22T20:00:00Z");
+        let now = utc("2026-07-23T03:00:00Z");
         let mut critical = season(None, Some("2026-07-24 04:00:00"));
         critical.sort = 1;
         let mut stable = season(None, Some("2026-07-23 04:00:00"));
@@ -941,7 +1070,7 @@ mod tests {
 
         assert_eq!(
             upcoming_shiyu_defense(&seasons, now, ChronoDuration::hours(24)),
-            Some((62053, utc("2026-07-23T20:00:00Z")))
+            Some((62053, utc("2026-07-24T03:00:00Z")))
         );
     }
 

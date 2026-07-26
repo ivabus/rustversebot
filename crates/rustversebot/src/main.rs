@@ -1,5 +1,4 @@
 mod bot_templates;
-mod config;
 mod db;
 mod handlers;
 mod scheduler;
@@ -56,7 +55,6 @@ enum Command {
 /// Shared bot state accessible from all handlers and the scheduler.
 pub struct BotState {
     pub db: db::Db,
-    pub config: config::RecurringConfig,
     pub templates: templates::TemplateEngine,
     /// Telegram user ID of the bot administrator.
     pub admin_id: i64,
@@ -73,28 +71,12 @@ async fn main() -> anyhow::Result<()> {
         .context("BOT_ADMIN_ID is required")?
         .parse::<i64>()
         .context("BOT_ADMIN_ID must be a valid Telegram user ID")?;
-    let config_path = std::env::var("BOT_CONFIG_PATH").unwrap_or_else(|_| "config.toml".to_owned());
     let database_url =
         std::env::var("TURSO_DATABASE_URL").context("TURSO_DATABASE_URL is required")?;
     let auth_token = std::env::var("TURSO_AUTH_TOKEN").ok();
     if database_url.trim().is_empty() {
         anyhow::bail!("TURSO_DATABASE_URL must not be empty");
     }
-
-    // Load config (fall back to defaults if file is missing)
-    let config = match config::load_config(&config_path) {
-        Ok(c) => {
-            log::info!(
-                "Loaded configuration from {config_path} with {} events",
-                c.events.len()
-            );
-            c
-        }
-        Err(e) => {
-            log::warn!("Failed to load {config_path} ({e}), using defaults");
-            config::default_config()
-        }
-    };
 
     let db = db::Db::connect(&database_url, auth_token.as_deref()).await?;
     log::info!("Turso database ready");
@@ -109,7 +91,6 @@ async fn main() -> anyhow::Result<()> {
         .filter(|value| !value.is_empty());
     let state = Arc::new(BotState {
         db,
-        config,
         templates,
         admin_id,
         public_web_url,

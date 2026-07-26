@@ -17,6 +17,56 @@ The project is a single Cargo workspace:
 Changes to a shared contract may therefore require coordinated edits in another
 workspace crate. Do not copy their models or implementations between crates.
 
+## Fast orientation
+
+Start here when taking over work:
+
+- `crates/rustversebot/src/main.rs` assembles `BotState`, starts the Telegram
+  dispatcher, scheduler, and optional web server. The `Command` enum is the
+  definitive list of bot commands.
+- `handlers.rs` owns command/callback behaviour and media-group construction;
+  `scheduler.rs` owns periodic fetching, checkpoint delivery, and season
+  announcements; `db.rs` owns schema migrations and all persistence; `web.rs`
+  owns the optional Axum dashboard.
+- `crates/rustversebot/templates/` contains Telegram-facing text. Its files
+  are loaded explicitly by `src/templates.rs`; use `bot_templates.rs` to send
+  them.
+- `crates/nanoka/src/lib.rs` is the async public season-data client and
+  `types.rs` is the shared data contract. Use the `*_resolved` methods when
+  rendering: they resolve Nanoka image paths and apply Deadly Assault stats.
+- `crates/rustverse_svg/src/lib.rs` converts game/API models into template
+  views and rasterises the SVG. Templates and static art sit beside that crate;
+  `examples/render_season.rs` is the quickest visual-development entry point.
+- `crates/rustverse` is the HoYoLAB player-data client. It is for tracked
+  player results; Nanoka is the source of seasonal rotations and future
+  announcement data.
+
+Useful focused commands from the workspace root:
+
+```sh
+# Inspect season data; --scaled exposes the Deadly Assault scaling result.
+cargo run --package nanoka -- show 690431 --scaled
+
+# Render the current Deadly Assault beta fixture for visual review.
+CARGO_TARGET_DIR=/tmp/rustversebot-svg-release \
+  cargo run --release --package rustverse_svg --example render_season -- \
+  690431 /tmp/rustversebot-da-690431.png
+
+# Run handler-only tests while iterating on Telegram commands.
+CARGO_TARGET_DIR=/tmp/rustversebot-svg-release \
+  cargo test --release --package rustversebot handlers::tests
+```
+
+Current data-model details worth preserving:
+
+- A six-digit season ID is a test-server preview: its nominal sequence ID is
+  `id / 10` (for example, `690421` follows production `69041`).
+- Deadly Assault beta details may contain several modes. Render every mode;
+  the normal mode is first and the complex-boss mode follows it.
+- The complex mode reports `zone_type = 1002`, but if the `1301` adjustment
+  table is present, its 24-level HP/ATK/points scaling is `1301..=1324`, not
+  `1002..`. Keep the fallback for older payloads without that table.
+
 ## Build and verification
 
 Run from the workspace root:
@@ -108,10 +158,13 @@ The template registry tests must continue to validate every template file.
 ## Season-pair commands
 
 `/previous`, `/current`, and `/next` render the Deadly Assault and Shiyu
-Defense pair together. Select five-digit production seasons of each mode,
-sort them by their API UTC+8 start time, identify the current season, then
-select its direct neighbour for previous/next. Do not make `/next` mean “any
-future season”, and do not fall back when the immediate next season is absent.
+Defense pair together. Determine `/current` and `/previous` from five-digit
+production seasons, sorted by their Europe game-server (UTC+1) start time. `/next` normally
+uses the direct production neighbour. During a test window it may instead use
+the earliest six-digit preview only when its nominal sequence is exactly the
+next one (for example `69041 → 690421`); never skip a missing immediate
+preview to a later one. Test-season `begin`/`end` dates must not make it the
+current season.
 
 Both modes must be available before rendering; otherwise return the existing
 “full pair is unavailable” message. Send both PNGs as one media group. Telegram
@@ -159,10 +212,20 @@ The season renderers live in the workspace `rustverse_svg` crate:
 - `prepare_*_info` builds the template view and owns every dynamic vertical
   measurement. When adding a line, update both the template position and the
   Rust height calculation so cards never overlap or clip.
+- `wrap_game_text_lines` is the source of truth for Deadly text wrapping and
+  card height. It must preserve `<color=...>` spans across line boundaries by
+  closing and reopening them; otherwise SVG sibling `<tspan>` elements lose
+  their colour.
 - `SHIYU_MECHANICS_WRAP_WIDTH` is the sole width for Shiyu mechanics: use it
   for both template wrapping and height calculations.
 - Deadly and Shiyu cards show weaknesses and resistance on a dedicated row;
   Shiyu resistance belongs to the featured boss.
+- Deadly rooms with no elements use the compact mechanics offset; do not leave
+  a blank weaknesses/resistance row. Boss art is clipped to the inner card
+  contour so it never covers any room border.
+- The complex Deadly boss is identified in the view as `is_complex`; retain
+  its subtle burgundy gradient border while keeping the standard border style
+  and image clipping for every boss.
 - Boss art occupies its configured fixed fraction of the card width (25% for
   Deadly, 30% for Shiyu), full height, centred crop, rounded clipping, and a
   horizontal fade at both edges.

@@ -70,10 +70,11 @@ pub struct SeasonMeta {
     /// Japanese name.
     #[serde(default)]
     pub ja: String,
-    /// When the season begins (UTC+8, format: `"YYYY-MM-DD HH:MM:SS"`).
+    /// When the season begins in the Europe game-server timezone (UTC+1,
+    /// format: `"YYYY-MM-DD HH:MM:SS"`).
     #[serde(default)]
     pub begin: Option<String>,
-    /// When the season ends (UTC+8).
+    /// When the season ends in the Europe game-server timezone (UTC+1).
     #[serde(default)]
     pub end: Option<String>,
     /// Live / re-run begin time.
@@ -116,10 +117,10 @@ pub struct SeasonDetail {
     pub priority: u32,
     /// Map of zone ID → zone data.
     pub zone: HashMap<String, Zone>,
-    /// Season begin time (UTC+8).
+    /// Season begin time in the Europe game-server timezone (UTC+1).
     #[serde(default)]
     pub begin_time: Option<String>,
-    /// Season end time (UTC+8).
+    /// Season end time in the Europe game-server timezone (UTC+1).
     #[serde(default)]
     pub end_time: Option<String>,
 }

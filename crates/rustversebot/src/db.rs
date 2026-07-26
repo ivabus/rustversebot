@@ -2,7 +2,18 @@ use anyhow::{Context, bail};
 use libsql::{Builder, Connection, Database, params};
 use serde::Serialize;
 
-const SCHEMA_VERSION: i64 = 4;
+const SCHEMA_VERSION: i64 = 5;
+
+/// A compact, normalized copy of a production season from Nanoka's index.
+/// Details and rendered cards deliberately remain outside the cache.
+#[derive(Debug, Clone)]
+pub struct SeasonEvent {
+    pub endgame_type: String,
+    pub season_id: String,
+    pub starts_at: String,
+    pub ends_at: Option<String>,
+    pub name: String,
+}
 
 /// Async persistence backed by libSQL, either in a local file or Turso Cloud.
 pub struct Db {
@@ -155,6 +166,23 @@ impl Db {
             )
             .await
             .context("applying migration 4")?;
+        }
+        if version < 5 {
+            tx.execute_batch(
+                "CREATE TABLE season_events (
+                    endgame_type TEXT NOT NULL,
+                    season_id TEXT NOT NULL,
+                    starts_at TEXT NOT NULL,
+                    ends_at TEXT,
+                    name TEXT NOT NULL,
+                    observed_at TEXT NOT NULL DEFAULT (datetime('now')),
+                    PRIMARY KEY(endgame_type, season_id));
+                 CREATE INDEX idx_season_events_start
+                    ON season_events(endgame_type, starts_at);
+                 PRAGMA user_version = 5;",
+            )
+            .await
+            .context("applying migration 5")?;
         }
         tx.commit().await.context("committing migrations")?;
         Ok(())
@@ -427,6 +455,75 @@ impl Db {
             .await?;
         Ok(())
     }
+    pub async fn cache_season_events(&self, events: &[SeasonEvent]) -> anyhow::Result<()> {
+        let conn = self.connection()?;
+        let tx = conn.transaction().await?;
+        // Both Nanoka indexes were fetched successfully before this method is
+        // called, so replacing this small cache keeps it authoritative.
+        tx.execute("DELETE FROM season_events", ()).await?;
+        for event in events {
+            tx.execute(
+                "INSERT INTO season_events(endgame_type,season_id,starts_at,ends_at,name,observed_at)
+                 VALUES(?1,?2,?3,?4,?5,datetime('now'))
+                 ON CONFLICT(endgame_type,season_id) DO UPDATE SET
+                   starts_at=excluded.starts_at, ends_at=excluded.ends_at,
+                   name=excluded.name, observed_at=datetime('now')",
+                params![
+                    event.endgame_type.clone(),
+                    event.season_id.clone(),
+                    event.starts_at.clone(),
+                    event.ends_at.clone(),
+                    event.name.clone()
+                ],
+            ).await?;
+        }
+        tx.commit().await?;
+        Ok(())
+    }
+    pub async fn next_season_event(
+        &self,
+        endgame_type: &str,
+        after: &str,
+    ) -> anyhow::Result<Option<SeasonEvent>> {
+        let mut rows = self
+            .connection()?
+            .query(
+                "SELECT endgame_type,season_id,starts_at,ends_at,name FROM season_events
+             WHERE endgame_type=?1 AND starts_at>?2 ORDER BY starts_at LIMIT 1",
+                params![endgame_type, after],
+            )
+            .await?;
+        rows.next()
+            .await?
+            .map(|row| {
+                Ok(SeasonEvent {
+                    endgame_type: row.get(0)?,
+                    season_id: row.get(1)?,
+                    starts_at: row.get(2)?,
+                    ends_at: row.get(3)?,
+                    name: row.get(4)?,
+                })
+            })
+            .transpose()
+    }
+    pub async fn active_season_events(&self, now: &str) -> anyhow::Result<Vec<SeasonEvent>> {
+        let mut rows = self.connection()?.query(
+            "SELECT endgame_type,season_id,starts_at,ends_at,name FROM season_events
+             WHERE starts_at<=?1 AND (ends_at IS NULL OR ends_at>?1) ORDER BY endgame_type,starts_at DESC",
+            params![now],
+        ).await?;
+        let mut events = Vec::new();
+        while let Some(row) = rows.next().await? {
+            events.push(SeasonEvent {
+                endgame_type: row.get(0)?,
+                season_id: row.get(1)?,
+                starts_at: row.get(2)?,
+                ends_at: row.get(3)?,
+                name: row.get(4)?,
+            });
+        }
+        Ok(events)
+    }
     pub async fn cleanup_old_results(&self, retention_days: i64) -> anyhow::Result<usize> {
         if retention_days <= 0 {
             bail!("retention_days must be greater than zero");
@@ -545,6 +642,37 @@ pub struct SeasonResult {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn season_index_cache_is_normalized_and_replaced() {
+        let db = Db::new_test().await.unwrap();
+        let first = SeasonEvent {
+            endgame_type: "deadly_assault".into(),
+            season_id: "69041".into(),
+            starts_at: "2026-07-25T22:00:00+00:00".into(),
+            ends_at: None,
+            name: "First".into(),
+        };
+        let changed = SeasonEvent {
+            name: "Corrected".into(),
+            ..first.clone()
+        };
+        db.cache_season_events(&[first, changed]).await.unwrap();
+        let event = db
+            .next_season_event("deadly_assault", "2026-07-24T00:00:00+00:00")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(event.name, "Corrected");
+
+        db.cache_season_events(&[]).await.unwrap();
+        assert!(
+            db.next_season_event("deadly_assault", "2026-07-24T00:00:00+00:00")
+                .await
+                .unwrap()
+                .is_none()
+        );
+    }
 
     #[tokio::test]
     async fn local_file_url_does_not_require_an_auth_token() {

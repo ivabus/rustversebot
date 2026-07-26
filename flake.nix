@@ -21,7 +21,6 @@
         fileset = pkgs.lib.fileset.unions [
           ./Cargo.lock
           ./Cargo.toml
-          ./config.toml
           ./crates
         ];
       };
@@ -52,8 +51,9 @@
 
       cargoArtifacts = craneLib.buildDepsOnly (commonArgs // {
         # The workspace sources are replaced with crane's dummy sources here:
-        # this compiles dependencies, not the actual bot.
-        buildPhaseCargoCommand = "cargo build --profile release --package rustversebot";
+        # this compiles dependencies and test-only dependencies, not the
+        # workspace's actual sources.
+        buildPhaseCargoCommand = "cargo test --release --workspace --no-run";
       });
 
       rustversebot = craneLib.buildPackage (commonArgs // {
@@ -62,17 +62,18 @@
         # dependency artifact. Keeping it here would strip the executable bit
         # when crane installs the finished bot.
         preBuild = "";
-        postInstall = ''
-          install -Dm444 config.toml "$out/share/rustversebot/config.toml"
-          wrapProgram "$out/bin/rustversebot" \
-            --set-default BOT_CONFIG_PATH "$out/share/rustversebot/config.toml"
-        '';
 
         meta = {
           description = "Telegram bot for tracking Zenless Zone Zero endgame results";
           mainProgram = "rustversebot";
           platforms = [ system ];
         };
+      });
+
+      tests = craneLib.cargoTest (commonArgs // {
+        inherit cargoArtifacts;
+        cargoExtraArgs = "--workspace";
+        preBuild = "";
       });
     in
     {
@@ -92,7 +93,11 @@
         };
       };
 
-      checks.${system}.default = rustversebot;
+      checks.${system} = {
+        default = tests;
+        inherit tests;
+        package = rustversebot;
+      };
 
       devShells.${system}.default = pkgs.mkShell {
         inputsFrom = [ rustversebot ];

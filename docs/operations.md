@@ -30,8 +30,6 @@ sudo useradd --system --home-dir /var/lib/rustversebot \
   --shell /usr/sbin/nologin rustversebot
 sudo install -D -o root -g root -m 0755 target/release/rustversebot \
   /usr/local/bin/rustversebot
-sudo install -D -o root -g root -m 0644 config.toml \
-  /etc/rustversebot/config.toml
 sudo install -D -o root -g root -m 0600 deploy/rustversebot.env.example \
   /etc/rustversebot/rustversebot.env
 sudo install -D -o root -g root -m 0644 deploy/rustversebot.service \
