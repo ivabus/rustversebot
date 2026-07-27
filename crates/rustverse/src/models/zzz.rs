@@ -69,8 +69,7 @@ pub struct ZZZShiyuDefense {
     #[serde(default)]
     pub brief: Option<ZZZShiyuBrief>,
 
-    /// All floor/layer detail objects keyed by name
-    /// (e.g. "fourth_layer_detail", "fitfh_layer_detail", …).
+    /// All floor detail objects, keyed by name.
     #[serde(flatten)]
     pub layers: HashMap<String, ZZZShiyuLayerDetail>,
 }

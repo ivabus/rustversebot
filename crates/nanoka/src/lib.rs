@@ -1,8 +1,7 @@
 //! Async Rust client for [nanoka.cc](https://nanoka.cc) Zenless Zone Zero data.
 //!
-//! Provides access to Shiyu Defence (Critical Node, Stable Node, etc.) and
-//! Deadly Assault (Trial) seasonal data with monster stats, buffs, weaknesses
-//! and images.
+//! This crate provides Shiyu Defense and Deadly Assault season data.
+//! The data includes monster stats, buffs, weaknesses, and images.
 //!
 //! # Endgame types
 //!
@@ -22,7 +21,7 @@
 //! async fn main() -> Result<(), Box<dyn std::error::Error>> {
 //!     let client = NanokaClient::new();
 //!
-//!     // List all Shiyu Defence seasons
+//!     // List all Shiyu Defense seasons
 //!     let shiyu = client.get_seasons_by_type(EndgameType::ShiyuDefence).await?;
 //!     for (id, meta) in &shiyu {
 //!         println!("[{id}] {} (sort={})", meta.en, meta.sort);
@@ -47,10 +46,10 @@ use types::*;
 static VERSION_RE: OnceLock<Regex> = OnceLock::new();
 static IMAGE_FILENAME_RE: OnceLock<Regex> = OnceLock::new();
 
-/// The main client for interacting with the nanoka.cc ZZZ API.
+/// The main client for the nanoka.cc ZZZ API.
 ///
-/// On first use it automatically resolves the latest game data version from
-/// the website. The version is cached in memory for the lifetime of the client.
+/// On first use, the client resolves the latest game data version.
+/// The client stores this version in memory for its lifetime.
 ///
 /// # Example
 ///
@@ -64,7 +63,7 @@ pub struct NanokaClient {
     base_url: String,       // https://static.nanoka.cc
     image_base_url: String, // https://static.nanoka.cc/assets/zzz
     version: OnceLock<String>,
-    /// Language code for localised data (default: "en")
+    /// Language code for localized data. The default is `"en"`.
     pub lang: String,
 }
 
@@ -78,7 +77,7 @@ impl NanokaClient {
     /// Create a new client with default settings.
     ///
     /// Language defaults to `"en"`. Use [`with_lang`](Self::with_lang) to
-    /// customise.
+    /// customize the language.
     pub fn new() -> Self {
         Self {
             http: HttpClient::new(),
@@ -89,7 +88,7 @@ impl NanokaClient {
         }
     }
 
-    /// Set the display language for localised fields.
+    /// Set the display language for localized fields.
     ///
     /// Supported values observed on nanoka.cc: `"en"`, `"ko"`, `"zh"`, `"ja"`.
     pub fn with_lang(mut self, lang: impl Into<String>) -> Self {
@@ -97,7 +96,7 @@ impl NanokaClient {
         self
     }
 
-    /// Override the static asset base URL (useful for testing / mirrors).
+    /// Override the static asset base URL for tests or mirrors.
     pub fn with_base_url(mut self, url: impl Into<String>) -> Self {
         self.base_url = url.into();
         self
@@ -120,10 +119,10 @@ impl NanokaClient {
     //  Version resolution
     // ------------------------------------------------------------------
 
-    /// Resolve (and cache) the latest game data version.
+    /// Resolve and cache the latest game data version.
     ///
-    /// Fetches the shiyu page HTML and extracts the version string from the
-    /// embedded `data-url` attribute, e.g. `"3.1.12+17625891"`.
+    /// Fetch the Shiyu page HTML and extract its version string.
+    /// The embedded `data-url` attribute contains this string.
     pub async fn version(&self) -> Result<&str, Error> {
         if let Some(v) = self.version.get() {
             return Ok(v.as_str());
@@ -158,7 +157,7 @@ impl NanokaClient {
     //  Shiyu Defence API
     // ------------------------------------------------------------------
 
-    /// Fetch the full index of all Shiyu Defence seasons.
+    /// Fetch the full index of all Shiyu Defense seasons.
     ///
     /// This is the `shiyu.json` endpoint. ID prefix: `61…` / `62…`.
     /// For Deadly Assault see [`get_boss_seasons`](Self::get_boss_seasons).
@@ -167,7 +166,7 @@ impl NanokaClient {
         self.get_json(&url).await
     }
 
-    /// Fetch detailed data for a single Shiyu Defence season.
+    /// Fetch detailed data for a single Shiyu Defense season.
     ///
     /// Example IDs: `62053`, `61001`, `620561`.
     /// For Deadly Assault see [`get_boss_detail`](Self::get_boss_detail).
@@ -191,7 +190,7 @@ impl NanokaClient {
     /// Fetch detailed data for a single Deadly Assault (Trial) season.
     ///
     /// Returns a [`BossSeasonDetail`] which has a different structure than
-    /// Shiyu Defence — zones are wrapped in a `modes` array. Use
+    /// Shiyu Defense — zones are wrapped in a `modes` array. Use
     /// [`BossSeasonDetail::zones`] to access the zone map.
     ///
     /// Example IDs: `69041`, `690441`.
@@ -294,13 +293,13 @@ impl NanokaClient {
 
     /// Replace all relative image paths AND raw API stats in the given detail.
     ///
-    /// For Shiyu Defence: only image paths are resolved.
+    /// For Shiyu Defense: only image paths are resolved.
     /// For Deadly Assault: image paths are resolved AND monster stats + zone
     /// goals are scaled to their final in-game values using the max player
     /// level from boss_adjust.
     ///
-    /// This is useful before serialising to JSON so that consumers don't need
-    /// to resolve images or apply stat scaling themselves.
+    /// Use this method before serialization to JSON.
+    /// Consumers then do not need to resolve images or scale stats.
     pub fn resolve_images(&self, detail: &mut AnySeasonDetail) {
         match detail {
             AnySeasonDetail::Shiyu(d) => {

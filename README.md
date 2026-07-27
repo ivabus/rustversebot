@@ -1,14 +1,18 @@
+# AI usage disclosure
+
+Almost entire project was written using Deepseek V4 Pro and GPT-5.6 Sol / Terra, except the initial rustverse_svg "renderer" and templates, which were done solely by me.
+
 # rustversebot
 
-Telegram-бот для отслеживания результатов Zenless Zone Zero: Deadly Assault и
-Shiyu Defense.
+`rustversebot` is a Telegram bot that tracks Zenless Zone Zero endgame results.
+It supports Deadly Assault and Shiyu Defense.
 
-## Требования
+## Requirements
 
-- Telegram bot token от [@BotFather](https://t.me/BotFather);
-- Telegram user ID администратора.
+- Get a Telegram bot token from [@BotFather](https://t.me/BotFather).
+- Get the Telegram user ID of the administrator.
 
-Все компоненты находятся в одном Cargo workspace:
+The Cargo workspace contains these crates:
 
 ```text
 crates/
@@ -18,11 +22,11 @@ crates/
 └── rustversebot/
 ```
 
-## Настройка и запуск
+## Configuration and startup
 
-Переменные из `.env.example` являются примером: приложение не читает `.env`
-самостоятельно, поэтому экспортируйте их в shell или настройте в менеджере
-процессов:
+The application does not load `.env` automatically.
+Export the variables from `.env.example`.
+You can also configure them in a process manager.
 
 ```sh
 export TELOXIDE_TOKEN="..."
@@ -32,71 +36,75 @@ export RUST_LOG="rustversebot=info"
 cargo run --package rustversebot
 ```
 
-При `TURSO_DATABASE_URL=file:local.db` база хранится в обычном локальном файле,
-а отдельный сервер и токен не нужны. Таблицы и миграции создаются автоматически.
+`TURSO_DATABASE_URL=file:local.db` stores the database in a local file.
+This configuration does not require a separate server or token.
+The application creates tables and runs migrations automatically.
 
-Настройки фонового обновления:
+The scheduler uses these variables:
 
-- `BOT_SCHEDULER_INTERVAL_SECS` — период опроса в секундах (по умолчанию `300`);
-- `BOT_CHECKPOINT_WINDOW_SECS` — окно отправки checkpoint после его наступления
-  (по умолчанию `300`; просроченные checkpoint не отправляются);
-- `BOT_REQUEST_SPACING_MS` — пауза между запросами HoYoLAB (по умолчанию
-  `500`);
-- `BOT_RETRY_ATTEMPTS` — число попыток отправки checkpoint и запросов HoYoLAB
-  (по умолчанию `3`);
-- `BOT_RETENTION_DAYS` — срок хранения исторических снимков результатов
-  (по умолчанию `90`; последний снимок каждой серии сохраняется).
-- `BOT_ANNOUNCEMENT_LEAD_HOURS` — за сколько часов до даты начала из Nanoka
-  отправлять карточки следующих сезонов Deadly Assault и Shiyu Defense
-  (по умолчанию `24`; после начала сезона опоздавшая карточка не отправляется).
+- `BOT_SCHEDULER_INTERVAL_SECS` sets the polling interval. The default is `300`.
+- `BOT_CHECKPOINT_WINDOW_SECS` sets the checkpoint delivery window. The default is `300`.
+- `BOT_REQUEST_SPACING_MS` sets the delay between HoYoLAB requests. The default is `500`.
+- `BOT_RETRY_ATTEMPTS` sets the retry count. The default is `3`.
+- `BOT_RETENTION_DAYS` sets the result retention period. The default is `90`.
+- `BOT_ANNOUNCEMENT_LEAD_HOURS` sets the season announcement lead time. The default is `24`.
 
-Данные будущих сезонов, характеристики противников и ссылки на изображения бот
-получает через crate `nanoka`. Production-индексы Deadly Assault и Shiyu
-Defense сохраняются в БД в нормализованной таблице по `(тип режима, ID сезона)`;
-бот ожидает окончания текущего сезона, затем обновляет индекс и анонсирует
-следующий в настроенном временном окне.
-Детали сезона и карточки не кэшируются. Каждая карточка рендерится один раз на
-сезон и отправляется каждому чату с зарегистрированными UID не более одного раза.
+The bot does not send an expired checkpoint or a late season announcement.
+It always keeps the last snapshot in each result series.
 
-## Веб-панель
+The `nanoka` crate supplies future seasons, enemy data, and image URLs.
+The bot stores production season indexes by mode and season ID.
+It updates an index after the current season ends.
+It then announces the next season during the configured window.
+The bot does not cache season details or cards.
+It renders each card once and sends it once to each eligible chat.
 
-Панель и read-only JSON API выключены по умолчанию. Чтобы запустить их, задайте
-адрес:
+## Web dashboard
+
+The read-only dashboard and JSON API are disabled by default.
+Set a bind address to start them:
 
 ```sh
 export BOT_WEB_BIND="127.0.0.1:8080"
 ```
 
-Если панель доступна пользователям через HTTPS, задайте её внешний адрес:
+Set the public URL when users access the dashboard through HTTPS:
 
 ```sh
 export BOT_PUBLIC_WEB_URL="https://zzz.example.com"
 ```
 
-Тогда под результатами `/da` и `/shiyu` появится кнопка «История и график».
-Локальный адрес не подставляется автоматически: без `BOT_PUBLIC_WEB_URL` кнопки
-нет.
+This URL adds a history button to `/da` and `/shiyu` results.
+The bot does not substitute a local URL.
 
-После запуска доступны `/`, `/healthz`, `/api/chats`,
-`/api/chats/{chat_id}/leaderboard/{kind}` и
-`/api/users/{uid}/history`. Значение `kind` — `deadly_assault` или
-`shiyu_defense`.
+The server provides these routes:
 
-Панель не содержит аутентификации. Не публикуйте её напрямую в интернет:
-оставьте loopback-адрес либо используйте доверенный reverse proxy с
-аутентификацией и TLS.
+- `/`
+- `/healthz`
+- `/api/chats`
+- `/api/chats/{chat_id}/leaderboard/{kind}`
+- `/api/users/{uid}/history`
 
-Если файл конфигурации недоступен или некорректен, бот запустится со встроенной
-конфигурацией и запишет предупреждение в лог.
+The `kind` value is `deadly_assault` or `shiyu_defense`.
+The dashboard has no authentication.
+Do not expose it directly to the internet.
+Use a loopback address or a trusted reverse proxy with TLS and authentication.
+
+If the configuration file is invalid or unavailable, the bot uses its built-in
+configuration.
+It also writes a warning to the log.
 
 ## HoYoLAB cookie
 
-Cookie настраивается администратором командой `/cookie <cookie_string>` и
-сохраняется в локальной базе в открытом виде. Используйте отдельный приватный
-чат с ботом, удалите сообщение с командой после настройки и ограничьте доступ
-к файлу базы. Не добавляйте `.env`, токены, логи или экспорт базы в Git.
+The administrator sets the cookie with `/cookie <cookie_string>`.
+The bot stores the cookie as plain text in the local database.
 
-## Проверки
+1. Use a private chat with the bot.
+2. Delete the command message after configuration.
+3. Restrict access to the database file.
+4. Do not commit `.env`, tokens, logs, or database exports.
+
+## Verification
 
 ```sh
 cargo fmt --all --check
@@ -104,82 +112,83 @@ cargo test --release --workspace
 cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
 ```
 
-## Nix и Attic
+## Nix and Attic
 
-Flake намеренно публикует пакет только для `aarch64-darwin` (Apple Silicon).
-Локальная сборка и запуск:
+The flake publishes the package only for `aarch64-darwin`.
 
 ```sh
 nix build .#rustversebot
 nix run .#rustversebot
 ```
 
-GitHub Actions подключает Attic как substituter перед сборкой. Сначала workflow
-собирает и отправляет отдельный `cargoArtifacts` со скомпилированными Cargo
-dependencies, затем собирает бота и отправляет его runtime closure. Пока
-`Cargo.lock`, Cargo manifests, toolchain и системные build inputs не меняются,
-следующие сборки получают dependency artifacts из Attic и компилируют только
-изменившийся код workspace. Сборка выполняется на нативном ARM64 macOS runner.
-Workflow использует GitHub Environment с именем `Actions`.
-Создайте в нём environment secrets:
+GitHub Actions configures Attic as a substituter before the build.
+The workflow first builds and uploads the `cargoArtifacts` dependencies.
+It then builds the bot and uploads its runtime closure.
+Unchanged build inputs let later builds reuse the dependency artifacts.
+The workflow runs on a native ARM64 macOS runner.
 
-- `ATTIC_SERVER` — URL сервера, например `https://attic.example.org`;
-- `ATTIC_TOKEN` — токен с правом push в этот кэш.
+Create these secrets in the `Actions` GitHub Environment:
 
-Необязательный `ATTIC_CACHE` переопределяет имя кэша; без него workflow
-использует `rustversebot`.
+- `ATTIC_SERVER` contains the server URL.
+- `ATTIC_TOKEN` contains a token with cache push access.
 
-Для использования публичного кэша узнайте его endpoint и public key у
-администратора Attic:
+The optional `ATTIC_CACHE` variable changes the cache name.
+The default cache name is `rustversebot`.
+
+Get the public cache endpoint and key from the Attic administrator:
 
 ```sh
 attic cache info rustversebot
 ```
 
-Добавьте их в `~/.config/nix/nix.conf`:
+Add them to `~/.config/nix/nix.conf`:
 
 ```ini
 extra-substituters = https://attic.example.org/rustversebot
 extra-trusted-public-keys = rustversebot:BASE64_PUBLIC_KEY
 ```
 
-После перезапуска Nix daemon установите или запустите пакет из GitHub flake;
-готовые store paths будут загружены из Attic вместо локальной компиляции:
+Restart the Nix daemon.
+Then install or run the package:
 
 ```sh
 nix profile install github:OWNER/rustversebot#rustversebot
 rustversebot
 
-# либо без установки
+# Run without installation.
 nix run github:OWNER/rustversebot#rustversebot
 ```
 
-Перед запуском экспортируйте как минимум `TELOXIDE_TOKEN`, `BOT_ADMIN_ID` и
-`TURSO_DATABASE_URL`. Расписание production-сезонов бот получает из Nanoka.
+Before startup, export `TELOXIDE_TOKEN`, `BOT_ADMIN_ID`, and
+`TURSO_DATABASE_URL`.
 
-## Шаблоны Telegram
+## Telegram templates
 
-Шаблоны находятся в `templates/`, а режим отправки определяется их суффиксом:
+The `templates/` directory contains Telegram message templates.
+The file suffix selects the send mode:
 
-- `*.txt.j2` отправляется как обычный текст без `parse_mode`;
-- `*.html.j2` отправляется с `ParseMode::Html`, а значения MiniJinja автоматически
-  экранируются для HTML.
+- `*.txt.j2` sends plain text without a parse mode.
+- `*.html.j2` uses `ParseMode::Html`.
 
-Добавление шаблона с другим суффиксом или файла, отсутствующего во встроенном
-реестре, приводит к падению теста валидации.
+MiniJinja automatically escapes template values for HTML.
+The registry test rejects an unsupported suffix or an unregistered file.
 
-## Детали и сравнение сезонов
+## Season details and comparisons
 
-Команды `/previous`, `/current` и `/next` отправляют одним альбомом инфографику
-Deadly Assault и пятой волны Shiyu Defense для соответствующей пары сезонов.
-Будущим считается сезон, непосредственно следующий за текущим; если Nanoka ещё
-не опубликовала хотя бы один из режимов пары, бот сообщает, что полной пары нет.
+The `/previous`, `/current`, and `/next` commands send one two-image album.
+The album contains Deadly Assault and Shiyu Defense season cards.
+The Shiyu Defense card shows stage five.
 
-Команды `/da` и `/shiyu` принимают UID или nickname. Если аргумент не указан,
-бот показывает inline-кнопки только для UID, зарегистрированных в текущем чате.
-Callback повторно проверяет членство UID в чате, поэтому старая или подменённая
-кнопка не раскрывает данные другого чата.
+The next season must directly follow the current season.
+If Nanoka lacks either mode, the bot reports that the full pair is unavailable.
 
-Caption результата автоматически сравнивает два последних сезона: показывает
-дельту очков, а также звёзд для Deadly Assault или пройденных этажей для Shiyu
-Defense. Пока предыдущего сезона нет, строка сравнения не выводится.
+The `/da` and `/shiyu` commands accept a UID or nickname.
+Without an argument, the bot shows buttons for UIDs in the current chat.
+Each callback checks chat membership again.
+This check prevents an old or modified button from exposing another chat's data.
+
+The result caption compares the two most recent seasons.
+It shows the score change.
+For Deadly Assault, it also shows the star change.
+For Shiyu Defense, it shows the change in cleared floors.
+The bot omits the comparison until a previous season exists.

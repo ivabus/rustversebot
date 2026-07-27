@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-/// Generic API response wrapper as described in the docs.
+/// A generic API response wrapper.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ApiResponse<T> {
     pub retcode: i64,
@@ -38,10 +38,10 @@ pub struct GameRecordCard {
     pub nickname: String,
     pub region: String,
     pub level: i64,
-    /// Human-readable region name (e.g. "Europe").
+    /// Human-readable region name, such as `"Europe"`.
     #[serde(default)]
     pub region_name: Option<String>,
-    /// Human-readable game name (e.g. "Zenless Zone Zero").
+    /// Human-readable game name, such as `"Zenless Zone Zero"`.
     #[serde(default)]
     pub game_name: Option<String>,
     /// Whether the battle chronicle is public.

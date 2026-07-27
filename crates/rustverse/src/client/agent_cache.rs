@@ -18,7 +18,9 @@ pub fn cache_avatars(avatars: &[ZZZAvatarInfo]) {
 }
 
 /// Try to resolve an agent ID to a name.
-/// Checks: dynamic cache → static agent DB → ID as string.
+///
+/// Check the dynamic cache, then the static database.
+/// Return the ID as a string if neither source contains a name.
 pub fn resolve_name(id: i64) -> String {
     if let Some(name) = cache().read().unwrap().get(&id) {
         return name.clone();

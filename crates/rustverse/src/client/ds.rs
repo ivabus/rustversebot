@@ -3,7 +3,7 @@ use rand::Rng;
 /// The known salt for global (overseas) HoYoLAB API.
 pub const SALT: &str = "6s25p5ox5y14umn1p61aqyyvbvvl3lrt";
 
-/// Generate a `DS` header value: `{timestamp},{random},{md5}`
+/// Generate a `DS` header value with the form `{timestamp},{random},{md5}`.
 ///
 /// - `timestamp` — current Unix timestamp in seconds
 /// - `random` — 6 random lowercase alphanumeric characters

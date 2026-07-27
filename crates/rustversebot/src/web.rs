@@ -1,7 +1,8 @@
-//! Tiny, read-only HTTP dashboard.
+//! A small, read-only HTTP dashboard.
 //!
-//! The caller decides whether to start it. Bind to loopback unless the operator
-//! explicitly opts into a public listener, e.g. `127.0.0.1:8080`.
+//! The caller decides whether to start the dashboard.
+//! Bind to a loopback address unless the operator selects a public listener.
+//! For example, use `127.0.0.1:8080` for a loopback listener.
 
 use crate::BotState;
 use axum::{

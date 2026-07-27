@@ -78,8 +78,10 @@ impl SchedulerSettings {
     }
 }
 
-/// Main scheduler loop. Player snapshots are polled, while Nanoka work sleeps
-/// until the active season ends before refreshing the following rotation.
+/// Run the main scheduler loop.
+///
+/// Poll player snapshots regularly. Wait for the active season to end before
+/// the scheduler refreshes the next rotation.
 pub async fn run(
     bot: Bot,
     state: Arc<BotState>,
@@ -136,8 +138,9 @@ const EVENT_TYPES: [(&str, &str); 2] = [
     ("shiyu_defense", "Shiyu Defense"),
 ];
 
-/// Fetch only the small Nanoka indexes and upsert their production schedule.
-/// We cache no season details: a card is fetched only when it will be delivered.
+/// Fetch the Nanoka indexes and store their production schedule.
+///
+/// Do not cache season details. Fetch a card only when the bot can deliver it.
 async fn refresh_season_events(state: &BotState) -> anyhow::Result<()> {
     let deadly = state.nanoka.get_boss_seasons().await?;
     let shiyu = state.nanoka.get_seasons().await?;
@@ -171,10 +174,10 @@ async fn refresh_season_events(state: &BotState) -> anyhow::Result<()> {
     state.db.cache_season_events(&events).await
 }
 
-/// Wake at the later of the current season's end and the next card's normal
-/// lead-time. Thus the next rotation is fetched only after the current one
-/// ends, but its announcement still follows the configured timing whenever
-/// that window is available.
+/// Wake after the current season ends and the next card reaches its lead time.
+///
+/// Fetch the next rotation only after the current season ends.
+/// Use the configured announcement time when its delivery window remains open.
 async fn next_season_transition_delay(
     state: &BotState,
     settings: &SchedulerSettings,
@@ -234,7 +237,7 @@ async fn tick(bot: &Bot, state: &Arc<BotState>, settings: &SchedulerSettings) {
 }
 
 /// Fetch endgame data for all registered users.
-/// Returns (success_count, error_count).
+/// Return the success count and the error count.
 pub async fn fetch_all_users(cookie: &str, state: &BotState) -> anyhow::Result<(usize, usize)> {
     let client = rustverse::client::zzz::ZZZClient::from_cookie_string(cookie)?;
     let users = state.db.get_all_users().await?;
@@ -259,8 +262,10 @@ pub async fn fetch_all_users(cookie: &str, state: &BotState) -> anyhow::Result<(
     Ok((ok_count, err_count))
 }
 
-/// Fetch endgame data for a single UID (doesn't need to be registered).
-/// Returns true if data was stored successfully, false if data not public.
+/// Fetch endgame data for one UID.
+///
+/// The UID does not need to be registered.
+/// Return `true` after storage. Return `false` when the data is not public.
 pub async fn fetch_single_user(cookie: &str, uid: &str, state: &BotState) -> anyhow::Result<bool> {
     let client = rustverse::client::zzz::ZZZClient::from_cookie_string(cookie)?;
     // Use a placeholder UserRow — we just need uid for this fetch

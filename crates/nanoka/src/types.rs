@@ -1,4 +1,4 @@
-//! Type definitions for the nanoka.cc ZZZ Shiyu Defence / Deadly Assault API.
+//! Type definitions for the nanoka.cc ZZZ Shiyu Defense / Deadly Assault API.
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -12,11 +12,11 @@ use std::fmt;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum EndgameType {
-    /// Shiyu Defence — Critical Node, Stable Node, Disputed Node, Ambush Node.
-    /// IDs start with `61` or `62` (e.g. `62053`, `620561`).
+    /// Shiyu Defense includes Critical, Stable, Disputed, and Ambush Nodes.
+    /// Its IDs start with `61` or `62`, for example `62053`.
     ShiyuDefence,
-    /// Deadly Assault — boss-rush "Trial" seasons.
-    /// IDs start with `69` (e.g. `69041`, `690441`).
+    /// Deadly Assault Trial boss-rush seasons.
+    /// Their IDs start with `69`, for example `69041`.
     DeadlyAssault,
 }
 
@@ -49,7 +49,7 @@ impl EndgameType {
 //  Season index
 // --------------------------------------------------------------------
 
-/// Metadata for a single Shiyu Defence / Deadly Assault season.
+/// Metadata for a single Shiyu Defense / Deadly Assault season.
 ///
 /// Returned by [`NanokaClient::get_seasons`](crate::NanokaClient::get_seasons)
 /// and [`NanokaClient::get_boss_seasons`](crate::NanokaClient::get_boss_seasons)
@@ -88,7 +88,8 @@ pub struct SeasonMeta {
 impl SeasonMeta {
     /// Detect the endgame type from the index `sort` field.
     ///
-    /// `sort == 9` → Deadly Assault; `sort` in `1..=4` → Shiyu Defence.
+    /// `sort == 9` means Deadly Assault.
+    /// A `sort` value in `1..=4` means Shiyu Defense.
     /// Prefer [`EndgameType::from_id`] when the numeric season ID is available.
     pub fn endgame_type(&self) -> Option<EndgameType> {
         if self.sort == 9 {
@@ -105,7 +106,7 @@ impl SeasonMeta {
 //  Season detail
 // --------------------------------------------------------------------
 
-/// Full detail for a single Shiyu Defence / Deadly Assault season.
+/// Full detail for a single Shiyu Defense / Deadly Assault season.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub struct SeasonDetail {
@@ -200,7 +201,7 @@ pub struct Room {
 pub struct Monster {
     /// Numeric monster type ID.
     pub id: u64,
-    /// Localised monster name.
+    /// Localized monster name.
     pub name: String,
     /// Relative image path (e.g. `"UI/Sprite/.../Monster_Banyrek.png"`).
     /// Use [`NanokaClient::monster_image_url`](crate::NanokaClient::monster_image_url)
@@ -216,7 +217,8 @@ pub struct Monster {
 
 /// Element resistance / weakness values.
 ///
-/// Each field is an i32: 1 = weak to this element, 0 = neutral, -1 = resistant.
+/// Each field is an `i32`.
+/// A value of `1` means weak, `0` means neutral, and `-1` means resistant.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub struct ElementResist {
@@ -237,7 +239,7 @@ pub struct MonsterStats {
     pub hp: f64,
     /// Attack power.
     pub attack: f64,
-    /// Defence.
+    /// Defense.
     pub defence: f64,
     /// Stun / daze gauge.
     pub stun: f64,
@@ -261,8 +263,7 @@ pub struct Buff {
 
 /// Full detail for a Deadly Assault (Trial) season.
 ///
-/// Deadly Assault has a different top-level structure than Shiyu Defence:
-/// it wraps zones in a `modes` array.
+/// Deadly Assault stores its zones in a top-level `modes` array.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub struct BossSeasonDetail {
@@ -278,7 +279,7 @@ pub struct BossSeasonDetail {
     /// Default zone type ID.
     #[serde(default)]
     pub zone_type: u64,
-    /// Game modes — usually a single element array.
+    /// Game modes. This array usually contains one element.
     #[serde(default)]
     pub modes: Vec<BossMode>,
 }
@@ -335,8 +336,8 @@ impl BossSeasonDetail {
 
     /// Convenience: extract all zones from the first mode.
     ///
-    /// A beta season can contain an additional mode for its complex boss;
-    /// callers which present the complete season must iterate [`modes`](Self::modes).
+    /// A beta season can contain another mode for its complex boss.
+    /// To show the complete season, iterate over [`modes`](Self::modes).
     pub fn zones(&self) -> Option<&HashMap<String, Zone>> {
         self.modes.first().map(|m| &m.zone)
     }
@@ -345,7 +346,8 @@ impl BossSeasonDetail {
     ///
     /// This walks the `boss_adjust` map starting from the mode's `zone_type`
     /// base key, collecting sequential entries until a gap is found.
-    /// Returns an ordered vector of [`LevelRates`] — index 0 = player level 1.
+    /// Return an ordered vector of [`LevelRates`].
+    /// Index zero contains the rates for player level one.
     pub fn level_rates(&self, mode_index: usize) -> Vec<LevelRates> {
         let mode = match self.modes.get(mode_index) {
             Some(m) => m,
@@ -469,8 +471,8 @@ impl BossSeasonDetail {
     /// - `stats.hp` → cumulative HP at the given level
     /// - `stats.attack` → ATK at the given level
     ///
-    /// Rank goals (`s_rank_goal` / `a_rank_goal` / `b_rank_goal`) are left
-    /// unchanged — they are fixed score thresholds from the API, not level rates.
+    /// Do not change `s_rank_goal`, `a_rank_goal`, or `b_rank_goal`.
+    /// These values are fixed API score thresholds, not level rates.
     ///
     /// If `level` is `None` the max available level is used.
     /// `mode_index` selects which mode (usually 0).
@@ -540,7 +542,7 @@ pub struct ScaledStatsRange {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum AnySeasonDetail {
-    /// Shiyu Defence season.
+    /// Shiyu Defense season.
     Shiyu(SeasonDetail),
     /// Deadly Assault (Trial) season.
     Boss(BossSeasonDetail),

@@ -1,24 +1,24 @@
-//! CLI client for nanoka — query Zenless Zone Zero Shiyu Defence / Deadly Assault data.
+//! A CLI client for Zenless Zone Zero data from nanoka.cc.
 
 use clap::{Parser, Subcommand, ValueEnum};
 use nanoka::{NanokaClient, types::EndgameType};
 use std::collections::HashMap;
 
-/// Query Zenless Zone Zero Shiyu Defence / Deadly Assault data from nanoka.cc.
+/// Query Shiyu Defense and Deadly Assault data from nanoka.cc.
 #[derive(Parser)]
 #[command(name = "nanoka", version, about)]
 struct Cli {
     #[command(subcommand)]
     command: Commands,
 
-    /// Language for displayed names (en, ko, zh, ja).
+    /// Language for displayed names: `en`, `ko`, `zh`, or `ja`.
     #[arg(short, long, default_value = "en", global = true)]
     lang: String,
 }
 
 #[derive(Subcommand)]
 enum Commands {
-    /// List all seasons (Shiyu Defence or Deadly Assault).
+    /// List all seasons (Shiyu Defense or Deadly Assault).
     List {
         /// Filter by endgame type.
         #[arg(short, long)]
@@ -35,7 +35,7 @@ enum Commands {
 
     /// Show detailed info for a specific season.
     Show {
-        /// Numeric season ID (e.g. 62053 for Shiyu, 69041 for Deadly Assault).
+        /// Numeric season ID. For example, use `62053` or `69041`.
         id: u64,
 
         /// Print monster image URLs.
@@ -50,8 +50,9 @@ enum Commands {
         #[arg(long, conflicts_with = "json")]
         json_resolved: bool,
 
-        /// Compute and display final scaled stats using boss_adjust (Deadly Assault only).
-        /// Optionally specify player level (1-29), defaults to max available.
+        /// Show final Deadly Assault stats from `boss_adjust`.
+        /// Set an optional player level from 1 through 29.
+        /// The command uses the highest available level by default.
         #[arg(long, value_name = "LEVEL")]
         scaled: Option<Option<usize>>,
     },
@@ -63,9 +64,9 @@ enum Commands {
 /// CLI-friendly endgame type argument.
 #[derive(Clone, Copy, ValueEnum)]
 enum EndgameTypeArg {
-    /// Shiyu Defence (Critical Node, Stable Node, etc.)
+    /// Shiyu Defense, including Critical Node and Stable Node.
     Shiyu,
-    /// Deadly Assault (Trial boss-rush)
+    /// Deadly Assault Trial boss rush.
     Deadly,
 }
 
@@ -448,7 +449,7 @@ fn print_scaled_stats(detail: &nanoka::types::BossSeasonDetail, level_opt: Optio
     }
 }
 
-/// Pick the localised name or fall back to English.
+/// Pick the localized name or fall back to English.
 fn meta_local_name<'a>(meta: &'a nanoka::types::SeasonMeta, lang: &str) -> &'a str {
     match lang {
         "ko" if !meta.ko.is_empty() => &meta.ko,
@@ -460,8 +461,9 @@ fn meta_local_name<'a>(meta: &'a nanoka::types::SeasonMeta, lang: &str) -> &'a s
 
 /// Format element weaknesses from the monster `element` field (`1` = weak).
 ///
-/// Prefer `monster_weakness` on the room when available; this is a fallback
-/// summary from per-element flags (also `-1` = resistant, not shown here).
+/// Use `monster_weakness` from the room when it is available.
+/// Otherwise, summarize the per-element flags.
+/// A value of `-1` means resistant and does not appear in this summary.
 fn format_resistances(elem: &nanoka::types::ElementResist) -> String {
     let map = [
         ("Phys", elem.physical),

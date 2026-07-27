@@ -29,8 +29,10 @@ fn profession_name(t: i64) -> &'static str {
     }
 }
 
-/// Format an agent for display: "name (rarity★, lvN)" or "name (rarity★, lvN, CN)".
-/// Rank is shown for S-rank if ≠0, for A-rank if ≠6.
+/// Format an agent for display.
+///
+/// Show a nonzero rank for an S-rank agent.
+/// Show the rank for an A-rank agent unless that rank is six.
 fn fmt_agent(av: &ZZZAvatar) -> String {
     let name = agent_cache::resolve_name(av.id);
     let show_rank = match av.rarity.as_str() {
@@ -48,15 +50,15 @@ fn fmt_agent(av: &ZZZAvatar) -> String {
 #[derive(Parser)]
 #[command(name = "rustverse", about = "HoYoverse API CLI client (ZZZ PoC)")]
 pub struct Cli {
-    /// Cookie header string (not required for `login` command)
+    /// Cookie header string. The `login` command does not require this value.
     #[arg(short = 'c', long, env = "HOYO_COOKIE")]
     pub cookie: Option<String>,
 
-    /// Output raw JSON response
+    /// Output the raw JSON response.
     #[arg(short = 'j', long, global = true)]
     pub json: bool,
 
-    /// Resolve agent IDs to names (fetches avatar list for Shiyu/Deadly Assault)
+    /// Resolve agent IDs to names with the avatar list.
     #[arg(short = 'n', long, global = true)]
     pub resolve_names: bool,
 
@@ -66,20 +68,20 @@ pub struct Cli {
 
 #[derive(Subcommand)]
 pub enum Command {
-    /// List games linked to the HoYoLAB account
+    /// List games linked to the HoYoLAB account.
     Games,
 
-    /// ZZZ Daily Note (battery status)
+    /// Show the ZZZ Daily Note battery status.
     DailyNote {
-        /// UID of the ZZZ player
+        /// UID of the ZZZ player.
         #[arg(short, long)]
         uid: String,
-        /// Server region code (auto-detected from UID if omitted)
+        /// Server region code. The command detects it from the UID by default.
         #[arg(short, long)]
         server: Option<String>,
     },
 
-    /// ZZZ Shiyu Defense
+    /// Show ZZZ Shiyu Defense data.
     Shiyu {
         #[arg(short, long)]
         uid: String,
@@ -91,7 +93,7 @@ pub enum Command {
         schedule: String,
     },
 
-    /// ZZZ Deadly Assault
+    /// Show ZZZ Deadly Assault data.
     DeadlyAssault {
         #[arg(short, long)]
         uid: String,
@@ -103,7 +105,7 @@ pub enum Command {
         schedule: String,
     },
 
-    /// ZZZ Gacha (banner) calendar
+    /// Show the ZZZ gacha banner calendar.
     Gacha {
         #[arg(short, long)]
         uid: String,
@@ -112,7 +114,7 @@ pub enum Command {
         server: Option<String>,
     },
 
-    /// ZZZ Game Record Index (profile summary with stats)
+    /// Show the ZZZ profile summary and stats.
     Index {
         #[arg(short, long)]
         uid: String,
@@ -121,7 +123,7 @@ pub enum Command {
         server: Option<String>,
     },
 
-    /// ZZZ Agent (avatar) list
+    /// Show the ZZZ agent list.
     Avatars {
         #[arg(short, long)]
         uid: String,
@@ -130,12 +132,12 @@ pub enum Command {
         server: Option<String>,
     },
 
-    /// Save cookies to file and verify them
+    /// Save cookies to a file and verify them.
     Login {
         /// HoYoLAB cookie string: "ltoken_v2=...; ltuid_v2=...; ltmid_v2=..."
         #[arg(short = 'c', long, env = "HOYO_COOKIE")]
         cookie: Option<String>,
-        /// Open browser for manual login
+        /// Open a browser for manual login.
         #[arg(short, long)]
         browser: bool,
     },

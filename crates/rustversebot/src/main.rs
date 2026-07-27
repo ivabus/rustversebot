@@ -13,41 +13,41 @@ use teloxide::{prelude::*, utils::command::BotCommands};
 #[derive(BotCommands, Clone)]
 #[command(rename_rule = "lowercase")]
 enum Command {
-    /// Show welcome message and usage
+    /// Show the welcome message and usage.
     Start,
-    /// Register a ZZZ UID for tracking: /register <uid>
+    /// Register a ZZZ UID for tracking: `/register <uid>`.
     Register(String),
-    /// Remove a ZZZ UID from tracking: /unregister <uid>
+    /// Remove a ZZZ UID from tracking: `/unregister <uid>`.
     Unregister(String),
-    /// Show current endgame season status
+    /// Show the current endgame season status.
     Status,
-    /// Следующая пара сезонов режимов
+    /// Show the next pair of mode seasons.
     Next,
-    /// Текущая пара сезонов режимов
+    /// Show the current pair of mode seasons.
     Current,
-    /// Предыдущая пара сезонов режимов
+    /// Show the previous pair of mode seasons.
     Previous,
-    /// Show Deadly Assault leaderboard
+    /// Show the Deadly Assault leaderboard.
     #[command(rename = "top_da")]
     TopDeadly,
-    /// Show Shiyu Defense leaderboard
+    /// Show the Shiyu Defense leaderboard.
     #[command(rename = "top_sd")]
     TopShiyu,
-    /// Update HoYoLAB cookie (admin only): /cookie <cookie_string>
+    /// Update the HoYoLAB cookie: `/cookie <cookie_string>`.
     Cookie(String),
-    /// Admin: force-refetch ALL tracked users
+    /// Fetch all tracked users again. This command requires administrator access.
     #[command(rename = "refetch_all")]
     RefetchAll,
-    /// Admin: force-refetch a specific UID: /refetch <uid>
+    /// Fetch one UID again: `/refetch <uid>`.
     #[command(rename = "refetch")]
     RefetchUid(String),
-    /// Show Deadly Assault detail for a UID: /da <uid>
+    /// Show Deadly Assault details for a UID: `/da <uid>`.
     #[command(rename = "da")]
     Da(String),
-    /// Show Shiyu Defense detail for a UID: /shiyu <uid>
+    /// Show Shiyu Defense details for a UID: `/shiyu <uid>`.
     #[command(rename = "shiyu")]
     Shiyu(String),
-    /// List all registered UIDs in this chat
+    /// List all registered UIDs in this chat.
     #[command(rename = "uids")]
     Uids,
 }

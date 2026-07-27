@@ -68,7 +68,7 @@ impl ZZZClient {
         }
     }
 
-    /// Create from a raw Cookie header string (e.g. from browser).
+    /// Create a client from a raw Cookie header string.
     /// The string should contain `ltoken_v2=...; ltuid_v2=...; ltmid_v2=...`.
     pub fn from_cookie_string(cookie_header: &str) -> Result<Self, HoyoverseError> {
         fn extract(cookie: &str, key: &str) -> Option<String> {
@@ -116,7 +116,7 @@ impl ZZZClient {
         headers
     }
 
-    /// Build headers WITHOUT DS (for endpoints that don't require it).
+    /// Build headers without DS for endpoints that do not require it.
     fn headers_no_ds(&self) -> reqwest::header::HeaderMap {
         let mut headers = self.headers_with_ds();
         headers.remove("DS");
@@ -169,7 +169,7 @@ impl ZZZClient {
         Ok(data.list)
     }
 
-    /// Get ZZZ Daily Note (battery info). Server auto-detected from UID if None.
+    /// Get the ZZZ Daily Note. Detect the server from the UID when it is `None`.
     pub async fn get_daily_note(
         &self,
         role_id: &str,
@@ -187,7 +187,7 @@ impl ZZZClient {
         self.check_response(resp).await
     }
 
-    /// Get Shiyu Defense data. Server auto-detected from UID if None.
+    /// Get Shiyu Defense data. Detect the server from the UID when it is `None`.
     pub async fn get_shiyu_defense(
         &self,
         role_id: &str,
@@ -243,7 +243,8 @@ impl ZZZClient {
         }
     }
 
-    /// Get Deadly Assault data. Uses `uid`/`region`. Server auto-detected if None.
+    /// Get Deadly Assault data for a `uid` and `region`.
+    /// Detect the server from the UID when it is `None`.
     pub async fn get_deadly_assault(
         &self,
         uid: &str,
@@ -289,8 +290,8 @@ impl ZZZClient {
     }
 
     /// Get the ZZZ game record index (profile summary + stats + avatar list).
-    /// Uses the public API domain — accessible for third-party UIDs (if data is public).
-    /// Server auto-detected from UID if None.
+    /// Use the public API domain for public third-party UID data.
+    /// Detect the server from the UID when it is `None`.
     pub async fn get_index(
         &self,
         role_id: &str,
@@ -312,7 +313,8 @@ impl ZZZClient {
         Ok(data)
     }
 
-    /// Get the player's agent (avatar) list. Server auto-detected from UID if None.
+    /// Get the player agent list.
+    /// Detect the server from the UID when it is `None`.
     pub async fn get_avatar_list(
         &self,
         role_id: &str,

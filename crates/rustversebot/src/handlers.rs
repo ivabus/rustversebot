@@ -1269,7 +1269,9 @@ async fn notify_cache_miss(bot: &Bot, cmd: &str, uid: &str, state: &BotState) {
 }
 
 /// Resolve a display nickname for a UID.
-/// Tries: 1) API nick_name  2) DB users table  3) DA result_json in DB  4) falls back to UID.
+///
+/// Check `nick_name`, the users table, and stored Deadly Assault results.
+/// Use the UID if these sources do not contain a nickname.
 async fn resolve_nickname(
     state: &BotState,
     uid: &str,
@@ -1295,9 +1297,10 @@ async fn resolve_nickname(
     Ok(uid.to_string())
 }
 
-/// Resolve user input to a UID. Accepts a numeric UID directly,
-/// or tries to find a UID by nickname in the given chat.
-/// Returns (uid, error_message) — if error_message is Some, resolution failed.
+/// Resolve user input to a UID.
+///
+/// Accept a numeric UID or find a nickname in the specified chat.
+/// The result contains the UID or an error message.
 async fn resolve_uid(
     state: &BotState,
     chat_id: ChatId,
@@ -1326,8 +1329,9 @@ enum VerificationError {
     Other(anyhow::Error),
 }
 
-/// Try to fetch data for a UID to verify it's valid and public.
-/// Returns the player's nickname on success (from Deadly Assault's `nick_name`).
+/// Fetch data to verify that a UID is valid and public.
+///
+/// Return the Deadly Assault `nick_name` value after a successful request.
 async fn verify_uid(state: &BotState, uid: &str) -> Result<Option<String>, VerificationError> {
     let cookie = state
         .db
@@ -1370,7 +1374,7 @@ async fn verify_uid(state: &BotState, uid: &str) -> Result<Option<String>, Verif
 }
 
 /// Build a top leaderboard message for the given endgame type.
-/// Build the image and caption for a top leaderboard. Returns (PNG bytes, caption text).
+/// Build the PNG image and caption for a leaderboard.
 pub async fn build_top_image_and_caption(
     state: &BotState,
     chat_id: i64,
