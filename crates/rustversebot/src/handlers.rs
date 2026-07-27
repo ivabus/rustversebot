@@ -746,7 +746,7 @@ async fn send_da(bot: &Bot, chat_id: ChatId, uid: &str, state: &BotState) -> any
         && data.has_data.unwrap_or(true)
     {
         let nick = resolve_nickname(state, uid, data.nick_name.as_deref()).await?;
-        let png = rustverse_svg::da(&data);
+        let png = render_da(data).await?;
         send_detail_photo(
             bot,
             state,
@@ -791,7 +791,7 @@ async fn send_da(bot: &Bot, chat_id: ChatId, uid: &str, state: &BotState) -> any
     match client.get_deadly_assault(uid, None, "1").await {
         Ok(data) => {
             let nick = resolve_nickname(state, uid, data.nick_name.as_deref()).await?;
-            let png = rustverse_svg::da(&data);
+            let png = render_da(data).await?;
             send_detail_photo(
                 bot,
                 state,
@@ -836,7 +836,7 @@ async fn send_shiyu(bot: &Bot, chat_id: ChatId, uid: &str, state: &BotState) -> 
         && data.hadal_begin_time.is_some()
     {
         let nick = resolve_nickname(state, uid, None).await?;
-        let png = rustverse_svg::shiyu(&data);
+        let png = render_shiyu(data).await?;
         send_detail_photo(
             bot,
             state,
@@ -881,7 +881,7 @@ async fn send_shiyu(bot: &Bot, chat_id: ChatId, uid: &str, state: &BotState) -> 
     match client.get_shiyu_defense(uid, None, "1").await {
         Ok(data) => {
             let nick = resolve_nickname(state, uid, None).await?;
-            let png = rustverse_svg::shiyu(&data);
+            let png = render_shiyu(data).await?;
             send_detail_photo(
                 bot,
                 state,
@@ -914,6 +914,20 @@ async fn send_shiyu(bot: &Bot, chat_id: ChatId, uid: &str, state: &BotState) -> 
     }
 
     Ok(())
+}
+
+async fn render_da(data: rustverse::models::zzz::ZZZDeadlyAssault) -> anyhow::Result<Vec<u8>> {
+    rustverse_svg::preload_da_images(&data).await?;
+    tokio::task::spawn_blocking(move || rustverse_svg::da(&data))
+        .await
+        .map_err(|error| anyhow::anyhow!("Deadly Assault renderer task panicked: {error}"))
+}
+
+async fn render_shiyu(data: rustverse::models::zzz::ZZZShiyuDefense) -> anyhow::Result<Vec<u8>> {
+    rustverse_svg::preload_shiyu_images(&data).await?;
+    tokio::task::spawn_blocking(move || rustverse_svg::shiyu(&data))
+        .await
+        .map_err(|error| anyhow::anyhow!("Shiyu Defense renderer task panicked: {error}"))
 }
 
 fn parse_detail_callback(data: &str) -> Option<(&str, &str)> {

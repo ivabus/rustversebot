@@ -137,6 +137,47 @@ pub async fn preload_shiyu_info_images(data: &SeasonDetail) -> anyhow::Result<()
     .await
 }
 
+/// Download every remote image referenced by a player Deadly Assault card.
+pub async fn preload_da_images(data: &ZZZDeadlyAssault) -> anyhow::Result<()> {
+    let mut hrefs = Vec::new();
+    for room in &data.list {
+        if let Some(boss) = room.boss.first() {
+            hrefs.push(boss.icon.as_str());
+        }
+        hrefs.extend(
+            room.avatar_list
+                .iter()
+                .map(|avatar| avatar.role_square_url.as_str()),
+        );
+        if let Some(icon) = room
+            .buffer
+            .first()
+            .and_then(|buffer| buffer.icon.as_deref())
+        {
+            hrefs.push(icon);
+        }
+    }
+    preload_info_images(hrefs).await
+}
+
+/// Download every remote image that can be referenced by a player Shiyu card.
+pub async fn preload_shiyu_images(data: &ZZZShiyuDefense) -> anyhow::Result<()> {
+    let mut hrefs = Vec::new();
+    for layer in data.layers.values() {
+        for room in &layer.layer_challenge_info_list {
+            if let Some(monster_pic) = room.monster_pic.as_deref() {
+                hrefs.push(monster_pic);
+            }
+            hrefs.extend(
+                room.avatar_list
+                    .iter()
+                    .map(|avatar| avatar.role_square_url.as_str()),
+            );
+        }
+    }
+    preload_info_images(hrefs).await
+}
+
 pub static USVG_OPTIONS: LazyLock<usvg::Options<'_>> = LazyLock::new(|| {
     let mut opt = usvg::Options {
         text_rendering: usvg::TextRendering::OptimizeLegibility,
@@ -175,6 +216,10 @@ pub static MJ_ENVIRONMENT: LazyLock<minijinja::Environment> = LazyLock::new(|| {
     env
 });
 
+static REMOTE_IMAGE_HREF: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r#"\bhref="(https?://[^"]+)""#).expect("remote image href regex must compile")
+});
+
 pub const ZOOM_FACTOR: f32 = 5.0;
 
 #[derive(Serialize, Deserialize)]
@@ -199,6 +244,18 @@ pub fn try_render_from_serialize<T: Serialize>(
 ) -> anyhow::Result<Vec<u8>> {
     let template = MJ_ENVIRONMENT.get_template(template)?;
     let rendered = template.render(data)?;
+
+    for captures in REMOTE_IMAGE_HREF.captures_iter(&rendered) {
+        let href = captures
+            .get(1)
+            .context("remote image href capture is missing")?
+            .as_str();
+        let cache_path = image_cache_path(href)?;
+        anyhow::ensure!(
+            std::fs::exists(&cache_path)?,
+            "remote image was not preloaded: {href}"
+        );
+    }
 
     let tree = usvg::Tree::from_data(rendered.as_bytes(), &USVG_OPTIONS)?;
     let pixmap_size = tree
@@ -1031,6 +1088,22 @@ mod tests {
     fn shiyu_info_fixture_renders_as_png() {
         let png = super::shiyu_info(&shiyu_fixture()).unwrap();
         assert!(png.starts_with(b"\x89PNG\r\n\x1a\n"));
+    }
+
+    #[test]
+    fn renderer_rejects_remote_images_that_were_not_preloaded() {
+        let data = serde_json::json!({
+            "list": [{
+                "boss": [{ "icon": "https://example.invalid/not-cached.webp" }],
+                "avatar_list": [],
+                "buffer": [{ "icon": "image/star-icon.png" }],
+                "score": 0,
+            }],
+            "total_score": 0,
+            "rank_percent": 0,
+        });
+        let error = super::try_render_from_serialize("da.j2", &data).unwrap_err();
+        assert!(error.to_string().contains("remote image was not preloaded"));
     }
 
     #[test]
