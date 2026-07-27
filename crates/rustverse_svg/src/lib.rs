@@ -18,6 +18,25 @@ fn image_dir() -> String {
     std::env::var("IMAGE_CACHE_DIR").unwrap_or("image".into())
 }
 
+fn image_cache_path(href: &str) -> anyhow::Result<String> {
+    let image_dir = image_dir();
+    std::fs::create_dir_all(&image_dir)
+        .with_context(|| format!("creating image cache directory {image_dir}"))?;
+    let filename = href
+        .rsplit('/')
+        .next()
+        .filter(|filename| !filename.is_empty())
+        .context("image URL has no filename")?;
+    Ok(format!("{image_dir}/{filename}"))
+}
+
+fn cached_image(href: &str) -> anyhow::Result<Arc<Vec<u8>>> {
+    let cache_path = image_cache_path(href)?;
+    Ok(Arc::new(std::fs::read(&cache_path).with_context(|| {
+        format!("reading cached image {cache_path}")
+    })?))
+}
+
 fn href_resolver(href: &str, _options: &usvg::Options) -> Option<ImageKind> {
     match href {
         "rustverse-bundled-da.webp" => {
@@ -38,24 +57,8 @@ fn href_resolver(href: &str, _options: &usvg::Options) -> Option<ImageKind> {
         _ => {}
     }
 
-    let image_dir = image_dir();
-    std::fs::create_dir_all(&image_dir).ok()?;
-    let cache_path = format!("{}/{}", image_dir, href.split("/").last().unwrap());
-    let data = if let Ok(true) = std::fs::exists(&cache_path) {
-        Arc::new(std::fs::read(&cache_path).ok()?)
-    } else {
-        println!("Cache miss! {}", href);
-        let req: Vec<u8> = ureq::get(href).call().ok()?.body_mut().read_to_vec().ok()?;
-        std::fs::write(&cache_path, &req).ok()?;
-        Arc::new(req)
-    };
-    match cache_path
-        .split(".")
-        .last()
-        .unwrap()
-        .to_ascii_lowercase()
-        .as_str()
-    {
+    let data = cached_image(href).ok()?;
+    match href.rsplit('.').next()?.to_ascii_lowercase().as_str() {
         "png" => Some(ImageKind::PNG(data)),
         "jpg" | "jpeg" => Some(ImageKind::JPEG(data)),
         "webp" => Some(ImageKind::WEBP(data)),
@@ -63,6 +66,64 @@ fn href_resolver(href: &str, _options: &usvg::Options) -> Option<ImageKind> {
         // NO ImageKind::SVG
         _ => None,
     }
+}
+
+async fn preload_info_images<'a>(hrefs: impl IntoIterator<Item = &'a str>) -> anyhow::Result<()> {
+    let mut hrefs = hrefs
+        .into_iter()
+        .filter(|href| href.starts_with("https://") || href.starts_with("http://"))
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    hrefs.sort_unstable();
+    hrefs.dedup();
+
+    let client = reqwest::Client::new();
+    let mut downloads = tokio::task::JoinSet::new();
+    for href in hrefs {
+        let cache_path = image_cache_path(&href)?;
+        if tokio::fs::try_exists(&cache_path).await? {
+            continue;
+        }
+        let client = client.clone();
+        downloads.spawn(async move {
+            let data = client
+                .get(&href)
+                .send()
+                .await
+                .with_context(|| format!("downloading image {href}"))?
+                .error_for_status()
+                .with_context(|| format!("downloading image {href}"))?
+                .bytes()
+                .await
+                .with_context(|| format!("reading downloaded image {href}"))?;
+            tokio::fs::write(&cache_path, &data)
+                .await
+                .with_context(|| format!("writing cached image {cache_path}"))
+        });
+    }
+    while let Some(result) = downloads.join_next().await {
+        result.context("image preloader task panicked")??;
+    }
+    Ok(())
+}
+
+/// Download the boss art needed by a Deadly Assault card into the on-disk
+/// image cache. The renderer will still read and decode it on demand.
+pub async fn preload_deadly_info_images(data: &BossSeasonDetail) -> anyhow::Result<()> {
+    let view = prepare_deadly_info(data)?;
+    preload_info_images(view.rooms.iter().map(|room| room.monster.image.as_str())).await
+}
+
+/// Download the boss art needed by a Shiyu Defense card into the on-disk
+/// image cache. The renderer will still read and decode it on demand.
+pub async fn preload_shiyu_info_images(data: &SeasonDetail) -> anyhow::Result<()> {
+    let view = prepare_shiyu_info(data)?;
+    preload_info_images(
+        view.rooms
+            .iter()
+            .map(|room| room.main_monster.image.as_str()),
+    )
+    .await
 }
 
 pub static USVG_OPTIONS: LazyLock<usvg::Options<'_>> = LazyLock::new(|| {

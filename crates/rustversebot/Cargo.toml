@@ -9,7 +9,7 @@ nanoka = { path = "../nanoka", default-features = false }
 teloxide = { version = "0.13", features = ["macros", "ctrlc_handler"] }
 tokio = { version = "1", features = ["full"] }
 minijinja = "2"
-libsql = "0.9"
+libsql = { version = "0.9", default-features = false, features = ["core"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 chrono = { version = "0.4", features = ["serde"] }

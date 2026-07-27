@@ -15,31 +15,24 @@ pub struct SeasonEvent {
     pub name: String,
 }
 
-/// Async persistence backed by libSQL, either in a local file or Turso Cloud.
+/// Async persistence backed by a local libSQL database.
 pub struct Db {
     connection: Connection,
 }
 
 impl Db {
-    /// Open a local `file:path.db` database or connect to remote Turso/libSQL.
-    pub async fn connect(url: &str, auth_token: Option<&str>) -> anyhow::Result<Self> {
-        let database = if let Some(path) = url.strip_prefix("file:") {
-            if path.is_empty() {
-                bail!("local database URL must include a path after file:");
-            }
-            Builder::new_local(path)
-                .build()
-                .await
-                .with_context(|| format!("opening local libSQL database {path}"))?
-        } else {
-            let auth_token = auth_token
-                .filter(|token| !token.trim().is_empty())
-                .context("TURSO_AUTH_TOKEN is required for a remote database")?;
-            Builder::new_remote(url.to_owned(), auth_token.to_owned())
-                .build()
-                .await
-                .context("connecting to remote Turso/libSQL")?
-        };
+    /// Open a local `file:path.db` database.
+    pub async fn connect(url: &str) -> anyhow::Result<Self> {
+        let path = url
+            .strip_prefix("file:")
+            .context("TURSO_DATABASE_URL must use a local file: URL")?;
+        if path.is_empty() {
+            bail!("local database URL must include a path after file:");
+        }
+        let database = Builder::new_local(path)
+            .build()
+            .await
+            .with_context(|| format!("opening local libSQL database {path}"))?;
         Self::from_database(database).await
     }
 
@@ -675,15 +668,15 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn local_file_url_does_not_require_an_auth_token() {
-        let db = Db::connect("file::memory:", None).await.unwrap();
+    async fn accepts_local_file_urls_and_rejects_remote_urls() {
+        let db = Db::connect("file::memory:").await.unwrap();
         assert!(db.get_all_users().await.unwrap().is_empty());
 
-        let error = Db::connect("libsql://example.invalid", None)
+        let error = Db::connect("libsql://example.invalid")
             .await
             .err()
-            .expect("remote databases must require an auth token");
-        assert!(error.to_string().contains("TURSO_AUTH_TOKEN"));
+            .expect("remote databases must be rejected");
+        assert!(error.to_string().contains("local file: URL"));
     }
 
     #[tokio::test]

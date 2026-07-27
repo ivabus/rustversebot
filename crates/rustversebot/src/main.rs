@@ -73,13 +73,12 @@ async fn main() -> anyhow::Result<()> {
         .context("BOT_ADMIN_ID must be a valid Telegram user ID")?;
     let database_url =
         std::env::var("TURSO_DATABASE_URL").context("TURSO_DATABASE_URL is required")?;
-    let auth_token = std::env::var("TURSO_AUTH_TOKEN").ok();
     if database_url.trim().is_empty() {
         anyhow::bail!("TURSO_DATABASE_URL must not be empty");
     }
 
-    let db = db::Db::connect(&database_url, auth_token.as_deref()).await?;
-    log::info!("Turso database ready");
+    let db = db::Db::connect(&database_url).await?;
+    log::info!("Local libSQL database ready");
 
     // Set up template engine
     let templates = templates::TemplateEngine::new()?;

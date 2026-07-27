@@ -578,6 +578,7 @@ async fn check_deadly_assault_announcement(
         .with_timezone(&nanoka_timezone)
         .format("%Y-%m-%d %H:%M:%S")
         .to_string();
+    rustverse_svg::preload_deadly_info_images(&detail).await?;
     let png = tokio::task::spawn_blocking(move || {
         rustverse_svg::deadly_info_with_begin_time(&detail, Some(&begin_time))
     })
@@ -694,6 +695,7 @@ async fn check_shiyu_defense_announcement(
     let nanoka::types::AnySeasonDetail::Shiyu(detail) = detail else {
         anyhow::bail!("Nanoka returned a non-Shiyu detail for season {season_id}");
     };
+    rustverse_svg::preload_shiyu_info_images(&detail).await?;
     let png = tokio::task::spawn_blocking(move || rustverse_svg::shiyu_info(&detail))
         .await
         .context("Shiyu Defense renderer task panicked")??;

@@ -225,13 +225,20 @@ async fn cmd_endgame_pair(
     };
 
     let deadly_begin_time = deadly.begin_time.clone();
-    let deadly_png = tokio::task::spawn_blocking(move || {
+    tokio::try_join!(
+        rustverse_svg::preload_deadly_info_images(&deadly_detail),
+        rustverse_svg::preload_shiyu_info_images(&shiyu_detail)
+    )?;
+
+    let deadly_render = tokio::task::spawn_blocking(move || {
         rustverse_svg::deadly_info_with_begin_time(&deadly_detail, Some(&deadly_begin_time))
-    })
-    .await
-    .map_err(|error| anyhow::anyhow!("Deadly Assault renderer task panicked: {error}"))??;
-    let shiyu_png = tokio::task::spawn_blocking(move || rustverse_svg::shiyu_info(&shiyu_detail))
-        .await
+    });
+    let shiyu_render =
+        tokio::task::spawn_blocking(move || rustverse_svg::shiyu_info(&shiyu_detail));
+    let (deadly_png, shiyu_png) = tokio::join!(deadly_render, shiyu_render);
+    let deadly_png = deadly_png
+        .map_err(|error| anyhow::anyhow!("Deadly Assault renderer task panicked: {error}"))??;
+    let shiyu_png = shiyu_png
         .map_err(|error| anyhow::anyhow!("Shiyu Defense renderer task panicked: {error}"))??;
 
     let album_caption = format!(
