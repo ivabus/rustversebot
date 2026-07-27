@@ -101,8 +101,19 @@ async fn preload_info_images<'a>(hrefs: impl IntoIterator<Item = &'a str>) -> an
                 .with_context(|| format!("writing cached image {cache_path}"))
         });
     }
+    let mut first_error = None;
     while let Some(result) = downloads.join_next().await {
-        result.context("image preloader task panicked")??;
+        let result = result
+            .context("image preloader task panicked")
+            .and_then(|result| result);
+        if let Err(error) = result
+            && first_error.is_none()
+        {
+            first_error = Some(error);
+        }
+    }
+    if let Some(error) = first_error {
+        return Err(error);
     }
     Ok(())
 }

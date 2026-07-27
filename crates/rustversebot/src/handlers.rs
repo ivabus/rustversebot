@@ -225,10 +225,12 @@ async fn cmd_endgame_pair(
     };
 
     let deadly_begin_time = deadly.begin_time.clone();
-    tokio::try_join!(
+    let (deadly_preload, shiyu_preload) = tokio::join!(
         rustverse_svg::preload_deadly_info_images(&deadly_detail),
         rustverse_svg::preload_shiyu_info_images(&shiyu_detail)
-    )?;
+    );
+    deadly_preload?;
+    shiyu_preload?;
 
     let deadly_render = tokio::task::spawn_blocking(move || {
         rustverse_svg::deadly_info_with_begin_time(&deadly_detail, Some(&deadly_begin_time))
