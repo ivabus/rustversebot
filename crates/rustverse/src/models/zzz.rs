@@ -149,6 +149,13 @@ impl ZZZDeadlyAssault {
             .sum()
     }
 
+    pub fn hard_stars(&self) -> i64 {
+        self.hard_list
+            .iter()
+            .map(|room| room.star.unwrap_or(0))
+            .sum()
+    }
+
     pub fn leaderboard_score(&self) -> i64 {
         self.normal_score() + self.hard_score()
     }
@@ -430,13 +437,14 @@ mod tests {
             "total_score": 143683,
             "hard_rank_percent": 1748,
             "has_hard": true,
-            "hard_list": [{"score": 17190}]
+            "hard_list": [{"score": 17190, "star": 1}]
         }"#;
 
         let da: ZZZDeadlyAssault = serde_json::from_str(json).unwrap();
         assert!(da.has_hard);
         assert_eq!(da.normal_score(), 143_683);
         assert_eq!(da.hard_score(), 17_190);
+        assert_eq!(da.hard_stars(), 1);
         assert_eq!(da.leaderboard_score(), 160_873);
     }
 

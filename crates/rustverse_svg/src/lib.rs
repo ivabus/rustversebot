@@ -285,6 +285,7 @@ pub struct TopDA {
 pub struct TopDAItem {
     pub nickname: String,
     pub stars: u8,
+    pub hard_stars: u8,
     pub total_score: u32,
     pub normal_score: u32,
     pub hard_score: u32,

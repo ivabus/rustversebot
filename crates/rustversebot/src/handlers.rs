@@ -1518,9 +1518,11 @@ pub async fn build_top_image_and_caption(
                     let nickname = e.nickname.clone().unwrap_or_else(|| e.uid.clone());
                     let normal_score = u32::try_from(data.normal_score()).ok()?;
                     let hard_score = u32::try_from(data.hard_score()).ok()?;
+                    let hard_stars = u8::try_from(data.hard_stars()).ok()?;
                     Some(rustverse_svg::TopDAItem {
                         nickname,
                         stars,
+                        hard_stars,
                         total_score: normal_score.saturating_add(hard_score),
                         normal_score,
                         hard_score,
