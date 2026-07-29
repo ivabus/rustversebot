@@ -485,24 +485,43 @@ async fn cmd_unregister(
 
 async fn cmd_status(bot: &Bot, chat_id: ChatId, state: &BotState) -> anyhow::Result<()> {
     let tracked = state.db.get_all_users().await?.len();
-    let now = Utc::now().to_rfc3339();
-    let active_events = state.db.active_season_events(&now).await?;
-    let mut seasons = Vec::new();
-    for (endgame_type, name) in [
-        ("deadly_assault", "Deadly Assault"),
-        ("shiyu_defense", "Shiyu Defense"),
-    ] {
-        let event = active_events
-            .iter()
-            .find(|event| event.endgame_type == endgame_type);
-        seasons.push(serde_json::json!({
+    let (deadly_index, shiyu_index) =
+        tokio::try_join!(state.nanoka.get_boss_seasons(), state.nanoka.get_seasons())?;
+    let now = Utc::now();
+    let active_seasons = [
+        (
+            "Deadly Assault",
+            select_indexed_season(
+                &deadly_index,
+                EndgameType::DeadlyAssault,
+                9,
+                SeasonPosition::Current,
+                now,
+            ),
+        ),
+        (
+            "Shiyu Defense",
+            select_indexed_season(
+                &shiyu_index,
+                EndgameType::ShiyuDefence,
+                1,
+                SeasonPosition::Current,
+                now,
+            ),
+        ),
+    ];
+    let seasons = active_seasons
+        .iter()
+        .map(|(name, season)| {
+            serde_json::json!({
             "name": name,
-            "active": event.is_some(),
-            "start": event.map(|event| event.starts_at.as_str()).unwrap_or("—"),
-            "end": event.and_then(|event| event.ends_at.as_deref()).unwrap_or("—"),
+            "active": season.is_some(),
+            "start": season.as_ref().map(|season| season.starts_at.to_rfc3339()).unwrap_or_else(|| "—".to_owned()),
+            "end": season.as_ref().and_then(|season| season.ends_at.map(|end| end.to_rfc3339())).unwrap_or_else(|| "—".to_owned()),
             "tracked": tracked,
-        }));
-    }
+            })
+        })
+        .collect::<Vec<_>>();
 
     let rendered = state
         .templates
@@ -1508,7 +1527,7 @@ pub async fn build_top_image_and_caption(
                     })
                 })
                 .collect();
-            top.sort_by(|left, right| right.total_score.cmp(&left.total_score));
+            top.sort_by_key(|item| std::cmp::Reverse(item.total_score));
             rustverse_svg::top_da(&rustverse_svg::TopDA { top })
         }
         "shiyu_defense" => {
