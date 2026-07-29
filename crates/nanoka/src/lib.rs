@@ -43,8 +43,17 @@ use std::sync::OnceLock;
 use tracing::debug;
 use types::*;
 
-static VERSION_RE: OnceLock<Regex> = OnceLock::new();
 static IMAGE_FILENAME_RE: OnceLock<Regex> = OnceLock::new();
+
+#[derive(serde::Deserialize)]
+struct DataManifest {
+    zzz: GameManifest,
+}
+
+#[derive(serde::Deserialize)]
+struct GameManifest {
+    latest: String,
+}
 
 /// The main client for the nanoka.cc ZZZ API.
 ///
@@ -121,31 +130,18 @@ impl NanokaClient {
 
     /// Resolve and cache the latest game data version.
     ///
-    /// Fetch the Shiyu page HTML and extract its version string.
-    /// The embedded `data-url` attribute contains this string.
+    /// Fetch the static-data manifest and read the latest ZZZ version.
     pub async fn version(&self) -> Result<&str, Error> {
         if let Some(v) = self.version.get() {
             return Ok(v.as_str());
         }
 
-        let resp = self.http.get("https://zzz.nanoka.cc/shiyu").send().await?;
-        let status = resp.status();
-        if !status.is_success() {
-            return Err(Error::HttpStatus {
-                status: status.as_u16(),
-                url: "https://zzz.nanoka.cc/shiyu".into(),
-            });
+        let url = format!("{}/manifest.json", self.base_url.trim_end_matches('/'));
+        let manifest: DataManifest = self.get_json(&url).await?;
+        let version = manifest.zzz.latest;
+        if version.is_empty() {
+            return Err(Error::VersionNotFound);
         }
-        let html = resp.text().await?;
-
-        let re = VERSION_RE.get_or_init(|| {
-            Regex::new(r"static\.nanoka\.cc/zzz/([0-9]+\.[0-9]+\.[0-9]+\+[0-9]+)/")
-                .expect("version regex compile")
-        });
-
-        let caps = re.captures(&html).ok_or(Error::VersionNotFound)?;
-
-        let version = caps[1].to_string();
         debug!("Resolved game version: {version}");
 
         // Cannot fail: OnceLock::set on an empty cell always succeeds.
@@ -396,14 +392,24 @@ pub enum Error {
     #[error("Unknown season ID {0} — expected a Shiyu (61…/62…) or Deadly Assault (69…) ID")]
     UnknownSeasonId(u64),
 
-    /// The game data version string could not be extracted from the website.
-    #[error("Could not find data version on nanoka.cc — the website format may have changed")]
+    /// The game data version string was absent from the static-data manifest.
+    #[error("Could not find the ZZZ data version in the nanoka.cc manifest")]
     VersionNotFound,
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parses_live_version_from_manifest() {
+        let manifest: DataManifest = serde_json::from_str(
+            r#"{"zzz":{"latest":"3.1","available":["3.1","3.2.0+17782873"]}}"#,
+        )
+        .unwrap();
+
+        assert_eq!(manifest.zzz.latest, "3.1");
+    }
 
     #[test]
     fn test_endgame_type_from_id() {

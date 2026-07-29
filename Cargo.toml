@@ -13,4 +13,3 @@ incremental = true
 
 [profile.release]
 strip = true
-lto = "thin"

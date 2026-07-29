@@ -285,7 +285,9 @@ pub struct TopDA {
 pub struct TopDAItem {
     pub nickname: String,
     pub stars: u8,
-    pub score: u32,
+    pub total_score: u32,
+    pub normal_score: u32,
+    pub hard_score: u32,
 }
 
 pub fn top_da(data: &TopDA) -> Vec<u8> {

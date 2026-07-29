@@ -137,7 +137,11 @@ impl ZZZClient {
         }
 
         let api_resp: ApiResponse<T> = serde_json::from_str(&text)?;
-
+        #[cfg(debug_assertions)]
+        {
+            let _value: serde_json::Value = serde_json::from_str(&text)?;
+            println!("{:#?}", _value);
+        }
         match api_resp.retcode {
             0 => api_resp.data.ok_or(HoyoverseError::DataNotPublic),
             -101 | 10001 => Err(HoyoverseError::Auth),
@@ -255,7 +259,7 @@ impl ZZZClient {
         let resp = self
             .client
             .get(format!(
-                "{ZZZ_BASE_URL}/event/game_record_zzz/api/zzz/mem_detail"
+                "{ZZZ_BASE_URL}/event/game_record_zzz/api/zzz/hadal_mem_detail_v2"
             ))
             .headers(self.headers_with_ds())
             .query(&[

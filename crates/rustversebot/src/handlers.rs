@@ -154,13 +154,52 @@ fn select_indexed_season(
         .collect::<Vec<_>>();
     production_entries.sort_by_key(|season| season.starts_at);
 
-    let current_index = production_entries.iter().rposition(|season| {
-        season.starts_at <= now && season.ends_at.is_none_or(|end| now < end)
-    })?;
-    let current = &production_entries[current_index];
+    let current_production_index = production_entries
+        .iter()
+        .rposition(|season| season.starts_at <= now && season.ends_at.is_none_or(|end| now < end));
+    let latest_started_production = production_entries
+        .iter()
+        .rposition(|season| season.starts_at <= now);
+
+    // A six-digit season can graduate from preview to the live rotation while
+    // retaining its preview ID. Treat it as current only after the preceding
+    // five-digit production season has ended. An active five-digit season
+    // always wins, so broad preview dates cannot make a beta season current.
+    let promoted_current = if current_production_index.is_none() {
+        latest_started_production.and_then(|previous_index| {
+            let previous = &production_entries[previous_index];
+            seasons
+                .iter()
+                .filter_map(|(id, meta)| indexed_season(id, meta, endgame_type, sort))
+                .filter(|season| {
+                    season.is_test
+                        && season.sequence_id == previous.sequence_id + 1
+                        && previous.ends_at.is_some_and(|end| season.starts_at >= end)
+                        && season.starts_at <= now
+                        && season.ends_at.is_none_or(|end| now < end)
+                })
+                .max_by_key(|season| season.starts_at)
+        })
+    } else {
+        None
+    };
+
+    let current = current_production_index
+        .map(|index| production_entries[index].clone())
+        .or(promoted_current);
+
+    let current = current?;
     match position {
+        SeasonPosition::Previous if current.is_test => production_entries
+            .iter()
+            .filter(|season| season.starts_at < current.starts_at)
+            .max_by_key(|season| season.starts_at)
+            .cloned(),
         SeasonPosition::Previous => production_entries
-            .get(current_index.checked_sub(1)?)
+            .iter()
+            .position(|season| season.id == current.id)
+            .and_then(|index| index.checked_sub(1))
+            .and_then(|index| production_entries.get(index))
             .cloned(),
         SeasonPosition::Current => Some(current.clone()),
         SeasonPosition::Next => {
@@ -180,7 +219,11 @@ fn select_indexed_season(
 
             // Outside a beta window, retain the established production index
             // behaviour: its direct chronological neighbour is /next.
-            production_entries.get(current_index + 1).cloned()
+            production_entries
+                .iter()
+                .filter(|season| season.starts_at > current.starts_at)
+                .min_by_key(|season| season.starts_at)
+                .cloned()
         }
     }
 }
@@ -1447,19 +1490,25 @@ pub async fn build_top_image_and_caption(
 
     let png = match endgame_type {
         "deadly_assault" => {
-            let top: Vec<rustverse_svg::TopDAItem> = entries
+            let mut top: Vec<rustverse_svg::TopDAItem> = entries
                 .iter()
                 .filter_map(|e| {
-                    let v: serde_json::Value = serde_json::from_str(&e.data_json).ok()?;
-                    let stars = v.get("total_star")?.as_i64()? as u8;
+                    let data: rustverse::models::zzz::ZZZDeadlyAssault =
+                        serde_json::from_str(&e.data_json).ok()?;
+                    let stars = data.total_star? as u8;
                     let nickname = e.nickname.clone().unwrap_or_else(|| e.uid.clone());
+                    let normal_score = u32::try_from(data.normal_score()).ok()?;
+                    let hard_score = u32::try_from(data.hard_score()).ok()?;
                     Some(rustverse_svg::TopDAItem {
                         nickname,
                         stars,
-                        score: e.total_score as u32,
+                        total_score: normal_score.saturating_add(hard_score),
+                        normal_score,
+                        hard_score,
                     })
                 })
                 .collect();
+            top.sort_by(|left, right| right.total_score.cmp(&left.total_score));
             rustverse_svg::top_da(&rustverse_svg::TopDA { top })
         }
         "shiyu_defense" => {
@@ -1740,6 +1789,62 @@ mod tests {
                 now,
             )
             .is_none()
+        );
+    }
+
+    #[test]
+    fn six_digit_season_becomes_current_after_production_season_ends() {
+        let seasons = HashMap::from([
+            (
+                "69041".to_owned(),
+                season_meta(9, "2026-07-17 04:00:00", "2026-07-29 03:59:59"),
+            ),
+            (
+                "690421".to_owned(),
+                season_meta(9, "2026-07-29 04:00:00", "2026-08-14 03:59:59"),
+            ),
+            (
+                "690431".to_owned(),
+                season_meta(9, "2026-08-14 04:00:00", "2026-08-28 03:59:59"),
+            ),
+        ]);
+        let now = Utc.with_ymd_and_hms(2026, 7, 29, 6, 0, 0).unwrap();
+
+        let selected = |position| {
+            select_indexed_season(&seasons, EndgameType::DeadlyAssault, 9, position, now)
+                .unwrap()
+                .id
+        };
+        assert_eq!(selected(SeasonPosition::Previous), 69041);
+        assert_eq!(selected(SeasonPosition::Current), 690421);
+        assert_eq!(selected(SeasonPosition::Next), 690431);
+    }
+
+    #[test]
+    fn broad_six_digit_preview_does_not_replace_active_production_season() {
+        let seasons = HashMap::from([
+            (
+                "69041".to_owned(),
+                season_meta(9, "2026-07-17 04:00:00", "2026-07-29 03:59:59"),
+            ),
+            (
+                "690421".to_owned(),
+                season_meta(9, "2026-06-10 04:00:00", "2026-08-19 03:59:59"),
+            ),
+        ]);
+        let now = Utc.with_ymd_and_hms(2026, 7, 25, 0, 0, 0).unwrap();
+
+        assert_eq!(
+            select_indexed_season(
+                &seasons,
+                EndgameType::DeadlyAssault,
+                9,
+                SeasonPosition::Current,
+                now,
+            )
+            .unwrap()
+            .id,
+            69041
         );
     }
 

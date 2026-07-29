@@ -129,6 +129,29 @@ pub struct ZZZDeadlyAssault {
     pub avatar_icon: Option<String>,
     #[serde(default)]
     pub list: Vec<ZZZDeadlyAssaultRoom>,
+    #[serde(default)]
+    pub has_hard: bool,
+    #[serde(default)]
+    pub hard_rank_percent: Option<f64>,
+    #[serde(default)]
+    pub hard_list: Vec<ZZZDeadlyAssaultRoom>,
+}
+
+impl ZZZDeadlyAssault {
+    pub fn normal_score(&self) -> i64 {
+        self.total_score.unwrap_or(0)
+    }
+
+    pub fn hard_score(&self) -> i64 {
+        self.hard_list
+            .iter()
+            .map(|room| room.score.unwrap_or(0))
+            .sum()
+    }
+
+    pub fn leaderboard_score(&self) -> i64 {
+        self.normal_score() + self.hard_score()
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -399,6 +422,22 @@ mod tests {
         assert_eq!(room.boss[0].name, "Test Boss");
         assert_eq!(room.buffer[0].title.as_deref(), Some("Buff Name"));
         assert_eq!(room.buffer[0].description.as_deref(), Some("Test buff"));
+    }
+
+    #[test]
+    fn deadly_assault_leaderboard_score_includes_hard_mode() {
+        let json = r#"{
+            "total_score": 143683,
+            "hard_rank_percent": 1748,
+            "has_hard": true,
+            "hard_list": [{"score": 17190}]
+        }"#;
+
+        let da: ZZZDeadlyAssault = serde_json::from_str(json).unwrap();
+        assert!(da.has_hard);
+        assert_eq!(da.normal_score(), 143_683);
+        assert_eq!(da.hard_score(), 17_190);
+        assert_eq!(da.leaderboard_score(), 160_873);
     }
 
     #[test]
