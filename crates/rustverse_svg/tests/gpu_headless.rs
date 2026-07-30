@@ -5,7 +5,7 @@ use rustverse_svg::{
         PhysicalSize, physical_size, start_renderer_service,
     },
     renderer_service::{RenderRequest, RendererService, SolidColor},
-    scene::LogicalSize,
+    scene::{Color, Fill, LogicalSize, Paint, Rect, Scene, Shape, ShapeNode},
 };
 
 async fn service_or_documented_skip(
@@ -14,6 +14,12 @@ async fn service_or_documented_skip(
     match start_renderer_service(options, 2).await {
         Ok(service) => Some(service),
         Err(GpuRenderError::Initialize(GpuInitError::AdapterUnavailable(error))) => {
+            if std::env::var_os("RUSTVERSE_REQUIRE_GPU").is_some_and(|value| value == "1") {
+                panic!(
+                    "RUSTVERSE_REQUIRE_GPU=1 but no surface-free wgpu adapter is available: \
+                     {error}"
+                );
+            }
             eprintln!("SKIP: no surface-free wgpu adapter is available: {error}");
             None
         }
@@ -34,14 +40,14 @@ async fn clear_pass_reads_back_rgba_and_encodes_png() {
         return;
     };
     let png = service
-        .render(RenderRequest {
-            logical_size: LogicalSize {
+        .render(RenderRequest::clear(
+            LogicalSize {
                 width: 3.0,
                 height: 2.0,
             },
-            scale: RenderScale::ONE,
-            color: SolidColor::rgba(255, 0, 0, 255),
-        })
+            RenderScale::ONE,
+            SolidColor::rgba(255, 0, 0, 255),
+        ))
         .await
         .unwrap();
 
@@ -52,6 +58,42 @@ async fn clear_pass_reads_back_rgba_and_encodes_png() {
     let output = reader.next_frame(&mut decoded).unwrap();
     assert_eq!((output.width, output.height), (3, 2));
     assert_eq!(&decoded[..output.buffer_size()], [255, 0, 0, 255].repeat(6));
+}
+
+#[tokio::test]
+async fn production_service_renders_a_backend_neutral_shape_scene() {
+    let Some(service) = service_or_documented_skip(GpuRendererOptions::default()).await else {
+        return;
+    };
+    let logical_size = LogicalSize {
+        width: 8.0,
+        height: 8.0,
+    };
+    let mut scene = Scene::new(logical_size);
+    scene.nodes.push(ShapeNode::new(
+        Shape::Rect(Rect::new(2.0, 2.0, 4.0, 4.0).unwrap()),
+        Fill::new(Paint::Solid(Color::new(1.0, 0.0, 0.0, 1.0).unwrap())),
+    ));
+
+    let png = service
+        .render(RenderRequest::scene(
+            scene,
+            RenderScale::ONE,
+            SolidColor::rgba(0, 0, 0, 255),
+        ))
+        .await
+        .unwrap();
+    let mut reader = png::Decoder::new(std::io::Cursor::new(png))
+        .read_info()
+        .unwrap();
+    let mut decoded = vec![0; reader.output_buffer_size().unwrap()];
+    let output = reader.next_frame(&mut decoded).unwrap();
+    let pixel = |x: usize, y: usize| {
+        let offset = (y * output.width as usize + x) * 4;
+        &decoded[offset..offset + 4]
+    };
+    assert_eq!(pixel(0, 0), [0, 0, 0, 255]);
+    assert_eq!(pixel(3, 3), [255, 0, 0, 255]);
 }
 
 #[test]
@@ -148,19 +190,19 @@ async fn one_context_supports_repeated_renders() {
     };
 
     let first = service
-        .render(RenderRequest {
-            logical_size: logical,
-            scale: RenderScale::ONE,
-            color: SolidColor::rgba(0, 255, 0, 255),
-        })
+        .render(RenderRequest::clear(
+            logical,
+            RenderScale::ONE,
+            SolidColor::rgba(0, 255, 0, 255),
+        ))
         .await
         .unwrap();
     let second = service
-        .render(RenderRequest {
-            logical_size: logical,
-            scale: RenderScale::ONE,
-            color: SolidColor::rgba(0, 0, 255, 255),
-        })
+        .render(RenderRequest::clear(
+            logical,
+            RenderScale::ONE,
+            SolidColor::rgba(0, 0, 255, 255),
+        ))
         .await
         .unwrap();
 
@@ -219,12 +261,12 @@ async fn renderer_service_emits_deterministic_solids_at_every_required_scale() {
             },
         ),
     ] {
-        let request = RenderRequest {
+        let request = RenderRequest::clear(
             logical_size,
-            scale: RenderScale::new(factor).unwrap(),
-            color: SolidColor::rgba(17, 34, 51, 255),
-        };
-        let first = service.render(request).await.unwrap();
+            RenderScale::new(factor).unwrap(),
+            SolidColor::rgba(17, 34, 51, 255),
+        );
+        let first = service.render(request.clone()).await.unwrap();
         let second = service.render(request).await.unwrap();
         assert_eq!(first, second, "warm render changed at scale {factor}");
 

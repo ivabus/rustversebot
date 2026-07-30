@@ -3,6 +3,18 @@
 //! Phase 1 establishes logical sizing and ordered layers. Concrete primitives
 //! and effects are added as card families migrate away from SVG.
 
+pub mod paint;
+pub mod primitives;
+
+pub use paint::{
+    AffineTransform, Color, DiagonalPattern, DotPattern, GradientStop, LinearGradient, Paint,
+    PaintError, PaintSpace, PatternDescriptor, PatternPaint, RadialGradient,
+    RepeatedTexturePattern, TexturePatternHandle,
+};
+pub use primitives::{
+    Circle, CornerRadii, Fill, GeometryError, Point, Rect, RoundedRect, Shape, ShapeNode, Stroke,
+};
+
 /// A scene size in logical pixels, independent of output scale.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct LogicalSize {

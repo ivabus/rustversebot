@@ -1,6 +1,6 @@
 # GPU renderer migration plan
 
-Status: design and test-harness foundation
+Status: Phase 3 primitive/paint gate complete
 Reference renderer: `resvg` 0.47 through `rustverse_svg`
 Target text renderer: `glyphon` 0.12 / `wgpu` 30 API generation
 Parity reference scale: `zoom_factor = 1.0`
@@ -1388,6 +1388,28 @@ Tests:
 Exit gate:
 
 - shared background and empty card shells render without `resvg`.
+
+Current status: complete. The bounded production renderer service now accepts
+backend-neutral `Scene<ShapeNode>` requests and converts ordered fill/centered-
+stroke nodes into one persistent instanced GPU primitive pipeline. Rectangle,
+rounded-rectangle, and circle geometry; solid, linear, circular/elliptical
+radial, object-bounding-box, and user-space gradients; the two-lattice card-dot
+pattern; the phase-matched diagonal background; and linearly filtered,
+transformed repeated textures all render without `resvg`.
+
+`Rgba8Unorm` is the canonical byte-space target. Authored channels are
+quantized to the reference renderer's RGBA8 representation before
+interpolation, GPU intermediates use premultiplied source-over, and readback is
+unpremultiplied to straight RGBA before PNG encoding. Exact Metal tests cover
+gray and colored gradient midpoints, 50% source-over, transparent output,
+painter order, pattern phase, repeated-texture rotation, and the empty shell.
+Multiply remains a Phase 5 composition effect, but its reference byte is
+captured in the color characterization matrix.
+
+The required hardware lane sets `RUSTVERSE_REQUIRE_GPU=1`; an unavailable
+adapter then fails instead of reporting a skipped test. The logical scale gate
+uses `0.5, 1.0, 1.25, 2.0, 5.0`, with pattern-edge checks at
+`1.0, 1.25, 2.0, 5.0`.
 
 ### Phase 4 — Persistent atlas resources and image fitting
 

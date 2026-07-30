@@ -12,7 +12,7 @@ use std::future::Future;
 use tokio::sync::{mpsc, oneshot};
 
 use crate::renderer::RenderScale;
-use crate::scene::LogicalSize;
+use crate::scene::{LogicalSize, Scene, ShapeNode};
 
 /// A solid RGBA color with straight, eight-bit channels.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -34,15 +34,43 @@ impl SolidColor {
     }
 }
 
-/// The Phase 2 clear-pass input.
-///
-/// Later phases can replace or extend this payload with a validated display
-/// list without changing the ownership and backpressure model of the service.
-#[derive(Clone, Copy, Debug, PartialEq)]
+/// Backend-neutral input for a headless render.
+#[derive(Clone, Debug, PartialEq)]
 pub struct RenderRequest {
-    pub logical_size: LogicalSize,
-    pub scale: RenderScale,
-    pub color: SolidColor,
+    scene: Scene<ShapeNode>,
+    scale: RenderScale,
+    clear_color: SolidColor,
+}
+
+impl RenderRequest {
+    /// Creates an empty scene, preserving the Phase 2 clear-pass ergonomics.
+    pub fn clear(logical_size: LogicalSize, scale: RenderScale, clear_color: SolidColor) -> Self {
+        Self::scene(Scene::new(logical_size), scale, clear_color)
+    }
+
+    pub fn scene(scene: Scene<ShapeNode>, scale: RenderScale, clear_color: SolidColor) -> Self {
+        Self {
+            scene,
+            scale,
+            clear_color,
+        }
+    }
+
+    pub fn scene_ref(&self) -> &Scene<ShapeNode> {
+        &self.scene
+    }
+
+    pub fn scale(&self) -> RenderScale {
+        self.scale
+    }
+
+    pub fn clear_color(&self) -> SolidColor {
+        self.clear_color
+    }
+
+    pub fn into_parts(self) -> (Scene<ShapeNode>, RenderScale, SolidColor) {
+        (self.scene, self.scale, self.clear_color)
+    }
 }
 
 /// Backend contract for the service.

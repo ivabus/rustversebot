@@ -10,14 +10,14 @@ use rustverse_svg::scene::LogicalSize;
 use tokio::sync::{Semaphore, mpsc};
 
 fn request(red: u8) -> RenderRequest {
-    RenderRequest {
-        logical_size: LogicalSize {
+    RenderRequest::clear(
+        LogicalSize {
             width: 16.0,
             height: 9.0,
         },
-        scale: RenderScale::ONE,
-        color: SolidColor::rgba(red, 2, 3, 255),
-    }
+        RenderScale::ONE,
+        SolidColor::rgba(red, 2, 3, 255),
+    )
 }
 
 struct CountingStartup {
@@ -42,13 +42,13 @@ impl RendererBackend for CountingBackend {
 
     async fn render(&mut self, request: RenderRequest) -> Result<Vec<u8>, Self::Error> {
         self.renders.fetch_add(1, Ordering::SeqCst);
-        if request.color.red == 0 {
+        if request.clear_color().red == 0 {
             Err("synthetic render failure")
         } else {
             Ok(vec![
-                request.color.red,
-                request.logical_size.width as u8,
-                request.scale.factor() as u8,
+                request.clear_color().red,
+                request.scene_ref().logical_size.width as u8,
+                request.scale().factor() as u8,
             ])
         }
     }
@@ -112,9 +112,9 @@ impl RendererBackend for GatedBackend {
     }
 
     async fn render(&mut self, request: RenderRequest) -> Result<Vec<u8>, Self::Error> {
-        let _ = self.entered.send(request.color.red);
+        let _ = self.entered.send(request.clear_color().red);
         self.release.acquire().await.unwrap().forget();
-        Ok(vec![request.color.red])
+        Ok(vec![request.clear_color().red])
     }
 }
 

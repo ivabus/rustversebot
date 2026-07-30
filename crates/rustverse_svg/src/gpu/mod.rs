@@ -1,7 +1,10 @@
 //! Headless GPU rendering infrastructure.
 
 mod context;
+mod patterns;
+mod primitives;
 pub mod resources;
+mod scene;
 
 use std::fmt;
 
@@ -73,12 +76,16 @@ impl GpuRenderer {
         })
     }
 
-    async fn render_clear(&self, request: RenderRequest) -> Result<HeadlessImage, anyhow::Error> {
-        let color = request.color;
+    async fn render_request(
+        &mut self,
+        request: RenderRequest,
+    ) -> Result<HeadlessImage, anyhow::Error> {
+        let (scene, scale, color) = request.into_parts();
+        let primitives = scene::prepare_scene(&scene)?;
         self.context
-            .render_clear(
-                request.logical_size,
-                request.scale,
+            .render_primitives(
+                scene.logical_size,
+                scale,
                 [
                     f64::from(color.red) / 255.0,
                     f64::from(color.green) / 255.0,
@@ -86,6 +93,7 @@ impl GpuRenderer {
                     f64::from(color.alpha) / 255.0,
                 ],
                 self.options.max_target_bytes(),
+                &primitives,
             )
             .await
     }
@@ -133,7 +141,7 @@ impl RendererBackend for GpuRenderer {
     }
 
     async fn render(&mut self, request: RenderRequest) -> Result<Vec<u8>, Self::Error> {
-        self.render_clear(request)
+        self.render_request(request)
             .await
             .map(|image| image.png)
             .map_err(GpuRenderError::Render)
