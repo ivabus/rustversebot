@@ -220,7 +220,38 @@ static REMOTE_IMAGE_HREF: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r#"\bhref="(https?://[^"]+)""#).expect("remote image href regex must compile")
 });
 
+/// Default output scale used by the compatibility SVG renderer.
+///
+/// New render paths must accept a [`RenderScale`] per render instead of
+/// reading this constant directly. Keeping the default here preserves the
+/// dimensions of the existing bot images during the GPU renderer migration.
 pub const ZOOM_FACTOR: f32 = 5.0;
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct RenderScale(f32);
+
+impl RenderScale {
+    pub const ONE: Self = Self(1.0);
+    pub const DEFAULT: Self = Self(ZOOM_FACTOR);
+
+    pub fn new(zoom_factor: f32) -> anyhow::Result<Self> {
+        anyhow::ensure!(
+            zoom_factor.is_finite() && zoom_factor > 0.0,
+            "render zoom factor must be finite and greater than zero"
+        );
+        Ok(Self(zoom_factor))
+    }
+
+    pub const fn factor(self) -> f32 {
+        self.0
+    }
+}
+
+impl Default for RenderScale {
+    fn default() -> Self {
+        Self::DEFAULT
+    }
+}
 
 #[derive(Serialize, Deserialize)]
 pub struct TopShiyu {
@@ -242,6 +273,19 @@ pub fn try_render_from_serialize<T: Serialize>(
     template: &str,
     data: &T,
 ) -> anyhow::Result<Vec<u8>> {
+    try_render_from_serialize_with_scale(template, data, RenderScale::DEFAULT)
+}
+
+/// Render a compatibility SVG template at an explicit output scale.
+///
+/// This is primarily the reference side of the GPU parity tests. The future
+/// scene renderer uses the same rule: layouts stay in logical units and the
+/// scale controls physical target dimensions and rasterization.
+pub fn try_render_from_serialize_with_scale<T: Serialize>(
+    template: &str,
+    data: &T,
+    scale: RenderScale,
+) -> anyhow::Result<Vec<u8>> {
     let template = MJ_ENVIRONMENT.get_template(template)?;
     let rendered = template.render(data)?;
 
@@ -257,17 +301,21 @@ pub fn try_render_from_serialize<T: Serialize>(
         );
     }
 
+    rasterize_svg(&rendered, scale)
+}
+
+fn rasterize_svg(rendered: &str, scale: RenderScale) -> anyhow::Result<Vec<u8>> {
     let tree = usvg::Tree::from_data(rendered.as_bytes(), &USVG_OPTIONS)?;
     let pixmap_size = tree
         .size()
         .to_int_size()
-        .scale_by(ZOOM_FACTOR)
+        .scale_by(scale.factor())
         .ok_or_else(|| anyhow::anyhow!("rendered SVG size is invalid"))?;
     let mut pixmap = tiny_skia::Pixmap::new(pixmap_size.width(), pixmap_size.height())
         .ok_or_else(|| anyhow::anyhow!("could not allocate SVG render target"))?;
     resvg::render(
         &tree,
-        tiny_skia::Transform::from_scale(ZOOM_FACTOR, ZOOM_FACTOR),
+        tiny_skia::Transform::from_scale(scale.factor(), scale.factor()),
         &mut pixmap.as_mut(),
     );
     Ok(pixmap.encode_png()?)
@@ -947,7 +995,7 @@ mod tests {
         Zone,
     };
 
-    use super::wrap_game_text_lines;
+    use super::{RenderScale, wrap_game_text_lines};
 
     #[test]
     fn wrapped_colored_text_keeps_its_color_on_every_line() {
@@ -960,6 +1008,40 @@ mod tests {
                 "<color=#2BAD00>30% faster</color>",
             ]
         );
+    }
+
+    #[test]
+    fn compatibility_renderer_scales_logical_dimensions_per_render() {
+        let svg = r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 10 6"><rect width="10" height="6" fill="red"/></svg>"#;
+
+        for (zoom_factor, expected_dimensions) in [
+            (0.5, (5, 3)),
+            (1.0, (10, 6)),
+            (1.25, (13, 8)),
+            (2.0, (20, 12)),
+            (5.0, (50, 30)),
+        ] {
+            let png = super::rasterize_svg(svg, RenderScale::new(zoom_factor).unwrap()).unwrap();
+            let reader = png::Decoder::new(std::io::Cursor::new(png))
+                .read_info()
+                .unwrap();
+
+            assert_eq!(
+                (reader.info().width, reader.info().height),
+                expected_dimensions,
+                "wrong physical dimensions at zoom factor {zoom_factor}"
+            );
+        }
+    }
+
+    #[test]
+    fn render_scale_rejects_non_positive_and_non_finite_values() {
+        for zoom_factor in [0.0, -1.0, f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+            assert!(
+                RenderScale::new(zoom_factor).is_err(),
+                "{zoom_factor:?} must not be a valid render scale"
+            );
+        }
     }
 
     fn monster(id: u64, name: &str, hp: f64) -> Monster {

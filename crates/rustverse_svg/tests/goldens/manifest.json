@@ -1,0 +1,57 @@
+{
+  "schema_version": 1,
+  "hash_algorithm": "sha256",
+  "fixtures": [
+    {
+      "name": "top_da_single_entry",
+      "input": "fixtures/top_da_single_entry.json",
+      "input_sha256": "61e49bcd7826b073a34eef6635a8c21f0243220bfd501a934953bf3f095aa42a",
+      "golden": "goldens/top_da_single_entry.scale-1.png",
+      "golden_sha256": "1597bce6f816ce89dab46a840350e5a2cecf9e8c3415906f387e75c7a3569659",
+      "logical_size": {
+        "width": 450,
+        "height": 209
+      },
+      "scale": 1.0,
+      "renderer": {
+        "entry_point": "rustverse_svg::try_render_from_serialize_with_scale",
+        "resvg_version": "0.47.0",
+        "glyphon_version": "not-yet-integrated",
+        "wgpu_version": "not-yet-integrated",
+        "sources": [
+          {
+            "path": "../top_da.j2",
+            "sha256": "fa726fd9a4cff17072967d7c64c201db60f77aa49c70dda9d4071117ea641865"
+          },
+          {
+            "path": "../defs.j2",
+            "sha256": "abbd766530aa74a1ee078ff0ae695d2d999632f372ed4cb4b2d6d24be795d734"
+          }
+        ]
+      },
+      "font": {
+        "path": "../inpin.ttf",
+        "sha256": "d2ac904501673027d6ca891abdcd346d2ae6527a713fcb477a151b47162185b2"
+      },
+      "images": [
+        {
+          "path": "../image/da.webp",
+          "sha256": "3c9f19efed99ae79197897d4e30436b22d3aeb2a514c89d8bf78cdc8db3c85b0"
+        },
+        {
+          "path": "../image/hollows.png",
+          "sha256": "53aa044bd0217a372349f0604b069bb501b55d1449129f967f2198af16d4c5dc"
+        },
+        {
+          "path": "../image/star-icon.png",
+          "sha256": "ec5c1dd1877ccb79afb4277c50e86bf7c01a98e1fc4d054c7616ec17e16d0b0d"
+        }
+      ],
+      "comparison_policy": {
+        "max_channel_delta": 0,
+        "max_differing_pixels": 0,
+        "rationale": "Exact deterministic CPU reference baseline at scale 1.0"
+      }
+    }
+  ]
+}

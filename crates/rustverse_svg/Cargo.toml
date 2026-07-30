@@ -18,6 +18,9 @@ tokio = { version = "1", features = ["fs", "macros", "rt-multi-thread"] }
 [features]
 render-season = []
 
+[dev-dependencies]
+png = "0.18.1"
+
 [[example]]
 name = "render_season"
 required-features = ["render-season"]
