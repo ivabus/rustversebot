@@ -1,6 +1,8 @@
 # GPU renderer migration plan
 
-Status: Phase 3 primitive/paint gate complete
+Status: Phase 4 persistent image-atlas gate complete
+Last completed migration commit: `843c4e8`
+Next milestone: Phase 5 clips, masks, blending, effects, and backdrop
 Reference renderer: `resvg` 0.47 through `rustverse_svg`
 Target text renderer: `glyphon` 0.12 / `wgpu` 30 API generation
 Parity reference scale: `zoom_factor = 1.0`
@@ -1454,6 +1456,12 @@ generation-safe residency. Draw records contain only resident handles,
 resolved page/UV data, and logical geometry.
 
 ### Phase 5 — Clips, masks, blending, effects, and backdrop
+
+Current status: not started. The Phase 4 commit is the clean resume point.
+Begin with the backend-neutral layer/clip/effect contracts and transient-target
+pool design, then split GPU clip/mask composition, effect compilation, and
+backdrop blur into independently reviewed work packages. No Phase 5 code was
+left uncommitted at the end of the 2026-07-30 work session.
 
 Deliverables:
 
