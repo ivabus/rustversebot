@@ -1357,6 +1357,17 @@ Exit gate:
 - a warm renderer emits deterministic solid PNGs at every scale in the matrix;
 - no device is created per render.
 
+Current status: complete. `wgpu` 30.0.0 and `glyphon` 0.12.0 are pinned to
+one compatible dependency graph. The surface-free renderer owns one
+adapter/device/queue and one persistent image-atlas, glyphon-state, and effect
+registry aggregate; the integration gate is verified on an Apple M2 Metal
+adapter. Its bounded single-owner service reuses that state while clear passes
+render deterministic RGBA8 PNGs at scales 0.5, 1.0, 1.25, 2.0, and 5.0.
+The owner loop runs on a dedicated thread, and target/staging byte budgets plus
+device limits are validated before GPU allocation. Aligned readback, request
+error isolation, queued cancellation, and queue backpressure are covered by
+release tests.
+
 ### Phase 3 — Shapes, paints, gradients, and patterns
 
 Deliverables:

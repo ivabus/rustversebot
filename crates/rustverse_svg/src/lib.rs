@@ -4,9 +4,11 @@
 //! the backend-neutral scene and renderer contracts are introduced.
 
 pub mod cards;
+pub mod gpu;
 mod model;
 mod reference_svg;
 pub mod renderer;
+pub mod renderer_service;
 pub mod scene;
 
 pub use model::*;

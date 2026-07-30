@@ -16,8 +16,8 @@
       "renderer": {
         "entry_point": "rustverse_svg::try_render_from_serialize_with_scale",
         "resvg_version": "0.47.0",
-        "glyphon_version": "not-yet-integrated",
-        "wgpu_version": "not-yet-integrated",
+        "glyphon_version": "0.12.0",
+        "wgpu_version": "30.0.0",
         "sources": [
           {
             "path": "../top_da.j2",
