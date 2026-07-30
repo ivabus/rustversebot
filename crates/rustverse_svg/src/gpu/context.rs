@@ -4,7 +4,12 @@ use anyhow::Context as _;
 
 use crate::{RenderScale, scene::LogicalSize};
 
-use super::primitives::{Primitive, PrimitivePipeline};
+use super::{
+    atlas::gpu::PreparedImageDraw,
+    primitives::{Primitive, PrimitivePipeline},
+    resources::ImageAtlasSet,
+    scene::{DrawItem, PreparedScene},
+};
 
 /// The color format shared by headless render targets and their PNG output.
 pub const RGBA8_TARGET_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
@@ -50,6 +55,8 @@ pub enum GpuInitError {
     AdapterUnavailable(wgpu::RequestAdapterError),
     /// An adapter exists, but creating its logical device failed.
     DeviceUnavailable(wgpu::RequestDeviceError),
+    /// Persistent renderer resources could not be prepared and uploaded.
+    Resources(anyhow::Error),
 }
 
 impl fmt::Display for GpuInitError {
@@ -61,6 +68,12 @@ impl fmt::Display for GpuInitError {
             Self::DeviceUnavailable(error) => {
                 write!(formatter, "headless GPU device creation failed: {error}")
             }
+            Self::Resources(error) => {
+                write!(
+                    formatter,
+                    "persistent GPU resource initialization failed: {error:#}"
+                )
+            }
         }
     }
 }
@@ -70,6 +83,7 @@ impl std::error::Error for GpuInitError {
         match self {
             Self::AdapterUnavailable(error) => Some(error),
             Self::DeviceUnavailable(error) => Some(error),
+            Self::Resources(error) => Some(error.as_ref()),
         }
     }
 }
@@ -127,6 +141,14 @@ impl GpuContext {
         })
     }
 
+    pub(crate) fn device(&self) -> &wgpu::Device {
+        &self.device
+    }
+
+    pub(crate) fn queue(&self) -> &wgpu::Queue {
+        &self.queue
+    }
+
     /// Draws a primitive batch over a clear color and returns straight-alpha
     /// readback bytes plus a PNG.
     pub(crate) async fn render_primitives(
@@ -136,6 +158,52 @@ impl GpuContext {
         color: [f64; 4],
         max_target_bytes: u64,
         primitives: &[Primitive],
+    ) -> anyhow::Result<HeadlessImage> {
+        self.render_internal(
+            logical_size,
+            scale,
+            color,
+            max_target_bytes,
+            primitives,
+            None,
+        )
+        .await
+    }
+
+    pub(crate) async fn render_scene(
+        &mut self,
+        logical_size: LogicalSize,
+        scale: RenderScale,
+        color: [f64; 4],
+        max_target_bytes: u64,
+        scene: &PreparedScene,
+        image_atlas: &mut ImageAtlasSet,
+    ) -> anyhow::Result<HeadlessImage> {
+        let image_draws = image_atlas.prepare_draws(
+            &self.device,
+            &self.queue,
+            [logical_size.width, logical_size.height],
+            &scene.images,
+        )?;
+        self.render_internal(
+            logical_size,
+            scale,
+            color,
+            max_target_bytes,
+            &scene.primitives,
+            Some((image_atlas, &image_draws, &scene.order)),
+        )
+        .await
+    }
+
+    async fn render_internal(
+        &mut self,
+        logical_size: LogicalSize,
+        scale: RenderScale,
+        color: [f64; 4],
+        max_target_bytes: u64,
+        primitives: &[Primitive],
+        image_plan: Option<(&ImageAtlasSet, &[PreparedImageDraw], &[DrawItem])>,
     ) -> anyhow::Result<HeadlessImage> {
         anyhow::ensure!(
             color
@@ -205,7 +273,23 @@ impl GpuContext {
                 color_attachments: &color_attachments,
                 ..Default::default()
             });
-            self.primitives.draw(&mut pass);
+            if let Some((image_atlas, image_draws, order)) = image_plan {
+                for item in order {
+                    match *item {
+                        DrawItem::Primitives { start, end } => {
+                            self.primitives.draw_range(&mut pass, start..end);
+                        }
+                        DrawItem::Image(index) => {
+                            let prepared = *image_draws
+                                .get(index as usize)
+                                .context("prepared image draw is missing")?;
+                            image_atlas.draw_prepared(&mut pass, prepared);
+                        }
+                    }
+                }
+            } else {
+                self.primitives.draw(&mut pass);
+            }
         }
         encoder.copy_texture_to_buffer(
             wgpu::TexelCopyTextureInfo {
@@ -358,6 +442,10 @@ fn encode_png(size: PhysicalSize, rgba: &[u8]) -> anyhow::Result<Vec<u8>> {
 mod tests {
     use super::*;
     use crate::gpu::{
+        atlas::{
+            decode::{DecodeLimits, decode_image},
+            source::BundledImage,
+        },
         patterns::{
             DiagonalPattern, DotPattern, LogicalToPattern, PatternTextureHandle,
             RepeatedTexturePattern,
@@ -366,6 +454,12 @@ mod tests {
             GradientStop, Primitive, PrimitiveColor, PrimitivePaint, PrimitiveRect, PrimitiveShape,
             PrimitiveStyle,
         },
+        resources::PersistentResources,
+        scene::prepare_scene,
+    };
+    use crate::scene::{
+        Color, Fill, ImageDimensions, ImageFit, ImageNode, LogicalSize, Paint, Rect, Scene,
+        SceneNode, Shape, ShapeNode,
     };
 
     fn limits(max_texture_dimension_2d: u32, max_buffer_size: u64) -> wgpu::Limits {
@@ -433,6 +527,124 @@ mod tests {
             )
             .await
             .unwrap()
+    }
+
+    #[tokio::test]
+    async fn bundled_images_sample_from_resident_atlas_pages() {
+        let Some(mut context) = context_or_skip().await else {
+            return;
+        };
+        let mut resources = PersistentResources::new(context.device(), context.queue()).unwrap();
+        let mut scene = Scene::<SceneNode>::new(LogicalSize {
+            width: 128.0,
+            height: 32.0,
+        });
+        for (index, bundled) in BundledImage::all().into_iter().enumerate() {
+            let decoded = decode_image(bundled.encoded(), DecodeLimits::default()).unwrap();
+            scene.nodes.push(
+                ImageNode::new(
+                    resources.image_atlases().bundled_handle(bundled),
+                    ImageDimensions::new(decoded.width, decoded.height).unwrap(),
+                    Rect::new(index as f32 * 32.0, 0.0, 32.0, 32.0).unwrap(),
+                    ImageFit::Contain,
+                )
+                .into(),
+            );
+        }
+        let prepared = prepare_scene(&scene).unwrap();
+        assert_eq!(prepared.images.len(), 4);
+        assert_eq!(
+            prepared.order,
+            vec![
+                DrawItem::Image(0),
+                DrawItem::Image(1),
+                DrawItem::Image(2),
+                DrawItem::Image(3),
+            ]
+        );
+
+        let before = resources.image_atlases().metrics();
+        let image = context
+            .render_scene(
+                scene.logical_size,
+                RenderScale::ONE,
+                [0.0, 0.0, 0.0, 0.0],
+                1024 * 1024,
+                &prepared,
+                resources.image_atlases_mut(),
+            )
+            .await
+            .unwrap();
+
+        for quadrant in 0..4 {
+            let has_ink = (quadrant * 32..(quadrant + 1) * 32)
+                .any(|x| (0..32).any(|y| pixel(&image, x, y)[3] != 0));
+            assert!(has_ink, "bundled atlas image {quadrant} rendered empty");
+        }
+        assert_eq!(resources.image_atlases().metrics(), before);
+    }
+
+    #[tokio::test]
+    async fn shape_image_shape_switches_preserve_painter_order() {
+        let Some(mut context) = context_or_skip().await else {
+            return;
+        };
+        let mut resources = PersistentResources::new(context.device(), context.queue()).unwrap();
+        let logical_size = LogicalSize {
+            width: 32.0,
+            height: 32.0,
+        };
+        let solid_rect = |rect, color| {
+            SceneNode::from(ShapeNode::new(
+                Shape::Rect(rect),
+                Fill::new(Paint::Solid(color)),
+            ))
+        };
+        let mut scene = Scene::new(logical_size);
+        scene.nodes.push(solid_rect(
+            Rect::new(0.0, 0.0, 32.0, 32.0).unwrap(),
+            Color::new(1.0, 0.0, 0.0, 1.0).unwrap(),
+        ));
+        scene.nodes.push(
+            ImageNode::new(
+                resources
+                    .image_atlases()
+                    .bundled_handle(BundledImage::StarIcon),
+                ImageDimensions::new(48, 48).unwrap(),
+                Rect::new(0.0, 0.0, 32.0, 32.0).unwrap(),
+                ImageFit::Fill,
+            )
+            .into(),
+        );
+        scene.nodes.push(solid_rect(
+            Rect::new(0.0, 0.0, 4.0, 4.0).unwrap(),
+            Color::new(0.0, 0.0, 1.0, 1.0).unwrap(),
+        ));
+        let prepared = prepare_scene(&scene).unwrap();
+        assert_eq!(
+            prepared.order,
+            vec![
+                DrawItem::Primitives { start: 0, end: 1 },
+                DrawItem::Image(0),
+                DrawItem::Primitives { start: 1, end: 2 },
+            ]
+        );
+
+        let image = context
+            .render_scene(
+                logical_size,
+                RenderScale::ONE,
+                [0.0, 0.0, 0.0, 0.0],
+                1024 * 1024,
+                &prepared,
+                resources.image_atlases_mut(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(pixel(&image, 1, 1), [0, 0, 255, 255]);
+        let center = pixel(&image, 16, 16);
+        assert_ne!(center, [255, 0, 0, 255]);
+        assert_ne!(center[3], 0);
     }
 
     #[test]

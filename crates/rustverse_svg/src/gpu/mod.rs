@@ -1,18 +1,22 @@
 //! Headless GPU rendering infrastructure.
 
+mod atlas;
 mod context;
 mod patterns;
 mod primitives;
 pub mod resources;
 mod scene;
+mod service;
+pub mod startup;
 
 use std::fmt;
 
 use context::{GpuContext, HeadlessImage};
 pub use context::{GpuInitError, PhysicalSize, RGBA8_TARGET_FORMAT, physical_size};
 use resources::PersistentResources;
+pub use service::{GpuRendererMetrics, GpuRendererService, ResidentImage};
 
-use crate::renderer_service::{RenderRequest, RendererBackend, RendererService};
+use crate::renderer_service::{RenderRequest, RendererBackend};
 
 /// Default upper bound for both RGBA output and padded staging allocations.
 pub const DEFAULT_MAX_TARGET_BYTES: u64 = 256 * 1024 * 1024;
@@ -21,9 +25,10 @@ pub const DEFAULT_MAX_TARGET_BYTES: u64 = 256 * 1024 * 1024;
 pub const MAX_CONFIGURED_TARGET_BYTES: u64 = 1024 * 1024 * 1024;
 
 /// Validated startup options for the single-owner GPU renderer service.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct GpuRendererOptions {
     max_target_bytes: u64,
+    startup_manifest: startup::StartupAssetManifest,
 }
 
 impl GpuRendererOptions {
@@ -33,11 +38,23 @@ impl GpuRendererOptions {
             max_target_bytes <= MAX_CONFIGURED_TARGET_BYTES,
             "max_target_bytes {max_target_bytes} exceeds configured upper bound {MAX_CONFIGURED_TARGET_BYTES}"
         );
-        Ok(Self { max_target_bytes })
+        Ok(Self {
+            max_target_bytes,
+            startup_manifest: startup::StartupAssetManifest::default(),
+        })
     }
 
-    pub const fn max_target_bytes(self) -> u64 {
+    pub const fn max_target_bytes(&self) -> u64 {
         self.max_target_bytes
+    }
+
+    pub fn with_startup_manifest(mut self, manifest: startup::StartupAssetManifest) -> Self {
+        self.startup_manifest = manifest;
+        self
+    }
+
+    pub fn startup_manifest(&self) -> &startup::StartupAssetManifest {
+        &self.startup_manifest
     }
 }
 
@@ -45,6 +62,7 @@ impl Default for GpuRendererOptions {
     fn default() -> Self {
         Self {
             max_target_bytes: DEFAULT_MAX_TARGET_BYTES,
+            startup_manifest: startup::StartupAssetManifest::default(),
         }
     }
 }
@@ -53,14 +71,22 @@ impl Default for GpuRendererOptions {
 /// renderer resources for its complete lifetime.
 pub(crate) struct GpuRenderer {
     context: GpuContext,
-    _resources: PersistentResources,
+    resources: PersistentResources,
     options: GpuRendererOptions,
 }
 
 impl GpuRenderer {
-    async fn new(options: GpuRendererOptions) -> Result<Self, GpuInitError> {
+    pub(crate) async fn new(options: GpuRendererOptions) -> Result<Self, GpuInitError> {
         let context = GpuContext::new().await?;
-        let resources = PersistentResources::new();
+        let prepared = startup::prepare_startup_manifest(
+            options.startup_manifest.clone(),
+            atlas::decode::DecodeLimits::default(),
+        )
+        .await
+        .map_err(GpuInitError::Resources)?;
+        let resources =
+            PersistentResources::new_with_startup(context.device(), context.queue(), prepared)
+                .map_err(GpuInitError::Resources)?;
         debug_assert_eq!(
             resources.construction_counts(),
             resources::PersistentResourceCounts {
@@ -71,7 +97,7 @@ impl GpuRenderer {
         );
         Ok(Self {
             context,
-            _resources: resources,
+            resources,
             options,
         })
     }
@@ -81,9 +107,9 @@ impl GpuRenderer {
         request: RenderRequest,
     ) -> Result<HeadlessImage, anyhow::Error> {
         let (scene, scale, color) = request.into_parts();
-        let primitives = scene::prepare_scene(&scene)?;
+        let prepared = scene::prepare_scene(&scene)?;
         self.context
-            .render_primitives(
+            .render_scene(
                 scene.logical_size,
                 scale,
                 [
@@ -93,9 +119,49 @@ impl GpuRenderer {
                     f64::from(color.alpha) / 255.0,
                 ],
                 self.options.max_target_bytes(),
-                &primitives,
+                &prepared,
+                self.resources.image_atlases_mut(),
             )
             .await
+    }
+
+    fn startup_registry(
+        &self,
+        keys: Vec<String>,
+    ) -> Result<std::collections::BTreeMap<String, ResidentImage>, GpuRenderError> {
+        keys.into_iter()
+            .map(|stable_key| {
+                let key = atlas::types::AssetKey::new(stable_key.clone())
+                    .map_err(anyhow::Error::new)
+                    .map_err(GpuRenderError::Render)?;
+                let (handle, dimensions) = self
+                    .resources
+                    .image_atlases()
+                    .resident_image(&key)
+                    .ok_or_else(|| {
+                        GpuRenderError::Render(anyhow::anyhow!(
+                            "prepared startup asset {stable_key} is not resident"
+                        ))
+                    })?;
+                Ok((stable_key, ResidentImage { handle, dimensions }))
+            })
+            .collect()
+    }
+
+    fn insert_prepared_image(
+        &mut self,
+        key: atlas::types::AssetKey,
+        decoded: std::sync::Arc<atlas::decode::DecodedImage>,
+    ) -> anyhow::Result<ResidentImage> {
+        let dimensions = crate::scene::ImageDimensions::new(decoded.width, decoded.height)
+            .map_err(anyhow::Error::new)?;
+        let handle = self.resources.image_atlases_mut().insert_runtime(
+            self.context.device(),
+            self.context.queue(),
+            key,
+            (*decoded).clone(),
+        )?;
+        Ok(ResidentImage { handle, dimensions })
     }
 }
 
@@ -128,8 +194,8 @@ impl std::error::Error for GpuRenderError {
 pub async fn start_renderer_service(
     options: GpuRendererOptions,
     queue_capacity: usize,
-) -> Result<RendererService<GpuRenderError>, GpuRenderError> {
-    RendererService::start::<GpuRenderer>(options, queue_capacity).await
+) -> Result<GpuRendererService, GpuRenderError> {
+    GpuRendererService::start(options, queue_capacity).await
 }
 
 impl RendererBackend for GpuRenderer {

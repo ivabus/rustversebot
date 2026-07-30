@@ -12,7 +12,7 @@ use std::future::Future;
 use tokio::sync::{mpsc, oneshot};
 
 use crate::renderer::RenderScale;
-use crate::scene::{LogicalSize, Scene, ShapeNode};
+use crate::scene::{LogicalSize, Scene, SceneNode};
 
 /// A solid RGBA color with straight, eight-bit channels.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -37,7 +37,7 @@ impl SolidColor {
 /// Backend-neutral input for a headless render.
 #[derive(Clone, Debug, PartialEq)]
 pub struct RenderRequest {
-    scene: Scene<ShapeNode>,
+    scene: Scene<SceneNode>,
     scale: RenderScale,
     clear_color: SolidColor,
 }
@@ -45,18 +45,28 @@ pub struct RenderRequest {
 impl RenderRequest {
     /// Creates an empty scene, preserving the Phase 2 clear-pass ergonomics.
     pub fn clear(logical_size: LogicalSize, scale: RenderScale, clear_color: SolidColor) -> Self {
-        Self::scene(Scene::new(logical_size), scale, clear_color)
-    }
-
-    pub fn scene(scene: Scene<ShapeNode>, scale: RenderScale, clear_color: SolidColor) -> Self {
         Self {
-            scene,
+            scene: Scene::new(logical_size),
             scale,
             clear_color,
         }
     }
 
-    pub fn scene_ref(&self) -> &Scene<ShapeNode> {
+    pub fn scene<Node>(scene: Scene<Node>, scale: RenderScale, clear_color: SolidColor) -> Self
+    where
+        Node: Into<SceneNode>,
+    {
+        Self {
+            scene: Scene {
+                logical_size: scene.logical_size,
+                nodes: scene.nodes.into_iter().map(Into::into).collect(),
+            },
+            scale,
+            clear_color,
+        }
+    }
+
+    pub fn scene_ref(&self) -> &Scene<SceneNode> {
         &self.scene
     }
 
@@ -68,7 +78,7 @@ impl RenderRequest {
         self.clear_color
     }
 
-    pub fn into_parts(self) -> (Scene<ShapeNode>, RenderScale, SolidColor) {
+    pub fn into_parts(self) -> (Scene<SceneNode>, RenderScale, SolidColor) {
         (self.scene, self.scale, self.clear_color)
     }
 }

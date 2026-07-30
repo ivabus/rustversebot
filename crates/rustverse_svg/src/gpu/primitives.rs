@@ -4,6 +4,7 @@
 //! GPU-side contract until the backend-neutral scene types are expanded.
 
 use anyhow::Context as _;
+use std::ops::Range;
 
 use super::patterns::{
     DiagonalPattern, DotPattern, PatternPaint as GpuPatternPaint, RepeatedTexturePattern,
@@ -280,12 +281,22 @@ impl PrimitivePipeline {
 
     /// Records the prepared batch into an existing color render pass.
     pub(crate) fn draw<'pass>(&'pass self, pass: &mut wgpu::RenderPass<'pass>) {
-        if self.instance_count == 0 {
+        self.draw_range(pass, 0..self.instance_count);
+    }
+
+    /// Records a contiguous painter-order range from the prepared batch.
+    pub(crate) fn draw_range<'pass>(
+        &'pass self,
+        pass: &mut wgpu::RenderPass<'pass>,
+        instances: Range<u32>,
+    ) {
+        if instances.is_empty() {
             return;
         }
+        debug_assert!(instances.end <= self.instance_count);
         pass.set_pipeline(&self.pipeline);
         pass.set_bind_group(0, &self.bind_group, &[]);
-        pass.draw(0..6, 0..self.instance_count);
+        pass.draw(0..6, instances);
     }
 }
 

@@ -1440,6 +1440,19 @@ Exit gate:
   persistent GPU atlas regions;
 - encoded draw commands contain no file/URL/encoded-image source.
 
+Phase 4 is implemented. Production startup accepts a bounded-parallel manifest
+of bundled and cache-resident images, publishes immutable resident handles, and
+drops decoded CPU buffers after deterministic packing and upload. The
+GPU-specific service prepares runtime PNG/JPEG/WebP/GIF content outside its
+single-owner queue, coalesces concurrent requests, versions changed stable
+keys without invalidating old handles, and serializes the one required upload
+before returning a handle. Public metrics expose occupancy, capacity,
+uploads, hits, misses, deduplication, and versioning. Required Metal tests
+cover bundled and cached startup assets, dynamic insertion, warm reuse,
+capacity rollback, mixed shape/image painter order, centered fitting, and
+generation-safe residency. Draw records contain only resident handles,
+resolved page/UV data, and logical geometry.
+
 ### Phase 5 — Clips, masks, blending, effects, and backdrop
 
 Deliverables:

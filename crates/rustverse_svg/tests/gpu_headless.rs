@@ -1,16 +1,14 @@
 use rustverse_svg::{
     RenderScale,
     gpu::{
-        GpuInitError, GpuRenderError, GpuRendererOptions, MAX_CONFIGURED_TARGET_BYTES,
-        PhysicalSize, physical_size, start_renderer_service,
+        GpuInitError, GpuRenderError, GpuRendererOptions, GpuRendererService,
+        MAX_CONFIGURED_TARGET_BYTES, PhysicalSize, physical_size, start_renderer_service,
     },
-    renderer_service::{RenderRequest, RendererService, SolidColor},
+    renderer_service::{RenderRequest, SolidColor},
     scene::{Color, Fill, LogicalSize, Paint, Rect, Scene, Shape, ShapeNode},
 };
 
-async fn service_or_documented_skip(
-    options: GpuRendererOptions,
-) -> Option<RendererService<GpuRenderError>> {
+async fn service_or_documented_skip(options: GpuRendererOptions) -> Option<GpuRendererService> {
     match start_renderer_service(options, 2).await {
         Ok(service) => Some(service),
         Err(GpuRenderError::Initialize(GpuInitError::AdapterUnavailable(error))) => {

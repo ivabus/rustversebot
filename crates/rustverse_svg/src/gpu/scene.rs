@@ -1,7 +1,10 @@
 //! Conversion from the public backend-neutral scene into GPU primitive batches.
 
+use std::ops::Deref;
+
 use crate::scene::{
-    AffineTransform, Color, Paint, PaintSpace, PatternDescriptor, Rect, Scene, Shape, ShapeNode,
+    AffineTransform, Color, ImageNode, Paint, PaintSpace, PatternDescriptor, Rect, Scene,
+    SceneNode, Shape, ShapeNode,
 };
 
 use super::patterns::{
@@ -12,9 +15,59 @@ use super::primitives::{
     PrimitiveStyle,
 };
 
-pub(crate) fn prepare_scene(scene: &Scene<ShapeNode>) -> anyhow::Result<Vec<Primitive>> {
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum DrawItem {
+    Primitives { start: u32, end: u32 },
+    Image(u32),
+}
+
+pub(crate) struct PreparedScene {
+    pub(crate) primitives: Vec<Primitive>,
+    pub(crate) images: Vec<ImageNode>,
+    pub(crate) order: Vec<DrawItem>,
+}
+
+impl Deref for PreparedScene {
+    type Target = [Primitive];
+
+    fn deref(&self) -> &Self::Target {
+        &self.primitives
+    }
+}
+
+pub(crate) enum DrawableRef<'a> {
+    Shape(&'a ShapeNode),
+    Image(&'a ImageNode),
+}
+
+pub(crate) trait DrawableNode {
+    fn drawable(&self) -> DrawableRef<'_>;
+}
+
+impl DrawableNode for ShapeNode {
+    fn drawable(&self) -> DrawableRef<'_> {
+        DrawableRef::Shape(self)
+    }
+}
+
+impl DrawableNode for SceneNode {
+    fn drawable(&self) -> DrawableRef<'_> {
+        match self {
+            Self::Shape(node) => DrawableRef::Shape(node),
+            Self::Image(node) => DrawableRef::Image(node),
+        }
+    }
+}
+
+pub(crate) fn prepare_scene<Node>(scene: &Scene<Node>) -> anyhow::Result<PreparedScene>
+where
+    Node: DrawableNode,
+{
     let mut primitives = Vec::with_capacity(scene.nodes.len().saturating_mul(2));
     for node in &scene.nodes {
+        let DrawableRef::Shape(node) = node.drawable() else {
+            continue;
+        };
         let bounds = node.shape().bounds();
         let (primitive_bounds, primitive_shape) = geometry(node.shape());
         primitives.push(Primitive {
@@ -34,7 +87,39 @@ pub(crate) fn prepare_scene(scene: &Scene<ShapeNode>) -> anyhow::Result<Vec<Prim
             });
         }
     }
-    Ok(primitives)
+
+    let mut prepared = PreparedScene {
+        primitives,
+        images: Vec::new(),
+        order: Vec::with_capacity(scene.nodes.len()),
+    };
+    let mut primitive_index = 0_u32;
+    for node in &scene.nodes {
+        match node.drawable() {
+            DrawableRef::Shape(node) => {
+                let count = 1 + u32::from(node.stroke().is_some());
+                let end = primitive_index + count;
+                match prepared.order.last_mut() {
+                    Some(DrawItem::Primitives {
+                        end: previous_end, ..
+                    }) if *previous_end == primitive_index => *previous_end = end,
+                    _ => prepared.order.push(DrawItem::Primitives {
+                        start: primitive_index,
+                        end,
+                    }),
+                }
+                primitive_index = end;
+            }
+            DrawableRef::Image(node) => {
+                let index = u32::try_from(prepared.images.len())
+                    .map_err(|_| anyhow::anyhow!("image draw count exceeds u32::MAX"))?;
+                prepared.images.push(node.clone());
+                prepared.order.push(DrawItem::Image(index));
+            }
+        }
+    }
+    debug_assert_eq!(primitive_index as usize, prepared.primitives.len());
+    Ok(prepared)
 }
 
 fn geometry(shape: Shape) -> (PrimitiveRect, PrimitiveShape) {
