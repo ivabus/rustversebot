@@ -1321,6 +1321,13 @@ Exit gate:
 - no data-preparation model is duplicated;
 - reference renderer output is unchanged.
 
+Current status: complete. The crate root is now a compatibility facade;
+prepared view models and layout logic live in `model`, MiniJinja/resvg and
+legacy asset loading live in the private `reference_svg` module, and
+backend-neutral `scene`, `cards`, and `renderer` contracts are present. Public
+entry-point signatures are compile-time tested and the pinned scale-1.0
+reference PNG remains byte-identical.
+
 ### Phase 2 — Headless GPU skeleton
 
 Deliverables:
