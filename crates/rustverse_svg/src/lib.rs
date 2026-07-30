@@ -1110,6 +1110,21 @@ mod tests {
     }
 
     #[test]
+    fn deadly_template_renders_the_normal_score_from_api_data() {
+        let data = serde_json::json!({
+            "list": [],
+            "total_score": 143_683,
+            "rank_percent": 1748,
+        });
+        let rendered = super::MJ_ENVIRONMENT
+            .get_template("da.j2")
+            .unwrap()
+            .render(data)
+            .unwrap();
+        assert!(rendered.contains(">143683</text>"));
+    }
+
+    #[test]
     fn deadly_view_includes_the_complex_boss_mode() {
         let mut regular_zones = HashMap::new();
         for (index, id) in [69043101, 69043102, 69043103].into_iter().enumerate() {

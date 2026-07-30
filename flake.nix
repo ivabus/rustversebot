@@ -69,12 +69,6 @@
           platforms = [ system ];
         };
       });
-
-      tests = craneLib.cargoTest (commonArgs // {
-        inherit cargoArtifacts;
-        cargoExtraArgs = "--workspace";
-        preBuild = "";
-      });
     in
     {
       packages.${system} = {
@@ -94,9 +88,8 @@
       };
 
       checks.${system} = {
-        default = tests;
-        inherit tests;
-        package = rustversebot;
+        default = rustversebot;
+        tests = rustversebot;
       };
 
       devShells.${system}.default = pkgs.mkShell {
