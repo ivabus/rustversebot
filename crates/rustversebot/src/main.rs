@@ -27,6 +27,8 @@ enum Command {
     Current,
     /// Show the previous pair of mode seasons.
     Previous,
+    /// Show an infographic for a current or next endgame season: `/endgame [id]`.
+    Endgame(String),
     /// Show the Deadly Assault leaderboard.
     #[command(rename = "top_da")]
     TopDeadly,
@@ -135,6 +137,11 @@ async fn main() -> anyhow::Result<()> {
             Update::filter_message()
                 .filter(handlers::is_missing_detail_command)
                 .endpoint(handlers::missing_detail_command_handler),
+        )
+        .branch(
+            Update::filter_message()
+                .filter(handlers::is_missing_endgame_command)
+                .endpoint(handlers::missing_endgame_command_handler),
         )
         .branch(
             Update::filter_message()

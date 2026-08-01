@@ -42,6 +42,7 @@ pub async fn command_handler(
         Command::Previous => {
             cmd_endgame_pair(&bot, chat_id, SeasonPosition::Previous, &state).await
         }
+        Command::Endgame(id) => cmd_endgame(&bot, chat_id, &id, &state).await,
         Command::TopDeadly => cmd_top(&bot, chat_id, "deadly_assault", &state).await,
         Command::TopShiyu => cmd_top(&bot, chat_id, "shiyu_defense", &state).await,
         Command::Cookie(cookie) => cmd_cookie(&bot, msg, &cookie, &state).await,
@@ -88,6 +89,7 @@ struct IndexedSeason {
     id: u64,
     sequence_id: u64,
     is_test: bool,
+    has_live_period: bool,
     begin_time: String,
     starts_at: DateTime<Utc>,
     ends_at: Option<DateTime<Utc>>,
@@ -115,6 +117,7 @@ fn indexed_season(
     if EndgameType::from_id(id) != Some(endgame_type) {
         return None;
     }
+    let has_live_period = meta.live_begin.is_some();
     let begin_time = meta
         .live_begin
         .as_deref()
@@ -134,6 +137,7 @@ fn indexed_season(
         id,
         sequence_id,
         is_test,
+        has_live_period,
         begin_time,
         starts_at,
         ends_at,
@@ -236,6 +240,168 @@ fn indexed_season_date(season: &IndexedSeason) -> &str {
         .unwrap_or(&season.begin_time)
 }
 
+fn endgame_index_sort(endgame_type: EndgameType) -> u32 {
+    match endgame_type {
+        EndgameType::ShiyuDefence => 1,
+        EndgameType::DeadlyAssault => 9,
+    }
+}
+
+async fn endgame_season_index(
+    endgame_type: EndgameType,
+    state: &BotState,
+) -> anyhow::Result<HashMap<String, SeasonMeta>> {
+    Ok(match endgame_type {
+        EndgameType::ShiyuDefence => state.nanoka.get_seasons().await?,
+        EndgameType::DeadlyAssault => state.nanoka.get_boss_seasons().await?,
+    })
+}
+
+async fn available_endgame_seasons(
+    endgame_type: EndgameType,
+    state: &BotState,
+) -> anyhow::Result<Vec<IndexedSeason>> {
+    let seasons = endgame_season_index(endgame_type, state).await?;
+    let now = Utc::now();
+    let Some(current) = select_indexed_season(
+        &seasons,
+        endgame_type,
+        endgame_index_sort(endgame_type),
+        SeasonPosition::Current,
+        now,
+    ) else {
+        return Ok(Vec::new());
+    };
+
+    // The picker intentionally includes every published season from the
+    // current rotation onward. This exposes both scheduled live rotations
+    // and later test previews, while excluding historical entries.
+    let mut available = seasons
+        .iter()
+        .filter_map(|(id, meta)| {
+            indexed_season(id, meta, endgame_type, endgame_index_sort(endgame_type))
+        })
+        .filter(|season| season.id == current.id || season.sequence_id > current.sequence_id)
+        .collect::<Vec<_>>();
+    available.sort_by_key(|season| season.sequence_id);
+    Ok(available)
+}
+
+async fn endgame_available(
+    endgame_type: EndgameType,
+    id: u64,
+    state: &BotState,
+) -> anyhow::Result<bool> {
+    Ok(available_endgame_seasons(endgame_type, state)
+        .await?
+        .iter()
+        .any(|season| season.id == id))
+}
+
+fn endgame_status(is_current: bool, season: &IndexedSeason) -> &'static str {
+    if is_current {
+        // A preview ID graduates to the live game after the preceding
+        // production season ends. `select_indexed_season` only returns it as
+        // current after that transition, so its selection role—not its
+        // six-digit ID—is authoritative here.
+        "live"
+    } else if season.has_live_period {
+        // A six-digit ID can already have an official live schedule. In that
+        // case it is an upcoming live season; only entries without
+        // `live_begin` are test-server previews.
+        "upcoming"
+    } else if season.is_test {
+        "test"
+    } else {
+        "upcoming"
+    }
+}
+
+async fn endgame_season_keyboard(
+    endgame_type: EndgameType,
+    state: &BotState,
+) -> anyhow::Result<InlineKeyboardMarkup> {
+    let seasons = available_endgame_seasons(endgame_type, state).await?;
+    let current_id = seasons.first().map(|season| season.id);
+    let rows: Vec<_> = seasons
+        .into_iter()
+        .map(|season| {
+            vec![InlineKeyboardButton::callback(
+                format!(
+                    "{} · {} · {}",
+                    season.id,
+                    indexed_season_date(&season),
+                    endgame_status(current_id == Some(season.id), &season)
+                ),
+                format!(
+                    "endgame:season:{}:{}",
+                    endgame_callback_kind(endgame_type),
+                    season.id
+                ),
+            )]
+        })
+        .collect();
+    Ok(InlineKeyboardMarkup::new(rows))
+}
+
+async fn cmd_endgame(bot: &Bot, chat_id: ChatId, id: &str, state: &BotState) -> anyhow::Result<()> {
+    let id = id.parse::<u64>().ok();
+    let endgame_type = id.and_then(EndgameType::from_id);
+    let Some((id, endgame_type)) = id.zip(endgame_type) else {
+        BotTemplateSender::new(bot, &state.templates)
+            .send_message(chat_id, "endgame_unavailable", &())
+            .await?;
+        return Ok(());
+    };
+    if !endgame_available(endgame_type, id, state).await? {
+        BotTemplateSender::new(bot, &state.templates)
+            .send_message(chat_id, "endgame_unavailable", &())
+            .await?;
+        return Ok(());
+    }
+    send_endgame_info(bot, chat_id, endgame_type, id, state).await
+}
+
+async fn send_endgame_info(
+    bot: &Bot,
+    chat_id: ChatId,
+    endgame_type: EndgameType,
+    id: u64,
+    state: &BotState,
+) -> anyhow::Result<()> {
+    let season = available_endgame_seasons(endgame_type, state)
+        .await?
+        .into_iter()
+        .find(|season| season.id == id)
+        .ok_or_else(|| anyhow::anyhow!("season {id} is no longer available"))?;
+    let png = match endgame_type {
+        EndgameType::DeadlyAssault => {
+            let detail = state.nanoka.get_boss_detail_resolved(id, None).await?;
+            rustverse_svg::preload_deadly_info_images(&detail).await?;
+            let begin_time = season.begin_time;
+            tokio::task::spawn_blocking(move || {
+                rustverse_svg::deadly_info_with_begin_time(&detail, Some(&begin_time))
+            })
+            .await
+            .map_err(|error| anyhow::anyhow!("Deadly Assault renderer task panicked: {error}"))??
+        }
+        EndgameType::ShiyuDefence => {
+            let detail = state.nanoka.get_detail_resolved(id).await?;
+            let nanoka::types::AnySeasonDetail::Shiyu(detail) = detail else {
+                anyhow::bail!("Nanoka returned a non-Shiyu detail for season {id}");
+            };
+            rustverse_svg::preload_shiyu_info_images(&detail).await?;
+            tokio::task::spawn_blocking(move || rustverse_svg::shiyu_info(&detail))
+                .await
+                .map_err(|error| {
+                    anyhow::anyhow!("Shiyu Defense renderer task panicked: {error}")
+                })??
+        }
+    };
+    bot.send_photo(chat_id, InputFile::memory(png)).await?;
+    Ok(())
+}
+
 async fn cmd_endgame_pair(
     bot: &Bot,
     chat_id: ChatId,
@@ -309,6 +475,48 @@ pub fn is_missing_detail_command(msg: Message) -> bool {
     missing_detail_kind(msg.text()).is_some()
 }
 
+pub fn is_missing_endgame_command(msg: Message) -> bool {
+    missing_endgame_kind(msg.text()).is_some()
+}
+
+fn missing_endgame_kind(text: Option<&str>) -> Option<()> {
+    let text = text?;
+    let mut parts = text.split_whitespace();
+    matches!(
+        parts.next().map(|command| command.split('@').next().unwrap_or(command).to_ascii_lowercase()),
+        Some(command) if command == "/endgame"
+    )
+    .then_some(())
+    .filter(|_| parts.next().is_none())
+}
+
+pub async fn missing_endgame_command_handler(
+    bot: Bot,
+    msg: Message,
+    state: Arc<BotState>,
+) -> anyhow::Result<()> {
+    let rendered = state.templates.render("endgame_choose_mode", &())?;
+    let parse_mode = rendered
+        .parse_mode()
+        .ok_or_else(|| anyhow::anyhow!("endgame mode template must use HTML"))?;
+    let keyboard = InlineKeyboardMarkup::new(vec![
+        vec![InlineKeyboardButton::callback(
+            "Shiyu Defence",
+            "endgame:mode:sd",
+        )],
+        vec![InlineKeyboardButton::callback(
+            "Deadly Assault",
+            "endgame:mode:da",
+        )],
+    ]);
+    bot.send_message(msg.chat.id, rendered.text)
+        .parse_mode(parse_mode)
+        .reply_markup(keyboard)
+        .await?;
+    let _ = bot.delete_message(msg.chat.id, msg.id).await;
+    Ok(())
+}
+
 fn missing_detail_kind(text: Option<&str>) -> Option<&'static str> {
     let command = text?.split_whitespace().next()?;
     if text?.split_whitespace().count() != 1 {
@@ -344,6 +552,9 @@ pub async fn callback_handler(
         bot.answer_callback_query(query.id).await?;
         return Ok(());
     };
+    if let Some(endgame_callback) = parse_endgame_callback(data) {
+        return handle_endgame_callback(&bot, query, endgame_callback, &state).await;
+    }
     let Some((kind, uid)) = parse_detail_callback(data) else {
         bot.answer_callback_query(query.id)
             .text("Некорректная кнопка")
@@ -365,6 +576,91 @@ pub async fn callback_handler(
     }
     bot.answer_callback_query(query.id).await?;
     send_detail(&bot, chat_id, kind, uid, &state).await
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EndgameCallback {
+    Mode(EndgameType),
+    Season { endgame_type: EndgameType, id: u64 },
+}
+
+fn endgame_callback_kind(endgame_type: EndgameType) -> &'static str {
+    match endgame_type {
+        EndgameType::ShiyuDefence => "sd",
+        EndgameType::DeadlyAssault => "da",
+    }
+}
+
+fn endgame_type_from_callback_kind(kind: &str) -> Option<EndgameType> {
+    match kind {
+        "sd" => Some(EndgameType::ShiyuDefence),
+        "da" => Some(EndgameType::DeadlyAssault),
+        _ => None,
+    }
+}
+
+fn parse_endgame_callback(data: &str) -> Option<EndgameCallback> {
+    let mut parts = data.split(':');
+    if parts.next()? != "endgame" {
+        return None;
+    }
+    let action = parts.next()?;
+    let kind = parts.next()?;
+    let endgame_type = endgame_type_from_callback_kind(kind)?;
+    match (action, parts.next(), parts.next()) {
+        ("mode", None, None) => Some(EndgameCallback::Mode(endgame_type)),
+        ("season", Some(id), None) => {
+            if !(5..=6).contains(&id.len()) || !id.bytes().all(|byte| byte.is_ascii_digit()) {
+                return None;
+            }
+            let id = id.parse().ok()?;
+            (EndgameType::from_id(id) == Some(endgame_type))
+                .then_some(EndgameCallback::Season { endgame_type, id })
+        }
+        _ => None,
+    }
+}
+
+async fn handle_endgame_callback(
+    bot: &Bot,
+    query: CallbackQuery,
+    callback: EndgameCallback,
+    state: &BotState,
+) -> anyhow::Result<()> {
+    let Some(message) = query.message.as_ref() else {
+        bot.answer_callback_query(query.id).await?;
+        return Ok(());
+    };
+    let chat_id = message.chat().id;
+    match callback {
+        EndgameCallback::Mode(endgame_type) => {
+            bot.answer_callback_query(query.id).await?;
+            let keyboard = endgame_season_keyboard(endgame_type, state).await?;
+            let rendered = state.templates.render(
+                "endgame_choose_season",
+                &serde_json::json!({ "endgame": endgame_type.to_string() }),
+            )?;
+            let parse_mode = rendered
+                .parse_mode()
+                .ok_or_else(|| anyhow::anyhow!("endgame season template must use HTML"))?;
+            bot.edit_message_text(chat_id, message.id(), rendered.text)
+                .parse_mode(parse_mode)
+                .reply_markup(keyboard)
+                .await?;
+        }
+        EndgameCallback::Season { endgame_type, id } => {
+            if !endgame_available(endgame_type, id, state).await? {
+                bot.answer_callback_query(query.id)
+                    .text("Этот сезон больше недоступен")
+                    .show_alert(true)
+                    .await?;
+                return Ok(());
+            }
+            bot.answer_callback_query(query.id).await?;
+            send_endgame_info(bot, chat_id, endgame_type, id, state).await?;
+        }
+    }
+    Ok(())
 }
 
 // ── /start ──
@@ -1883,6 +2179,51 @@ mod tests {
         assert!(parse_detail_callback("detail:../../cookie:150000001").is_none());
         assert!(parse_detail_callback("detail:da:1 OR 1=1").is_none());
         assert!(parse_detail_callback("detail:da:123").is_none());
+    }
+
+    #[test]
+    fn endgame_callbacks_are_strict_and_type_checked() {
+        assert_eq!(
+            parse_endgame_callback("endgame:mode:da"),
+            Some(EndgameCallback::Mode(EndgameType::DeadlyAssault))
+        );
+        assert_eq!(
+            parse_endgame_callback("endgame:season:sd:62053"),
+            Some(EndgameCallback::Season {
+                endgame_type: EndgameType::ShiyuDefence,
+                id: 62053,
+            })
+        );
+        assert!(parse_endgame_callback("endgame:season:da:62053").is_none());
+        assert!(parse_endgame_callback("endgame:season:da:69041:extra").is_none());
+        assert!(parse_endgame_callback("endgame:mode:../../cookie").is_none());
+    }
+
+    #[test]
+    fn live_schedule_distinguishes_upcoming_from_test_preview() {
+        let live_preview = IndexedSeason {
+            id: 690421,
+            sequence_id: 69042,
+            is_test: true,
+            has_live_period: true,
+            begin_time: "2026-07-29 04:00:00".to_owned(),
+            starts_at: Utc.with_ymd_and_hms(2026, 7, 29, 3, 0, 0).unwrap(),
+            ends_at: None,
+        };
+        assert_eq!(endgame_status(true, &live_preview), "live");
+        assert_eq!(endgame_status(false, &live_preview), "upcoming");
+
+        let test_preview = IndexedSeason {
+            has_live_period: false,
+            ..live_preview
+        };
+        assert_eq!(endgame_status(false, &test_preview), "test");
+    }
+
+    #[test]
+    fn missing_endgame_command_does_not_consume_arguments() {
+        assert_eq!(missing_endgame_kind(Some("/ENDGAME@my_bot")), Some(()));
+        assert_eq!(missing_endgame_kind(Some("/endgame 69041")), None);
     }
 
     #[test]
