@@ -80,8 +80,13 @@ async fn preload_info_images<'a>(hrefs: impl IntoIterator<Item = &'a str>) -> an
     let client = reqwest::Client::new();
     let mut downloads = tokio::task::JoinSet::new();
     for href in hrefs {
-        let cache_path = image_cache_path(&href)?;
-        if tokio::fs::try_exists(&cache_path).await? {
+        let Ok(cache_path) = image_cache_path(&href) else {
+            continue;
+        };
+        let Ok(is_cached) = tokio::fs::try_exists(&cache_path).await else {
+            continue;
+        };
+        if is_cached {
             continue;
         }
         let client = client.clone();
@@ -101,20 +106,7 @@ async fn preload_info_images<'a>(hrefs: impl IntoIterator<Item = &'a str>) -> an
                 .with_context(|| format!("writing cached image {cache_path}"))
         });
     }
-    let mut first_error = None;
-    while let Some(result) = downloads.join_next().await {
-        let result = result
-            .context("image preloader task panicked")
-            .and_then(|result| result);
-        if let Err(error) = result
-            && first_error.is_none()
-        {
-            first_error = Some(error);
-        }
-    }
-    if let Some(error) = first_error {
-        return Err(error);
-    }
+    while downloads.join_next().await.is_some() {}
     Ok(())
 }
 
@@ -211,13 +203,10 @@ pub static MJ_ENVIRONMENT: LazyLock<minijinja::Environment> = LazyLock::new(|| {
         .unwrap();
     env.add_filter("game_text", format_game_text);
     env.add_filter("wrap_game_text", wrap_game_text);
+    env.add_filter("paragraphs", paragraphs);
     env.add_filter("strip_all_tags", strip_all_tags_filter);
     env.add_filter("element_filter", element_filter);
     env
-});
-
-static REMOTE_IMAGE_HREF: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r#"\bhref="(https?://[^"]+)""#).expect("remote image href regex must compile")
 });
 
 pub const ZOOM_FACTOR: f32 = 5.0;
@@ -244,18 +233,6 @@ pub fn try_render_from_serialize<T: Serialize>(
 ) -> anyhow::Result<Vec<u8>> {
     let template = MJ_ENVIRONMENT.get_template(template)?;
     let rendered = template.render(data)?;
-
-    for captures in REMOTE_IMAGE_HREF.captures_iter(&rendered) {
-        let href = captures
-            .get(1)
-            .context("remote image href capture is missing")?
-            .as_str();
-        let cache_path = image_cache_path(href)?;
-        anyhow::ensure!(
-            std::fs::exists(&cache_path)?,
-            "remote image was not preloaded: {href}"
-        );
-    }
 
     let tree = usvg::Tree::from_data(rendered.as_bytes(), &USVG_OPTIONS)?;
     let pixmap_size = tree
@@ -808,9 +785,18 @@ fn wrap_game_text(_state: &minijinja::State, text: String, max_width: usize) -> 
     wrap_game_text_lines(&text, max_width)
 }
 
+fn paragraphs(text: String) -> Vec<String> {
+    text.split('\n').map(str::to_owned).collect()
+}
+
 fn wrap_game_text_lines(text: &str, max_width: usize) -> Vec<String> {
     let mut lines = Vec::new();
     for paragraph in text.split('\n') {
+        let paragraph = paragraph.trim_start();
+        let paragraph = paragraph
+            .strip_prefix('·')
+            .map(str::trim_start)
+            .unwrap_or(paragraph);
         let mut items = Vec::new();
         let mut in_tag = false;
         for c in paragraph.chars() {
@@ -962,6 +948,13 @@ mod tests {
         );
     }
 
+    #[test]
+    fn wrapping_excludes_each_paragraph_bullet_from_width() {
+        let lines = wrap_game_text_lines("· first words\n· second words", 12);
+
+        assert_eq!(lines, ["first words", "second words"]);
+    }
+
     fn monster(id: u64, name: &str, hp: f64) -> Monster {
         Monster {
             id,
@@ -1094,7 +1087,7 @@ mod tests {
     }
 
     #[test]
-    fn renderer_rejects_remote_images_that_were_not_preloaded() {
+    fn renderer_skips_remote_images_that_were_not_preloaded() {
         let data = serde_json::json!({
             "list": [{
                 "boss": [{ "icon": "https://example.invalid/not-cached.webp" }],
@@ -1105,8 +1098,8 @@ mod tests {
             "total_score": 0,
             "rank_percent": 0,
         });
-        let error = super::try_render_from_serialize("da.j2", &data).unwrap_err();
-        assert!(error.to_string().contains("remote image was not preloaded"));
+        let png = super::try_render_from_serialize("da.j2", &data).unwrap();
+        assert!(png.starts_with(b"\x89PNG\r\n\x1a\n"));
     }
 
     #[test]
