@@ -3,6 +3,7 @@
 /result
 /result-*
 /image/
+/images/
 
 # Local runtime state (contains Telegram users and HoYoLAB credentials)
 *.db

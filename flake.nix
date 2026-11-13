@@ -62,6 +62,11 @@
         # dependency artifact. Keeping it here would strip the executable bit
         # when crane installs the finished bot.
         preBuild = "";
+        nativeCheckInputs = [ pkgs.typst pkgs.resvg ];
+        postInstall = ''
+          wrapProgram "$out/bin/rustversebot" \
+            --prefix PATH : ${pkgs.lib.makeBinPath [ pkgs.typst pkgs.resvg ]}
+        '';
 
         meta = {
           description = "Telegram bot for tracking Zenless Zone Zero endgame results";
@@ -98,6 +103,8 @@
           pkgs.cargo
           pkgs.rustc
           pkgs.rustfmt
+          pkgs.typst
+          pkgs.resvg
           pkgs.clippy
           pkgs.attic-client
         ];

@@ -583,12 +583,16 @@ async fn check_deadly_assault_announcement(
         .with_timezone(&nanoka_timezone)
         .format("%Y-%m-%d %H:%M:%S")
         .to_string();
-    rustverse_svg::preload_deadly_info_images(&detail).await?;
-    let png = tokio::task::spawn_blocking(move || {
-        rustverse_svg::deadly_info_with_begin_time(&detail, Some(&begin_time))
-    })
-    .await
-    .context("Deadly Assault renderer task panicked")??;
+    let seasons = state.nanoka.get_boss_seasons().await?;
+    let meta = seasons
+        .get(&season_id_string)
+        .context("Deadly Assault season metadata missing")?;
+    let end = meta
+        .live_end
+        .as_deref()
+        .or(meta.end.as_deref())
+        .context("Deadly Assault season end missing")?;
+    let png = rustverse_images::deadly_info(&detail, &begin_time, end).await?;
 
     let msk = FixedOffset::east_opt(3 * 60 * 60).context("invalid MSK offset")?;
     let caption_data = serde_json::json!({
@@ -700,10 +704,7 @@ async fn check_shiyu_defense_announcement(
     let nanoka::types::AnySeasonDetail::Shiyu(detail) = detail else {
         anyhow::bail!("Nanoka returned a non-Shiyu detail for season {season_id}");
     };
-    rustverse_svg::preload_shiyu_info_images(&detail).await?;
-    let png = tokio::task::spawn_blocking(move || rustverse_svg::shiyu_info(&detail))
-        .await
-        .context("Shiyu Defense renderer task panicked")??;
+    let png = rustverse_images::shiyu_info(&detail).await?;
 
     let msk = FixedOffset::east_opt(3 * 60 * 60).context("invalid MSK offset")?;
     let caption_data = serde_json::json!({

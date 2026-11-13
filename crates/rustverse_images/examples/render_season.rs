@@ -23,20 +23,26 @@ async fn main() -> anyhow::Result<()> {
         .await
         .with_context(|| format!("fetching resolved season {season_id}"))?;
     let png = match detail {
-        AnySeasonDetail::Shiyu(detail) => {
-            rustverse_svg::preload_shiyu_info_images(&detail).await?;
-            rustverse_svg::shiyu_info(&detail)?
-        }
+        AnySeasonDetail::Shiyu(detail) => rustverse_images::shiyu_info(&detail).await?,
         AnySeasonDetail::Boss(detail) => {
             let seasons = client
                 .get_seasons_by_type(EndgameType::DeadlyAssault)
                 .await
                 .context("fetching Deadly Assault season index")?;
-            let begin_time = seasons
+            let meta = seasons
                 .get(&season_id.to_string())
-                .and_then(|meta| meta.live_begin.as_deref().or(meta.begin.as_deref()));
-            rustverse_svg::preload_deadly_info_images(&detail).await?;
-            rustverse_svg::deadly_info_with_begin_time(&detail, begin_time)?
+                .context("season metadata is missing")?;
+            let begin = meta
+                .live_begin
+                .as_deref()
+                .or(meta.begin.as_deref())
+                .context("season start is missing")?;
+            let end = meta
+                .live_end
+                .as_deref()
+                .or(meta.end.as_deref())
+                .context("season end is missing")?;
+            rustverse_images::deadly_info(&detail, begin, end).await?
         }
     };
     std::fs::write(&output, png).with_context(|| format!("writing {output}"))?;

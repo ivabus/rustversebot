@@ -11,6 +11,7 @@ It supports Deadly Assault and Shiyu Defense.
 
 - Get a Telegram bot token from [@BotFather](https://t.me/BotFather).
 - Get the Telegram user ID of the administrator.
+- Install the `typst` and `resvg` CLI executables. The Nix package includes both.
 
 The Cargo workspace contains these crates:
 
@@ -18,7 +19,7 @@ The Cargo workspace contains these crates:
 crates/
 ├── nanoka/
 ├── rustverse/
-├── rustverse_svg/
+├── rustverse_images/
 └── rustversebot/
 ```
 
@@ -58,6 +59,33 @@ It updates an index after the current season ends.
 It then announces the next season during the configured window.
 The bot does not cache season details or cards.
 It renders each card once and sends it once to each eligible chat.
+
+## Image rendering
+
+`rustverse_images` runs `typst compile --format svg` and pipes its stdout directly
+into `resvg -z 4 - output.png`. Each render uses a private temporary directory.
+Templates, static images, and the font are bundled into the Rust binary.
+
+Before compilation, remote PNG and WebP URLs are collected recursively from the
+input JSON and downloaded into `IMAGE_CACHE_DIR` (default: `images`). Filenames
+are preserved and URLs in JSON are unchanged. Only complete downloads enter the
+cache. HTTP 404 is reported and leaves the image absent; Typst fails if the
+template needs that image. Other download errors and CLI failures stop the render.
+
+`TYPST_BIN` and `RESVG_BIN` can override the executable paths. Compilation and
+rasterization have a combined 120-second timeout and are cancelled with the task.
+
+```sh
+cargo run --release --package rustverse_images -- \
+  individual_shiyu.typ player.json /tmp/player.png season.json
+cargo run --release --package rustverse_images --features render-season \
+  --example render_season -- 69041 /tmp/deadly.png
+```
+
+The generic CLI takes a template name, input JSON, output PNG, and optionally a
+second JSON file. Individual Shiyu needs the matching Nanoka season as that
+second file. Deadly season JSON must include `begin_time` and `end_time`; the
+season example and bot supply them from the season index.
 
 ## Web dashboard
 

@@ -3,7 +3,7 @@ resolver = "2"
 members = [
     "crates/nanoka",
     "crates/rustverse",
-    "crates/rustverse_svg",
+    "crates/rustverse_images",
     "crates/rustversebot",
 ]
 default-members = ["crates/rustversebot"]

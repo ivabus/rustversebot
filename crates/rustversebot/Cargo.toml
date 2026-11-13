@@ -18,7 +18,7 @@ axum = "0.8"
 log = "0.4"
 env_logger = "0.11"
 url = "2"
-rustverse_svg = { version = "0.1.0", path = "../rustverse_svg" }
+rustverse_images = { version = "0.1.0", path = "../rustverse_images" }
 
 [dev-dependencies]
 tower = "0.5"

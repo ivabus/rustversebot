@@ -95,6 +95,17 @@ struct IndexedSeason {
     ends_at: Option<DateTime<Utc>>,
 }
 
+fn indexed_season_end(season: &IndexedSeason) -> anyhow::Result<String> {
+    let end = season
+        .ends_at
+        .ok_or_else(|| anyhow::anyhow!("season {} has no end date", season.id))?;
+    let timezone = FixedOffset::east_opt(3600).expect("valid Europe server offset");
+    Ok(end
+        .with_timezone(&timezone)
+        .format("%Y-%m-%d %H:%M:%S")
+        .to_string())
+}
+
 fn parse_nanoka_datetime(value: &str) -> Option<DateTime<Utc>> {
     let local = chrono::NaiveDateTime::parse_from_str(value, "%Y-%m-%d %H:%M:%S").ok()?;
     let nanoka_timezone = FixedOffset::east_opt(60 * 60)?;
@@ -377,25 +388,15 @@ async fn send_endgame_info(
     let png = match endgame_type {
         EndgameType::DeadlyAssault => {
             let detail = state.nanoka.get_boss_detail_resolved(id, None).await?;
-            rustverse_svg::preload_deadly_info_images(&detail).await?;
-            let begin_time = season.begin_time;
-            tokio::task::spawn_blocking(move || {
-                rustverse_svg::deadly_info_with_begin_time(&detail, Some(&begin_time))
-            })
-            .await
-            .map_err(|error| anyhow::anyhow!("Deadly Assault renderer task panicked: {error}"))??
+            let end = indexed_season_end(&season)?;
+            rustverse_images::deadly_info(&detail, &season.begin_time, &end).await?
         }
         EndgameType::ShiyuDefence => {
             let detail = state.nanoka.get_detail_resolved(id).await?;
             let nanoka::types::AnySeasonDetail::Shiyu(detail) = detail else {
                 anyhow::bail!("Nanoka returned a non-Shiyu detail for season {id}");
             };
-            rustverse_svg::preload_shiyu_info_images(&detail).await?;
-            tokio::task::spawn_blocking(move || rustverse_svg::shiyu_info(&detail))
-                .await
-                .map_err(|error| {
-                    anyhow::anyhow!("Shiyu Defense renderer task panicked: {error}")
-                })??
+            rustverse_images::shiyu_info(&detail).await?
         }
     };
     bot.send_photo(chat_id, InputFile::memory(png)).await?;
@@ -433,24 +434,11 @@ async fn cmd_endgame_pair(
         anyhow::bail!("Nanoka returned a non-Shiyu detail for season {}", shiyu.id);
     };
 
-    let deadly_begin_time = deadly.begin_time.clone();
-    let (deadly_preload, shiyu_preload) = tokio::join!(
-        rustverse_svg::preload_deadly_info_images(&deadly_detail),
-        rustverse_svg::preload_shiyu_info_images(&shiyu_detail)
-    );
-    deadly_preload?;
-    shiyu_preload?;
-
-    let deadly_render = tokio::task::spawn_blocking(move || {
-        rustverse_svg::deadly_info_with_begin_time(&deadly_detail, Some(&deadly_begin_time))
-    });
-    let shiyu_render =
-        tokio::task::spawn_blocking(move || rustverse_svg::shiyu_info(&shiyu_detail));
-    let (deadly_png, shiyu_png) = tokio::join!(deadly_render, shiyu_render);
-    let deadly_png = deadly_png
-        .map_err(|error| anyhow::anyhow!("Deadly Assault renderer task panicked: {error}"))??;
-    let shiyu_png = shiyu_png
-        .map_err(|error| anyhow::anyhow!("Shiyu Defense renderer task panicked: {error}"))??;
+    let deadly_end = indexed_season_end(&deadly)?;
+    let (deadly_png, shiyu_png) = tokio::try_join!(
+        rustverse_images::deadly_info(&deadly_detail, &deadly.begin_time, &deadly_end),
+        rustverse_images::shiyu_info(&shiyu_detail),
+    )?;
 
     let album_caption = format!(
         "<b>Deadly Assault</b> · {} · <b>{}</b>\n<b>Shiyu Defense</b> · {} · <b>{}</b>",
@@ -1194,7 +1182,7 @@ async fn send_shiyu(bot: &Bot, chat_id: ChatId, uid: &str, state: &BotState) -> 
         && data.hadal_begin_time.is_some()
     {
         let nick = resolve_nickname(state, uid, None).await?;
-        let png = render_shiyu(data).await?;
+        let png = render_shiyu(data, &nick, state).await?;
         send_detail_photo(
             bot,
             state,
@@ -1239,7 +1227,7 @@ async fn send_shiyu(bot: &Bot, chat_id: ChatId, uid: &str, state: &BotState) -> 
     match client.get_shiyu_defense(uid, None, "1").await {
         Ok(data) => {
             let nick = resolve_nickname(state, uid, None).await?;
-            let png = render_shiyu(data).await?;
+            let png = render_shiyu(data, &nick, state).await?;
             send_detail_photo(
                 bot,
                 state,
@@ -1275,17 +1263,24 @@ async fn send_shiyu(bot: &Bot, chat_id: ChatId, uid: &str, state: &BotState) -> 
 }
 
 async fn render_da(data: rustverse::models::zzz::ZZZDeadlyAssault) -> anyhow::Result<Vec<u8>> {
-    rustverse_svg::preload_da_images(&data).await?;
-    tokio::task::spawn_blocking(move || rustverse_svg::da(&data))
-        .await
-        .map_err(|error| anyhow::anyhow!("Deadly Assault renderer task panicked: {error}"))
+    rustverse_images::da(&data).await
 }
 
-async fn render_shiyu(data: rustverse::models::zzz::ZZZShiyuDefense) -> anyhow::Result<Vec<u8>> {
-    rustverse_svg::preload_shiyu_images(&data).await?;
-    tokio::task::spawn_blocking(move || rustverse_svg::shiyu(&data))
-        .await
-        .map_err(|error| anyhow::anyhow!("Shiyu Defense renderer task panicked: {error}"))
+async fn render_shiyu(
+    data: rustverse::models::zzz::ZZZShiyuDefense,
+    nickname: &str,
+    state: &BotState,
+) -> anyhow::Result<Vec<u8>> {
+    let id = data
+        .zone_id
+        .and_then(|id| u64::try_from(id).ok())
+        .ok_or_else(|| anyhow::anyhow!("Shiyu player result has no valid season ID"))?;
+    let nanoka::types::AnySeasonDetail::Shiyu(season) =
+        state.nanoka.get_detail_resolved(id).await?
+    else {
+        anyhow::bail!("Nanoka returned a non-Shiyu detail for season {id}");
+    };
+    rustverse_images::shiyu(&data, &season, nickname).await
 }
 
 fn parse_detail_callback(data: &str) -> Option<(&str, &str)> {
@@ -1805,7 +1800,7 @@ pub async fn build_top_image_and_caption(
 
     let png = match endgame_type {
         "deadly_assault" => {
-            let mut top: Vec<rustverse_svg::TopDAItem> = entries
+            let mut top: Vec<rustverse_images::TopDAItem> = entries
                 .iter()
                 .filter_map(|e| {
                     let data: rustverse::models::zzz::ZZZDeadlyAssault =
@@ -1815,7 +1810,7 @@ pub async fn build_top_image_and_caption(
                     let normal_score = u32::try_from(data.normal_score()).ok()?;
                     let hard_score = u32::try_from(data.hard_score()).ok()?;
                     let hard_stars = u8::try_from(data.hard_stars()).ok()?;
-                    Some(rustverse_svg::TopDAItem {
+                    Some(rustverse_images::TopDAItem {
                         nickname,
                         stars,
                         hard_stars,
@@ -1826,23 +1821,23 @@ pub async fn build_top_image_and_caption(
                 })
                 .collect();
             top.sort_by_key(|item| std::cmp::Reverse(item.total_score));
-            rustverse_svg::top_da(&rustverse_svg::TopDA { top })
+            rustverse_images::top_da(&rustverse_images::TopDA { top }).await?
         }
         "shiyu_defense" => {
-            let top: Vec<rustverse_svg::TopShiyuItem> = entries
+            let top: Vec<rustverse_images::TopShiyuItem> = entries
                 .iter()
                 .filter_map(|e| {
                     let v: serde_json::Value = serde_json::from_str(&e.data_json).ok()?;
                     let rating = v.get("brief")?.get("rating")?.as_str()?.to_string();
                     let nickname = e.nickname.clone().unwrap_or_else(|| e.uid.clone());
-                    Some(rustverse_svg::TopShiyuItem {
+                    Some(rustverse_images::TopShiyuItem {
                         nickname,
                         rating,
                         score: e.total_score as u32,
                     })
                 })
                 .collect();
-            rustverse_svg::top_shiyu(&rustverse_svg::TopShiyu { top })
+            rustverse_images::top_shiyu(&rustverse_images::TopShiyu { top }).await?
         }
         _ => return Ok((Vec::new(), caption)),
     };
