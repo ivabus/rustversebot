@@ -1,4 +1,7 @@
-use chrono::{DateTime, FixedOffset, TimeZone, Utc};
+use crate::season_time::{
+    EUROPE_SERVER, display_wall_time, moscow_date, moscow_time, parse_europe_time,
+};
+use chrono::{DateTime, Utc};
 use nanoka::types::{EndgameType, SeasonMeta};
 use std::{collections::HashMap, sync::Arc};
 use teloxide::{
@@ -88,31 +91,16 @@ impl SeasonPosition {
 struct IndexedSeason {
     id: u64,
     sequence_id: u64,
-    is_test: bool,
-    has_live_period: bool,
-    begin_time: String,
+    is_preview: bool,
     starts_at: DateTime<Utc>,
     ends_at: Option<DateTime<Utc>>,
 }
 
-fn indexed_season_end(season: &IndexedSeason) -> anyhow::Result<String> {
-    let end = season
+fn indexed_season_end(season: &IndexedSeason) -> String {
+    season
         .ends_at
-        .ok_or_else(|| anyhow::anyhow!("season {} has no end date", season.id))?;
-    let timezone = FixedOffset::east_opt(3600).expect("valid Europe server offset");
-    Ok(end
-        .with_timezone(&timezone)
-        .format("%Y-%m-%d %H:%M:%S")
-        .to_string())
-}
-
-fn parse_nanoka_datetime(value: &str) -> Option<DateTime<Utc>> {
-    let local = chrono::NaiveDateTime::parse_from_str(value, "%Y-%m-%d %H:%M:%S").ok()?;
-    let nanoka_timezone = FixedOffset::east_opt(60 * 60)?;
-    nanoka_timezone
-        .from_local_datetime(&local)
-        .single()
-        .map(|date| date.with_timezone(&Utc))
+        .map(moscow_date)
+        .unwrap_or_else(|| "—".into())
 }
 
 fn indexed_season(
@@ -128,30 +116,17 @@ fn indexed_season(
     if EndgameType::from_id(id) != Some(endgame_type) {
         return None;
     }
-    let has_live_period = meta.live_begin.is_some();
-    let begin_time = meta
-        .live_begin
-        .as_deref()
-        .or(meta.begin.as_deref())?
-        .to_owned();
-    let starts_at = parse_nanoka_datetime(&begin_time)?;
-    let ends_at = meta
-        .live_end
-        .as_deref()
-        .or(meta.end.as_deref())
-        .and_then(parse_nanoka_datetime);
-    let is_test = id >= 100_000;
-    // Test-server IDs are the nominal season ID followed by one extra digit:
-    // 690421 follows 69041, and 620541 follows 62053.
-    let sequence_id = if is_test { id / 10 } else { id };
+    let (begin, end) = match meta.live_begin.as_deref() {
+        Some(start) => (start, meta.live_end.as_deref()),
+        None => (meta.begin.as_deref()?, meta.end.as_deref()),
+    };
+    let sequence_id = if id >= 100_000 { id / 10 } else { id };
     Some(IndexedSeason {
         id,
         sequence_id,
-        is_test,
-        has_live_period,
-        begin_time,
-        starts_at,
-        ends_at,
+        is_preview: id != sequence_id && meta.live_begin.is_none(),
+        starts_at: parse_europe_time(begin)?,
+        ends_at: end.and_then(parse_europe_time),
     })
 }
 
@@ -162,93 +137,49 @@ fn select_indexed_season(
     position: SeasonPosition,
     now: DateTime<Utc>,
 ) -> Option<IndexedSeason> {
-    let mut production_entries = seasons
+    let entries: Vec<_> = seasons
         .iter()
         .filter_map(|(id, meta)| indexed_season(id, meta, endgame_type, sort))
-        .filter(|season| !season.is_test)
-        .collect::<Vec<_>>();
-    production_entries.sort_by_key(|season| season.starts_at);
-
-    let current_production_index = production_entries
-        .iter()
-        .rposition(|season| season.starts_at <= now && season.ends_at.is_none_or(|end| now < end));
-    let latest_started_production = production_entries
-        .iter()
-        .rposition(|season| season.starts_at <= now);
-
-    // A six-digit season can graduate from preview to the live rotation while
-    // retaining its preview ID. Treat it as current only after the preceding
-    // five-digit production season has ended. An active five-digit season
-    // always wins, so broad preview dates cannot make a beta season current.
-    let promoted_current = if current_production_index.is_none() {
-        latest_started_production.and_then(|previous_index| {
-            let previous = &production_entries[previous_index];
-            seasons
-                .iter()
-                .filter_map(|(id, meta)| indexed_season(id, meta, endgame_type, sort))
-                .filter(|season| {
-                    season.is_test
-                        && season.sequence_id == previous.sequence_id + 1
-                        && previous.ends_at.is_some_and(|end| season.starts_at >= end)
-                        && season.starts_at <= now
-                        && season.ends_at.is_none_or(|end| now < end)
-                })
-                .max_by_key(|season| season.starts_at)
-        })
-    } else {
-        None
-    };
-
-    let current = current_production_index
-        .map(|index| production_entries[index].clone())
-        .or(promoted_current);
-
-    let current = current?;
-    match position {
-        SeasonPosition::Previous if current.is_test => production_entries
+        .collect();
+    let current = current_live_season(&entries, now)?;
+    let selected = match position {
+        SeasonPosition::Current => Some(current),
+        SeasonPosition::Previous => entries
             .iter()
-            .filter(|season| season.starts_at < current.starts_at)
-            .max_by_key(|season| season.starts_at)
-            .cloned(),
-        SeasonPosition::Previous => production_entries
-            .iter()
-            .position(|season| season.id == current.id)
-            .and_then(|index| index.checked_sub(1))
-            .and_then(|index| production_entries.get(index))
-            .cloned(),
-        SeasonPosition::Current => Some(current.clone()),
+            .filter(|s| !s.is_preview && s.starts_at < current.starts_at)
+            .max_by_key(|s| (s.starts_at, s.id == s.sequence_id, s.id)),
         SeasonPosition::Next => {
-            let mut test_entries = seasons
+            let next_live = entries
                 .iter()
-                .filter_map(|(id, meta)| indexed_season(id, meta, endgame_type, sort))
-                .filter(|season| season.is_test && season.sequence_id > current.sequence_id)
-                .collect::<Vec<_>>();
-            test_entries.sort_by_key(|season| season.sequence_id);
-
-            if let Some(test) = test_entries.first() {
-                // Beta IDs encode their production counterpart with one
-                // trailing digit. Do not jump from 69041 to 690431 when the
-                // immediate 690421 preview is unavailable.
-                return (test.sequence_id == current.sequence_id + 1).then(|| test.clone());
+                .filter(|s| !s.is_preview && s.starts_at > current.starts_at)
+                .min_by_key(|s| (s.starts_at, s.id != s.sequence_id, s.id));
+            let preview = entries
+                .iter()
+                .filter(|s| s.is_preview && s.sequence_id == current.sequence_id + 1)
+                .min_by_key(|s| s.id);
+            match next_live {
+                Some(live) if live.sequence_id == current.sequence_id + 1 => Some(live),
+                _ => preview.or(next_live),
             }
-
-            // Outside a beta window, retain the established production index
-            // behaviour: its direct chronological neighbour is /next.
-            production_entries
-                .iter()
-                .filter(|season| season.starts_at > current.starts_at)
-                .min_by_key(|season| season.starts_at)
-                .cloned()
         }
-    }
+    };
+    selected.cloned()
 }
 
-fn indexed_season_date(season: &IndexedSeason) -> &str {
-    season
-        .begin_time
-        .split_whitespace()
-        .next()
-        .unwrap_or(&season.begin_time)
+fn current_live_season(entries: &[IndexedSeason], now: DateTime<Utc>) -> Option<&IndexedSeason> {
+    entries
+        .iter()
+        .filter(|s| !s.is_preview)
+        .filter(|s| {
+            s.starts_at <= now
+                && s.ends_at
+                    .is_none_or(|end| now.timestamp() <= end.timestamp())
+        })
+        .max_by_key(|s| (s.starts_at, s.id == s.sequence_id, s.id))
+}
+
+fn indexed_season_date(season: &IndexedSeason) -> String {
+    moscow_date(season.starts_at)
 }
 
 fn endgame_index_sort(endgame_type: EndgameType) -> u32 {
@@ -273,55 +204,47 @@ async fn available_endgame_seasons(
     state: &BotState,
 ) -> anyhow::Result<Vec<IndexedSeason>> {
     let seasons = endgame_season_index(endgame_type, state).await?;
-    let now = Utc::now();
-    let Some(current) = select_indexed_season(
-        &seasons,
-        endgame_type,
-        endgame_index_sort(endgame_type),
-        SeasonPosition::Current,
-        now,
-    ) else {
-        return Ok(Vec::new());
-    };
+    Ok(endgame_picker_seasons(&seasons, endgame_type, Utc::now()))
+}
 
-    // The picker intentionally includes every published season from the
-    // current rotation onward. This exposes both scheduled live rotations
-    // and later test previews, while excluding historical entries.
+fn endgame_picker_seasons(
+    seasons: &HashMap<String, SeasonMeta>,
+    endgame_type: EndgameType,
+    now: DateTime<Utc>,
+) -> Vec<IndexedSeason> {
     let mut available = seasons
         .iter()
         .filter_map(|(id, meta)| {
             indexed_season(id, meta, endgame_type, endgame_index_sort(endgame_type))
         })
-        .filter(|season| season.id == current.id || season.sequence_id > current.sequence_id)
         .collect::<Vec<_>>();
-    available.sort_by_key(|season| season.sequence_id);
-    Ok(available)
+    // Nanoka keeps six-digit IDs for consecutive live Deadly Assault seasons.
+    // Only an official live period distinguishes them from beta previews.
+    let Some((current_id, current_sequence)) =
+        current_live_season(&available, now).map(|season| (season.id, season.sequence_id))
+    else {
+        return Vec::new();
+    };
+    available.retain(|season| season.id == current_id || season.sequence_id > current_sequence);
+    available.sort_by_key(|season| (season.sequence_id, season.id));
+    available
 }
 
-async fn endgame_available(
+async fn find_endgame_season(
     endgame_type: EndgameType,
     id: u64,
     state: &BotState,
-) -> anyhow::Result<bool> {
+) -> anyhow::Result<Option<IndexedSeason>> {
     Ok(available_endgame_seasons(endgame_type, state)
         .await?
-        .iter()
-        .any(|season| season.id == id))
+        .into_iter()
+        .find(|season| season.id == id))
 }
 
 fn endgame_status(is_current: bool, season: &IndexedSeason) -> &'static str {
     if is_current {
-        // A preview ID graduates to the live game after the preceding
-        // production season ends. `select_indexed_season` only returns it as
-        // current after that transition, so its selection role—not its
-        // six-digit ID—is authoritative here.
         "live"
-    } else if season.has_live_period {
-        // A six-digit ID can already have an official live schedule. In that
-        // case it is an upcoming live season; only entries without
-        // `live_begin` are test-server previews.
-        "upcoming"
-    } else if season.is_test {
+    } else if season.is_preview {
         "test"
     } else {
         "upcoming"
@@ -364,38 +287,36 @@ async fn cmd_endgame(bot: &Bot, chat_id: ChatId, id: &str, state: &BotState) -> 
             .await?;
         return Ok(());
     };
-    if !endgame_available(endgame_type, id, state).await? {
+    let Some(season) = find_endgame_season(endgame_type, id, state).await? else {
         BotTemplateSender::new(bot, &state.templates)
             .send_message(chat_id, "endgame_unavailable", &())
             .await?;
         return Ok(());
-    }
-    send_endgame_info(bot, chat_id, endgame_type, id, state).await
+    };
+    send_endgame_info(bot, chat_id, endgame_type, &season, state).await
 }
 
 async fn send_endgame_info(
     bot: &Bot,
     chat_id: ChatId,
     endgame_type: EndgameType,
-    id: u64,
+    season: &IndexedSeason,
     state: &BotState,
 ) -> anyhow::Result<()> {
-    let season = available_endgame_seasons(endgame_type, state)
-        .await?
-        .into_iter()
-        .find(|season| season.id == id)
-        .ok_or_else(|| anyhow::anyhow!("season {id} is no longer available"))?;
+    let id = season.id;
     let png = match endgame_type {
         EndgameType::DeadlyAssault => {
             let detail = state.nanoka.get_boss_detail_resolved(id, None).await?;
-            let end = indexed_season_end(&season)?;
-            rustverse_images::deadly_info(&detail, &season.begin_time, &end).await?
+            let end = indexed_season_end(season);
+            rustverse_images::deadly_info(&detail, &indexed_season_date(season), &end).await?
         }
         EndgameType::ShiyuDefence => {
             let detail = state.nanoka.get_detail_resolved(id).await?;
-            let nanoka::types::AnySeasonDetail::Shiyu(detail) = detail else {
+            let nanoka::types::AnySeasonDetail::Shiyu(mut detail) = detail else {
                 anyhow::bail!("Nanoka returned a non-Shiyu detail for season {id}");
             };
+            detail.begin_time = Some(indexed_season_date(season));
+            detail.end_time = Some(indexed_season_end(season));
             rustverse_images::shiyu_info(&detail).await?
         }
     };
@@ -430,13 +351,16 @@ async fn cmd_endgame_pair(
         state.nanoka.get_boss_detail_resolved(deadly.id, None),
         state.nanoka.get_detail_resolved(shiyu.id)
     )?;
-    let nanoka::types::AnySeasonDetail::Shiyu(shiyu_detail) = shiyu_detail else {
+    let nanoka::types::AnySeasonDetail::Shiyu(mut shiyu_detail) = shiyu_detail else {
         anyhow::bail!("Nanoka returned a non-Shiyu detail for season {}", shiyu.id);
     };
 
-    let deadly_end = indexed_season_end(&deadly)?;
+    let deadly_end = indexed_season_end(&deadly);
+    let deadly_begin = indexed_season_date(&deadly);
+    shiyu_detail.begin_time = Some(indexed_season_date(&shiyu));
+    shiyu_detail.end_time = Some(indexed_season_end(&shiyu));
     let (deadly_png, shiyu_png) = tokio::try_join!(
-        rustverse_images::deadly_info(&deadly_detail, &deadly.begin_time, &deadly_end),
+        rustverse_images::deadly_info(&deadly_detail, &deadly_begin, &deadly_end),
         rustverse_images::shiyu_info(&shiyu_detail),
     )?;
 
@@ -637,15 +561,15 @@ async fn handle_endgame_callback(
                 .await?;
         }
         EndgameCallback::Season { endgame_type, id } => {
-            if !endgame_available(endgame_type, id, state).await? {
+            let Some(season) = find_endgame_season(endgame_type, id, state).await? else {
                 bot.answer_callback_query(query.id)
                     .text("Этот сезон больше недоступен")
                     .show_alert(true)
                     .await?;
                 return Ok(());
-            }
+            };
             bot.answer_callback_query(query.id).await?;
-            send_endgame_info(bot, chat_id, endgame_type, id, state).await?;
+            send_endgame_info(bot, chat_id, endgame_type, &season, state).await?;
         }
     }
     Ok(())
@@ -775,23 +699,15 @@ async fn cmd_status(bot: &Bot, chat_id: ChatId, state: &BotState) -> anyhow::Res
     let active_seasons = [
         (
             "Deadly Assault",
-            select_indexed_season(
-                &deadly_index,
-                EndgameType::DeadlyAssault,
-                9,
-                SeasonPosition::Current,
-                now,
-            ),
+            endgame_picker_seasons(&deadly_index, EndgameType::DeadlyAssault, now)
+                .into_iter()
+                .next(),
         ),
         (
             "Shiyu Defense",
-            select_indexed_season(
-                &shiyu_index,
-                EndgameType::ShiyuDefence,
-                1,
-                SeasonPosition::Current,
-                now,
-            ),
+            endgame_picker_seasons(&shiyu_index, EndgameType::ShiyuDefence, now)
+                .into_iter()
+                .next(),
         ),
     ];
     let seasons = active_seasons
@@ -800,8 +716,8 @@ async fn cmd_status(bot: &Bot, chat_id: ChatId, state: &BotState) -> anyhow::Res
             serde_json::json!({
             "name": name,
             "active": season.is_some(),
-            "start": season.as_ref().map(|season| season.starts_at.to_rfc3339()).unwrap_or_else(|| "—".to_owned()),
-            "end": season.as_ref().and_then(|season| season.ends_at.map(|end| end.to_rfc3339())).unwrap_or_else(|| "—".to_owned()),
+            "start": season.as_ref().map(|season| moscow_time(season.starts_at)).unwrap_or_else(|| "—".to_owned()),
+            "end": season.as_ref().and_then(|season| season.ends_at.map(moscow_time)).unwrap_or_else(|| "—".to_owned()),
             "tracked": tracked,
             })
         })
@@ -817,7 +733,7 @@ async fn cmd_status(bot: &Bot, chat_id: ChatId, state: &BotState) -> anyhow::Res
     Ok(())
 }
 
-// ── /top_da, /top_sd ──
+// ── /top_da, /top_shiyu ──
 
 async fn cmd_top(
     bot: &Bot,
@@ -825,8 +741,13 @@ async fn cmd_top(
     endgame_type: &str,
     state: &BotState,
 ) -> anyhow::Result<()> {
+    let season = state
+        .db
+        .get_latest_season_start(chat_id.0, endgame_type)
+        .await?;
     let (png, caption) =
-        build_top_image_and_caption(state, chat_id.0, endgame_type, "manual").await?;
+        build_top_image_and_caption(state, chat_id.0, endgame_type, "manual", season.as_deref())
+            .await?;
     if png.is_empty() {
         BotTemplateSender::new(bot, &state.templates)
             .send_rendered_message(chat_id, caption)
@@ -1749,10 +1670,11 @@ pub async fn build_top_image_and_caption(
     chat_id: i64,
     endgame_type: &str,
     checkpoint: &str,
+    season_start: Option<&str>,
 ) -> anyhow::Result<(Vec<u8>, RenderedTemplate)> {
     let event_name = endgame_name(endgame_type);
 
-    let season_start = match state.db.get_latest_season_start(endgame_type).await? {
+    let season_start = match season_start {
         Some(s) => s,
         None => {
             let text = state
@@ -1772,7 +1694,7 @@ pub async fn build_top_image_and_caption(
 
     let entries = state
         .db
-        .get_latest_results(chat_id, endgame_type, &season_start)
+        .get_latest_results(chat_id, endgame_type, season_start)
         .await?;
 
     if entries.is_empty() {
@@ -1792,8 +1714,8 @@ pub async fn build_top_image_and_caption(
             &serde_json::json!({
                 "name": event_name,
                 "checkpoint_label": checkpoint_label,
-                "start": season_start,
-                "end": season_end,
+                "start": display_wall_time(season_start, EUROPE_SERVER),
+                "end": display_wall_time(season_end, EUROPE_SERVER),
             }),
         )
         .unwrap_or_else(RenderedTemplate::error);
@@ -1856,7 +1778,11 @@ pub async fn build_top_message(
     let event_name = endgame_name(endgame_type);
 
     // Get the latest season start from DB
-    let season_start = match state.db.get_latest_season_start(endgame_type).await? {
+    let season_start = match state
+        .db
+        .get_latest_season_start(chat_id, endgame_type)
+        .await?
+    {
         Some(s) => s,
         None => {
             return Ok(state
@@ -1897,8 +1823,8 @@ pub async fn build_top_message(
             &serde_json::json!({
                 "name": event_name,
                 "checkpoint_label": checkpoint_label,
-                "start": season_start,
-                "end": season_end,
+                "start": display_wall_time(&season_start, EUROPE_SERVER),
+                "end": display_wall_time(season_end, EUROPE_SERVER),
             }),
         )
         .map(|rendered| rendered.text)
@@ -1973,6 +1899,7 @@ fn extract_extra(endgame_type: &str, data_json: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chrono::TimeZone;
 
     fn season_meta(sort: u32, begin: &str, end: &str) -> SeasonMeta {
         SeasonMeta {
@@ -2113,7 +2040,11 @@ mod tests {
             ),
             (
                 "690421".to_owned(),
-                season_meta(9, "2026-07-29 04:00:00", "2026-08-14 03:59:59"),
+                SeasonMeta {
+                    live_begin: Some("2026-07-29 04:00:00".into()),
+                    live_end: Some("2026-08-14 03:59:59".into()),
+                    ..season_meta(9, "2026-06-10 04:00:00", "2026-08-19 03:59:59")
+                },
             ),
             (
                 "690431".to_owned(),
@@ -2195,13 +2126,58 @@ mod tests {
     }
 
     #[test]
+    fn endgame_picker_follows_live_dates_across_six_digit_rotations() {
+        let live = |begin: &str, end: &str| SeasonMeta {
+            live_begin: Some(begin.to_owned()),
+            live_end: Some(end.to_owned()),
+            ..season_meta(9, "2026-10-21 04:00:00", "2026-12-18 03:59:59")
+        };
+        let seasons = HashMap::from([
+            (
+                "69041".into(),
+                live("2026-07-17 04:00:00", "2026-07-29 03:59:59"),
+            ),
+            (
+                "690481".into(),
+                live("2026-10-23 04:00:00", "2026-11-06 03:59:59"),
+            ),
+            (
+                "690491".into(),
+                live("2026-11-06 04:00:00", "2026-11-20 03:59:59"),
+            ),
+            (
+                "690501".into(),
+                live("2026-11-20 04:00:00", "2026-12-02 03:59:59"),
+            ),
+            (
+                "690511".into(),
+                season_meta(9, "2026-10-21 04:00:00", "2026-12-18 03:59:59"),
+            ),
+        ]);
+        let choices = |now| {
+            endgame_picker_seasons(&seasons, EndgameType::DeadlyAssault, now)
+                .iter()
+                .enumerate()
+                .map(|(i, season)| (season.id, endgame_status(i == 0, season)))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            choices(Utc.with_ymd_and_hms(2026, 11, 19, 12, 0, 0).unwrap()),
+            [(690491, "live"), (690501, "upcoming"), (690511, "test")]
+        );
+        assert_eq!(
+            choices(Utc.with_ymd_and_hms(2026, 11, 20, 3, 0, 0).unwrap()),
+            [(690501, "live"), (690511, "test")]
+        );
+        assert!(choices(Utc.with_ymd_and_hms(2026, 12, 2, 3, 0, 0).unwrap()).is_empty());
+    }
+
+    #[test]
     fn live_schedule_distinguishes_upcoming_from_test_preview() {
         let live_preview = IndexedSeason {
             id: 690421,
             sequence_id: 69042,
-            is_test: true,
-            has_live_period: true,
-            begin_time: "2026-07-29 04:00:00".to_owned(),
+            is_preview: false,
             starts_at: Utc.with_ymd_and_hms(2026, 7, 29, 3, 0, 0).unwrap(),
             ends_at: None,
         };
@@ -2209,7 +2185,7 @@ mod tests {
         assert_eq!(endgame_status(false, &live_preview), "upcoming");
 
         let test_preview = IndexedSeason {
-            has_live_period: false,
+            is_preview: true,
             ..live_preview
         };
         assert_eq!(endgame_status(false, &test_preview), "test");

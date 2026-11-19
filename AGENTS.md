@@ -59,8 +59,9 @@ CARGO_TARGET_DIR=/tmp/rustversebot-svg-release \
 
 Current data-model details worth preserving:
 
-- A six-digit season ID is a test-server preview: its nominal sequence ID is
-  `id / 10` (for example, `690421` follows production `69041`).
+- A six-digit ID has nominal sequence `id / 10`. Deadly Assault keeps these
+  IDs when a preview goes live. Nanoka publishes the official start in
+  `live_begin` (for example, the November 2026 rotations `690491 → 690501`).
 - Deadly Assault beta details may contain several modes. Render every mode.
   The normal mode is first. The complex-boss mode follows it.
 - The complex mode reports `zone_type = 1002`, but if the `1301` adjustment
@@ -158,8 +159,9 @@ The template registry tests must continue to validate every template file.
 ## Season-pair commands
 
 `/previous`, `/current`, and `/next` render the Deadly Assault and Shiyu
-Defense pair together. Determine `/current` and `/previous` from five-digit
-production seasons. Sort them by the Europe game-server (UTC+1) start time.
+Defense pair together. Determine `/current` and `/previous` from the live
+rotation, including six-digit IDs with an official schedule. Sort them by
+the Europe game-server (UTC+1) start time.
 `/next` normally uses the direct production neighbor. During a test window, use
 the earliest six-digit preview only when its nominal sequence is exactly the
 next one (for example `69041 → 690421`). Never skip a missing immediate
@@ -177,7 +179,12 @@ in the first image caption. Do not add a caption to the second image.
 - Slow synchronous SVG rasterization must run in `tokio::task::spawn_blocking`.
 - Rate-limit Telegram and HoYoLAB requests and preserve retry backoff.
 - Checkpoint messages are valid only inside their short delivery window.
-  Never send a checkpoint after its window has expired.
+  Count 6 hours, 24 hours and 14 days from the European release in UTC.
+  HoYoLAB's stored season keys are wall times. Preserve them for lookup and
+  deduplication. Render the season that triggered the checkpoint, including
+  when the 14-day checkpoint coincides with the next rotation.
+- Show bot dates in Moscow time (UTC+3). A European server reset at 04:00
+  is 03:00 UTC and 06:00 MSK in both summer and winter.
 - Deadly Assault announcements are valid only before the season starts.
   Never send an overdue announcement after `live_begin`.
 
@@ -186,18 +193,17 @@ in the first image caption. Do not add a caption to the second image.
 For automatic Deadly Assault announcements:
 
 - Use `nanoka::NanokaClient`.
-- Accept only five-digit production IDs matching `69xxx`.
+- Accept five- and six-digit Deadly Assault IDs starting with `69`, sort 9.
 - Use `SeasonMeta.live_begin` as the season start.
-- Ignore six-digit beta IDs and their broad `begin`/`end` dates.
+- A preview with only `begin`/`end` stays outside the announcement schedule.
 - Fetch details with `get_boss_detail_resolved`.
-- Render with `rustverse_svg::deadly_info_with_begin_time`. Pass the
-  resolved live start so the `yyyy-mm-dd` heading is accurate.
+- Render with `rustverse_images::deadly_info` and the live calendar dates in MSK.
 - Deduplicate by `(chat_id, event_kind, season_id)`.
 
 Do not use HoYoLAB player results to describe a future rotation.
 
 Shiyu announcements use `get_seasons`, `get_detail_resolved`, and
-`rustverse_svg::shiyu_info`. Reject a non-Shiyu resolved detail before
+`rustverse_images::shiyu_info`. Reject a non-Shiyu resolved detail before
 rendering.
 
 ## Season SVG infographics

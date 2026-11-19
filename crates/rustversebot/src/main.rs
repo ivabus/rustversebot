@@ -2,6 +2,7 @@ mod bot_templates;
 mod db;
 mod handlers;
 mod scheduler;
+mod season_time;
 mod templates;
 mod web;
 
@@ -29,11 +30,17 @@ enum Command {
     Previous,
     /// Show an infographic for a current or next endgame season: `/endgame [id]`.
     Endgame(String),
+    /// Show Deadly Assault details: /da [uid].
+    #[command(rename = "da")]
+    Da(String),
+    /// Show Shiyu Defense details: /shiyu [uid].
+    #[command(rename = "shiyu")]
+    Shiyu(String),
     /// Show the Deadly Assault leaderboard.
     #[command(rename = "top_da")]
     TopDeadly,
     /// Show the Shiyu Defense leaderboard.
-    #[command(rename = "top_sd")]
+    #[command(rename = "top_shiyu", alias = "top_sd", hide_aliases)]
     TopShiyu,
     /// Update the HoYoLAB cookie: `/cookie <cookie_string>`.
     Cookie(String),
@@ -43,15 +50,17 @@ enum Command {
     /// Fetch one UID again: `/refetch <uid>`.
     #[command(rename = "refetch")]
     RefetchUid(String),
-    /// Show Deadly Assault details for a UID: `/da <uid>`.
-    #[command(rename = "da")]
-    Da(String),
-    /// Show Shiyu Defense details for a UID: `/shiyu <uid>`.
-    #[command(rename = "shiyu")]
-    Shiyu(String),
     /// List all registered UIDs in this chat.
     #[command(rename = "uids")]
     Uids,
+}
+
+fn telegram_menu() -> Vec<teloxide::types::BotCommand> {
+    let mut commands = Command::bot_commands();
+    for command in &mut commands {
+        command.command = command.command.trim_start_matches('/').to_owned();
+    }
+    commands
 }
 
 /// Shared bot state accessible from all handlers and the scheduler.
@@ -99,6 +108,9 @@ async fn main() -> anyhow::Result<()> {
     });
 
     let bot = Bot::from_env();
+    if let Err(error) = bot.set_my_commands(telegram_menu()).await {
+        log::warn!("Could not update Telegram command menu: {error}");
+    }
     log::info!("Bot connected");
     let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
 
@@ -192,4 +204,39 @@ async fn shutdown_signal() -> std::io::Result<()> {
 
     #[cfg(not(unix))]
     tokio::signal::ctrl_c().await
+}
+
+#[cfg(test)]
+mod command_tests {
+    use super::*;
+
+    #[test]
+    fn detail_and_top_commands_match_the_public_menu() {
+        let menu = telegram_menu();
+        for name in ["da", "shiyu", "top_da", "top_shiyu"] {
+            assert!(menu.iter().any(|command| command.command == name));
+        }
+        assert!(matches!(
+            Command::parse("/da 123", "bot"),
+            Ok(Command::Da(_))
+        ));
+        assert!(matches!(
+            Command::parse("/shiyu 123", "bot"),
+            Ok(Command::Shiyu(_))
+        ));
+        assert!(matches!(
+            Command::parse("/top_da", "bot"),
+            Ok(Command::TopDeadly)
+        ));
+        for command in ["/top_shiyu@bot", "/top_sd"] {
+            assert!(matches!(
+                Command::parse(command, "bot"),
+                Ok(Command::TopShiyu)
+            ));
+        }
+        assert!(
+            menu.iter()
+                .all(|c| !c.command.starts_with('/') && c.command != "top_sd")
+        );
+    }
 }

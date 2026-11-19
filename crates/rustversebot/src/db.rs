@@ -336,9 +336,32 @@ impl Db {
     }
     pub async fn get_latest_season_start(
         &self,
+        chat_id: i64,
         endgame_type: &str,
     ) -> anyhow::Result<Option<String>> {
-        self.optional_string("SELECT season_start FROM endgame_results WHERE endgame_type=?1 ORDER BY id DESC LIMIT 1",params![endgame_type]).await
+        self.optional_string("SELECT r.season_start FROM users u JOIN endgame_results r ON r.uid=u.uid
+            WHERE u.chat_id=?1 AND r.endgame_type=?2 AND r.season_start<>'' ORDER BY r.season_start DESC LIMIT 1",
+            params![chat_id,endgame_type]).await
+    }
+
+    pub async fn checkpoint_candidates(
+        &self,
+        kind: &str,
+        earliest: &str,
+        latest: &str,
+        label: &str,
+    ) -> anyhow::Result<Vec<(i64, String)>> {
+        let mut rows = self.connection()?.query(
+            "SELECT DISTINCT u.chat_id, r.season_start FROM users u JOIN endgame_results r ON r.uid=u.uid
+             WHERE r.endgame_type=?1 AND r.season_start BETWEEN ?2 AND ?3
+             AND NOT EXISTS (SELECT 1 FROM checkpoints_posted p WHERE p.chat_id=u.chat_id
+                 AND p.endgame_type=r.endgame_type AND p.season_start=r.season_start AND p.checkpoint=?4)
+             ORDER BY u.chat_id, r.season_start", params![kind, earliest, latest, label]).await?;
+        let mut candidates = Vec::new();
+        while let Some(row) = rows.next().await? {
+            candidates.push((row.get(0)?, row.get(1)?));
+        }
+        Ok(candidates)
     }
     pub async fn get_latest_result_json(
         &self,

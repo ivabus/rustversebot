@@ -398,7 +398,7 @@ mod tests {
         let fixtures = [
             (
                 Template::TopDa,
-                json!({"top": [{"nickname": "Player", "total_score": 100000, "stars": 9, "hard_score": 10000, "normal_score": 90000}]}),
+                json!({"top": [{"nickname": "Player", "total_score": 100000, "stars": 9, "hard_stars": 2, "hard_score": 10000, "normal_score": 90000}]}),
             ),
             (
                 Template::TopShiyu,

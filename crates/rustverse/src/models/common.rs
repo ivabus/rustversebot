@@ -8,7 +8,7 @@ pub struct ApiResponse<T> {
     pub data: Option<T>,
 }
 
-/// Date components in UTC+8 (used by ZZZ and HSR).
+/// Calendar components without a UTC offset. ZZZ season dates use game-server time.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DateComponents {
     pub year: i32,

@@ -58,7 +58,7 @@ struct GameManifest {
 /// The main client for the nanoka.cc ZZZ API.
 ///
 /// On first use, the client resolves the latest game data version.
-/// The client stores this version in memory for its lifetime.
+/// Long-running clients refresh the version hourly. Explicit versions remain pinned.
 ///
 /// # Example
 ///
@@ -71,7 +71,8 @@ pub struct NanokaClient {
     http: HttpClient,
     base_url: String,       // https://static.nanoka.cc
     image_base_url: String, // https://static.nanoka.cc/assets/zzz
-    version: OnceLock<String>,
+    pinned_version: Option<String>,
+    version: tokio::sync::Mutex<Option<(std::time::Instant, String)>>,
     /// Language code for localized data. The default is `"en"`.
     pub lang: String,
 }
@@ -92,7 +93,8 @@ impl NanokaClient {
             http: HttpClient::new(),
             base_url: "https://static.nanoka.cc".into(),
             image_base_url: "https://static.nanoka.cc/assets/zzz".into(),
-            version: OnceLock::new(),
+            pinned_version: None,
+            version: Default::default(),
             lang: "en".into(),
         }
     }
@@ -118,9 +120,8 @@ impl NanokaClient {
     }
 
     /// Override the game data version instead of resolving it from the website.
-    pub fn with_version(self, version: impl Into<String>) -> Self {
-        let v = version.into();
-        let _ = self.version.set(v);
+    pub fn with_version(mut self, version: impl Into<String>) -> Self {
+        self.pinned_version = Some(version.into());
         self
     }
 
@@ -131,9 +132,15 @@ impl NanokaClient {
     /// Resolve and cache the latest game data version.
     ///
     /// Fetch the static-data manifest and read the latest ZZZ version.
-    pub async fn version(&self) -> Result<&str, Error> {
-        if let Some(v) = self.version.get() {
-            return Ok(v.as_str());
+    pub async fn version(&self) -> Result<String, Error> {
+        if let Some(v) = &self.pinned_version {
+            return Ok(v.clone());
+        }
+        let mut cache = self.version.lock().await;
+        if let Some((checked, version)) = &*cache
+            && checked.elapsed() < std::time::Duration::from_secs(3600)
+        {
+            return Ok(version.clone());
         }
 
         let url = format!("{}/manifest.json", self.base_url.trim_end_matches('/'));
@@ -144,9 +151,8 @@ impl NanokaClient {
         }
         debug!("Resolved game version: {version}");
 
-        // Cannot fail: OnceLock::set on an empty cell always succeeds.
-        let _ = self.version.set(version);
-        Ok(self.version.get().unwrap().as_str())
+        *cache = Some((std::time::Instant::now(), version.clone()));
+        Ok(version)
     }
 
     // ------------------------------------------------------------------

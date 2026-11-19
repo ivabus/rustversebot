@@ -279,7 +279,7 @@ impl Cli {
                     }
                     if let Some(end) = &data.hadal_end_time {
                         println!(
-                            "  Ends: {year}-{month:02}-{day:02} {hour:02}:{minute:02}:{second:02} (UTC+8)",
+                            "  Ends: {year}-{month:02}-{day:02} {hour:02}:{minute:02}:{second:02} (server time)",
                             year = end.year,
                             month = end.month,
                             day = end.day,

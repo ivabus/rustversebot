@@ -50,13 +50,18 @@ The scheduler uses these variables:
 - `BOT_RETENTION_DAYS` sets the result retention period. The default is `90`.
 - `BOT_ANNOUNCEMENT_LEAD_HOURS` sets the season announcement lead time. The default is `24`.
 
-The bot does not send an expired checkpoint or a late season announcement.
-It always keeps the last snapshot in each result series.
+The shared leaderboard follows the Europe game server (fixed UTC+1). A 04:00
+server release is 06:00 Moscow time. The 24-hour checkpoint opens at 06:00
+Moscow time the following day. The 14-day report uses the ending season's
+results even when the next season has already opened. Telegram and the
+dashboard show dates in Moscow time.
 
 The `nanoka` crate supplies future seasons, enemy data, and image URLs.
 The bot stores production season indexes by mode and season ID.
-It updates an index after the current season ends.
-It then announces the next season during the configured window.
+It refreshes the indexes hourly and checks the announcement window on each
+scheduler poll. Deadly Assault uses both five- and six-digit IDs with a
+published `live_begin`. A season can be announced while the current one is
+still running. Delivery stops when the new season starts.
 The bot does not cache season details or cards.
 It renders each card once and sends it once to each eligible chat.
 
@@ -211,6 +216,7 @@ The next season must directly follow the current season.
 If Nanoka lacks either mode, the bot reports that the full pair is unavailable.
 
 The `/da` and `/shiyu` commands accept a UID or nickname.
+The chat leaderboards are `/top_da` and `/top_shiyu`.
 Without an argument, the bot shows buttons for UIDs in the current chat.
 Each callback checks chat membership again.
 This check prevents an old or modified button from exposing another chat's data.

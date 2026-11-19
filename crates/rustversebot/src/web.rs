@@ -85,7 +85,36 @@ async fn history(
     Path(uid): Path<String>,
 ) -> Result<impl IntoResponse, PublicApiError> {
     validate_uid(&uid)?;
-    Ok(Json(state.db.web_history(&uid, MAX_HISTORY_ENTRIES).await?))
+    let zone = match rustverse::client::server::detect_server(&uid) {
+        Some("prod_gf_eu") => Some(crate::season_time::EUROPE_SERVER),
+        Some("prod_gf_us") => chrono::FixedOffset::west_opt(5 * 3600),
+        Some("prod_gf_jp" | "prod_gf_sg") => chrono::FixedOffset::east_opt(8 * 3600),
+        _ => None,
+    };
+    let history = state
+        .db
+        .web_history(&uid, MAX_HISTORY_ENTRIES)
+        .await?
+        .into_iter()
+        .map(|entry| {
+            let display =
+                |value: &str| zone.map(|z| crate::season_time::display_wall_time(value, z));
+            HistoryView {
+                season_start_msk: display(&entry.season_start),
+                season_end_msk: display(&entry.season_end),
+                entry,
+            }
+        })
+        .collect::<Vec<_>>();
+    Ok(Json(history))
+}
+
+#[derive(Serialize)]
+struct HistoryView {
+    #[serde(flatten)]
+    entry: crate::db::WebHistoryEntry,
+    season_start_msk: Option<String>,
+    season_end_msk: Option<String>,
 }
 
 fn validated_kind(kind: &str) -> Result<&str, PublicApiError> {
@@ -225,6 +254,34 @@ mod tests {
                 .await
                 .unwrap();
             assert_eq!(response.status(), expected, "unexpected status for {uri}");
+        }
+    }
+
+    #[tokio::test]
+    async fn history_exposes_moscow_dates_for_the_players_region() {
+        let state = test_state().await;
+        for (uid, expected) in [
+            ("150000001", "06.11.2026 06:00:00 МСК"),
+            ("130000001", "05.11.2026 23:00:00 МСК"),
+        ] {
+            state
+                .db
+                .insert_result(uid, "shiyu_defense", "2026-11-06 04:00:00", "", 1, "{}")
+                .await
+                .unwrap();
+            let response = router(state.clone())
+                .oneshot(
+                    Request::builder()
+                        .uri(format!("/api/users/{uid}/history"))
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            let body = to_bytes(response.into_body(), 4096).await.unwrap();
+            let rows: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            assert_eq!(rows[0]["season_start_msk"], expected);
+            assert_eq!(rows[0]["season_start"], "2026-11-06 04:00:00");
         }
     }
 

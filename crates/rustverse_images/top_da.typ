@@ -10,7 +10,7 @@
   rect(stroke: white, width: 100%, inset: 10pt, radius: 10pt)[
     #(n + 1). #player.nickname
     #place(right + horizon)[#player.total_score]
-    #place(right + horizon, dx: -64pt)[#player.stars x]
+    #place(right + horizon, dx: -64pt)[#(player.stars + player.at("hard_stars", default: 0)) x]
     #place(right + horizon, dx: -45pt)[#image("images/star-icon.png")]
 
     #if player.hard_score != 0 {
