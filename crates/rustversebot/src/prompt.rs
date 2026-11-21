@@ -59,12 +59,12 @@ async fn next_update(
     Some(progress.borrow_and_update().clone())
 }
 
-struct PromptOutput<'a> {
-    bot: &'a Bot,
-    msg: &'a Message,
-    state: &'a BotState,
-    question: &'a str,
-    model: &'a str,
+struct PromptOutput {
+    bot: Bot,
+    msg: Message,
+    state: std::sync::Arc<BotState>,
+    question: String,
+    model: String,
 }
 
 // Ordinary supergroup replies may carry a reply-chain ID even outside a forum.
@@ -144,7 +144,7 @@ enum Update {
     Unavailable,
 }
 
-impl PromptOutput<'_> {
+impl PromptOutput {
     // teloxide 0.13 predates sendMessageDraft. Never expose its tokenized URL in errors.
     async fn draft(&self, text: &str) -> Update {
         let Ok(url) = self
@@ -155,7 +155,7 @@ impl PromptOutput<'_> {
             return Update::Unavailable;
         };
         let mut body = json!({"chat_id":self.msg.chat.id.0,"draft_id":self.msg.id.0.max(1),"text":text,"parse_mode":"HTML"});
-        if let Some(thread) = topic(self.msg) {
+        if let Some(thread) = topic(&self.msg) {
             body["message_thread_id"] = json!(thread);
         }
         let Ok(response) = self
@@ -236,9 +236,9 @@ impl PromptOutput<'_> {
             }
             let Ok(parts) = messages(
                 &self.state.templates,
-                self.model,
+                &self.model,
                 &p,
-                self.question,
+                &self.question,
                 &p.text,
                 true,
             ) else {
@@ -284,7 +284,7 @@ impl PromptOutput<'_> {
         let attempts = crate::scheduler::SchedulerSettings::from_env()
             .retry_attempts
             .max(1);
-        let sender = BotTemplateSender::new(self.bot, &self.state.templates);
+        let sender = BotTemplateSender::new(&self.bot, &self.state.templates);
         for attempt in 1..=attempts {
             if let Some(id) = edit {
                 match self.edit(id, &rendered.text).await {
@@ -301,7 +301,7 @@ impl PromptOutput<'_> {
                 }
             }
             match sender
-                .send_rendered_to_thread(self.msg.chat.id, topic(self.msg), rendered.clone())
+                .send_rendered_to_thread(self.msg.chat.id, topic(&self.msg), rendered.clone())
                 .await
             {
                 Ok(msg) => return Ok(msg.id),
@@ -317,7 +317,12 @@ impl PromptOutput<'_> {
     }
 }
 
-pub async fn command(bot: &Bot, msg: &Message, question: &str, state: &BotState) -> Result<()> {
+pub async fn command(
+    bot: &Bot,
+    msg: &Message,
+    question: &str,
+    state: &std::sync::Arc<BotState>,
+) -> Result<()> {
     if question.trim().is_empty() {
         BotTemplateSender::new(bot, &state.templates)
             .send_to_thread(msg.chat.id, topic(msg), "prompt_usage", &())
@@ -356,10 +361,10 @@ async fn answer(
     bot: &Bot,
     msg: &Message,
     question: &str,
-    state: &BotState,
+    state: &std::sync::Arc<BotState>,
     session: PromptSession,
 ) -> Result<()> {
-    if !crate::agent_access::admit(
+    let Some(slot) = crate::agent_access::admit(
         bot,
         msg.chat.id,
         topic(msg),
@@ -368,22 +373,37 @@ async fn answer(
         state,
     )
     .await?
-    {
+    else {
         return Ok(());
-    }
+    };
     let selection = state.ai_model().await?.to_string();
     let model = selection.as_str();
     let output = PromptOutput {
-        bot,
-        msg,
-        state,
-        question,
-        model,
+        bot: bot.clone(),
+        msg: msg.clone(),
+        state: state.clone(),
+        question: question.to_owned(),
+        model: model.to_owned(),
     };
     let initial = PromptProgress::default();
     let status = messages(&state.templates, model, &initial, question, "", true)?.remove(0);
     let last = status.text.clone();
     let target = output.start(status).await?;
+    slot.send(Box::pin(deliver(output, session, target, last, initial)));
+    Ok(())
+}
+
+async fn deliver(
+    output: PromptOutput,
+    session: PromptSession,
+    target: LiveMessage,
+    last: String,
+    initial: PromptProgress,
+) -> Result<()> {
+    let state = &output.state;
+    let msg = &output.msg;
+    let model = output.model.as_str();
+    let question = output.question.as_str();
     let (tx, rx) = watch::channel(initial);
     let history = &session.turns;
     let generate = async move {

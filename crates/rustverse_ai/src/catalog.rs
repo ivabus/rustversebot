@@ -18,7 +18,7 @@ pub(crate) enum Category {
 }
 
 impl Category {
-    fn path(self) -> &'static str {
+    pub(crate) fn path(self) -> &'static str {
         match self {
             Self::Agents => "agents",
             Self::WEngines => "w-engines",
@@ -44,40 +44,66 @@ pub(crate) struct Index {
 }
 
 impl Index {
-    pub async fn load(client: &Client, category: Category, lang: &str) -> Result<Self> {
+    pub async fn load(
+        client: &Client,
+        category: Category,
+        lang: &str,
+        revision: &str,
+    ) -> Result<Self> {
+        crate::beta::revision_group(revision)?;
         let path = if category == Category::Tutorials {
             "tutorials/all"
         } else {
             category.path()
         };
         let body = client
-            .get(format!("{ORIGIN}/{path}/beta/__data.json"))
+            .get(format!(
+                "{ORIGIN}/{path}/{}/__data.json",
+                revision.replace('_', "/")
+            ))
             .query(&[("lang", lang)])
             .send()
             .await?
             .error_for_status()?
             .text()
             .await?;
-        Self::decode(&body, lang)
+        Self::decode(&body, lang, revision)
     }
 
-    fn decode(body: &str, lang: &str) -> Result<Self> {
+    fn decode(body: &str, lang: &str, expected: &str) -> Result<Self> {
         let mut revision = None;
         for frame in serde_json::Deserializer::from_str(body).into_iter::<Value>() {
             let frame = frame?;
             if frame["type"] == "data" {
                 let layout = layout(&frame, lang)?;
                 let revisions = field(layout, &layout[0], "revisions")?;
-                let latest = field(layout, revisions, "latest")?;
-                let data = resolve(latest, layout, 0)?;
-                ensure!(data["branch"] == "beta", "Expected beta catalog");
-                revision = Some(format!(
-                    "beta_{}_{}",
+                let current = revisions
+                    .get("current")
+                    .map(|index| referenced(layout, index))
+                    .transpose()?
+                    .unwrap_or(&Value::Null);
+                let data = resolve(
+                    if current.is_null() {
+                        field(layout, revisions, "latest")?
+                    } else {
+                        current
+                    },
+                    layout,
+                    0,
+                )?;
+                let actual = format!(
+                    "{}_{}_{}",
+                    data["branch"].as_str().context("missing branch")?,
                     data["version"].as_str().context("missing version")?,
                     data["design_revision"]
                         .as_u64()
                         .context("missing design revision")?
-                ));
+                );
+                ensure!(
+                    actual == expected,
+                    "Catalog revision mismatch: expected {expected}, got {actual}"
+                );
+                revision = Some(actual);
             }
             if frame["type"] != "chunk" {
                 continue;
@@ -233,9 +259,6 @@ pub(crate) async fn detail(
             } else {
                 Value::Null
             };
-            if category == Category::Agents {
-                return Ok(agent_entry(crate::diff::snapshot(dto, tips)));
-            }
             let mut dto = dto;
             if !tips.is_null() {
                 dto["tooltips"] = tips;
@@ -253,11 +276,12 @@ mod tests {
 
     #[test]
     fn index_language_exact_id_and_localized_search() {
-        let layout = json!({"type":"data","nodes":[{"data":[{"language":1,"revisions":2},"chs",{"latest":3},{"branch":4,"version":5,"design_revision":6},"beta","3.4.5",42]}]});
+        let layout = json!({"type":"data","nodes":[{"data":[{"language":1,"revisions":2},"chs",{"current":3,"latest":3},{"branch":4,"version":5,"design_revision":6},"beta","3.4.5",42]}]});
         let chunk = json!({"type":"chunk","data":[{"data":1},{"entries":2},[3],{"id":4,"slug":5,"name":6,"search_data":8},1011,"anby",{"text":7},"安比","alias"]});
         let body = format!("{layout}\n{chunk}");
-        assert!(Index::decode(&body, "en").is_err());
-        let index = Index::decode(&body, "chs").unwrap();
+        assert!(Index::decode(&body, "en", "beta_3.4.5_42").is_err());
+        assert!(Index::decode(&body, "chs", "release_3.4.5_42").is_err());
+        let index = Index::decode(&body, "chs", "beta_3.4.5_42").unwrap();
         for query in ["1011", "安比", "ALIAS", "anby"] {
             assert_eq!(
                 index.search(Category::Agents, query, 0).unwrap()["matches"][0]["id"],
@@ -280,7 +304,9 @@ mod tests {
             (Category::DriveDiscs, 31000),
             (Category::Tutorials, 301124),
         ] {
-            let index = Index::load(&client, category, "en").await.unwrap();
+            let index = Index::load(&client, category, "en", "beta_3.4.5_20699967")
+                .await
+                .unwrap();
             if category == Category::Tutorials {
                 let results = index.search(category, "Refringe", 0).unwrap();
                 assert!(

@@ -1,7 +1,4 @@
-use std::{
-    collections::{BTreeMap, HashMap},
-    sync::Arc,
-};
+use std::{collections::HashMap, sync::Arc};
 
 use anyhow::{Context, Result, bail, ensure};
 use reqwest::Client;
@@ -15,6 +12,8 @@ use tokio::sync::Mutex;
 
 use crate::{
     catalog::{self, Category, Index},
+    change_groups::Groups,
+    compute::Calculation,
     gachabase::{Comparison, Snapshots, recent_revisions},
 };
 
@@ -32,6 +31,7 @@ pub(crate) fn definitions() -> Vec<ToolSpec> {
         json!({"type":"string","enum":["agents","w-engines","drive-discs","bangboo","tutorials"]});
     let language = json!({"type":"string","enum":["en","cn"]});
     let offset = json!({"type":["integer","null"],"minimum":0,"description":"Start at 0 or null. Copy next_offset to continue."});
+    let version = json!({"type":["string","null"],"description":"Exact design revision, beta or release. Null reuses the pinned revision. An unversioned question starts at the newest design revision across beta and release; a report starts at cur."});
     vec![
         ToolSpec {
             name: "list_recent_revisions",
@@ -40,18 +40,24 @@ pub(crate) fn definitions() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "search_gachabase",
-            description: "Search the latest beta catalog by localized name, alias, slug or ID. Empty query browses a category. Pass category and a result ID to get_gachabase_entry.",
+            description: "Search a revision's catalog by localized name, alias, slug or ID. Empty query browses a category. Pass a result ID and returned version to get_gachabase_entry.",
             parameters: json!({"type":"object","additionalProperties":false,"properties":{
-                "category":category,"query":{"type":"string"},"language":language,"offset":offset
-            },"required":["category","query","language","offset"]}),
+                "category":category,"query":{"type":"string"},"language":language,"offset":offset,"version":version
+            },"required":["category","query","language","offset","version"]}),
         },
         ToolSpec {
             name: "get_gachabase_entry",
-            description: "Read by ID at an exact version (null: latest beta). Null selector returns compact tutorial pages, skills or effects, with next_offset in records. Follow read pointers for oversized records. Empty selector lists fields; JSON pointer reads the original field; @raw pages the full entry. Name/ID or text:<phrase> finds paths. Agent values use report levels.",
+            description: "Read by ID. Null selector returns compact pages; empty lists fields; JSON pointer reads a field. @raw returns original data with all levels and growth coefficients; name/ID or text:<phrase> finds paths. For agents request skill_level or core_level (defaults: 12 and maximum). Use returned source and JSON pointers for compute. @changes lists groups; use their selectors and record offsets.",
             parameters: json!({"type":"object","additionalProperties":false,"properties":{
                 "category":category,"id":{"type":"integer","minimum":1},"language":language,
-                "version":{"type":["string","null"]},"selector":{"type":["string","null"]},"offset":offset
-            },"required":["category","id","language","version","selector","offset"]}),
+                "version":version,"selector":{"type":["string","null"]},"offset":offset,
+                "skill_level":{"type":["integer","null"],"minimum":1,"maximum":16},"core_level":{"type":["integer","null"],"minimum":1}
+            },"required":["category","id","language","version","selector","offset","skill_level","core_level"]}),
+        },
+        ToolSpec {
+            name: "compute",
+            description: "Run a short Rhai calculation over numeric data from this run. Bindings become x0, x1, ... (floats or arrays of floats). Use a source returned by a read or the initial diff; path is a JSON pointer, with /*/ to select one number per row. Example for two arrays: let a = sum(x0); let b = sum(x1); [a, b, 100.0 * (b - a) / a]. Return a number or flat numeric array. Use 1.0 for fractional arithmetic. Use only when arithmetic is needed.",
+            parameters: json!({"type":"object","additionalProperties":false,"properties":{"script":{"type":"string"},"bindings":{"type":"array","items":{"type":"object","additionalProperties":false,"properties":{"source":{"type":"string"},"path":{"type":"string"}},"required":["source","path"]}}},"required":["script","bindings"]}),
         },
     ]
 }
@@ -72,12 +78,16 @@ impl Language {
     }
 }
 
+fn source_key(category: Category, id: u64, language: Language, version: &str) -> String {
+    format!("{}/{id}/{}/{version}", category.path(), language.upstream())
+}
+
 pub(crate) struct KitTools {
     client: Client,
-    indexes: HashMap<(Category, Language), Index>,
-    entries: HashMap<(Category, u64, Language, String), Value>,
-    // Only large diffs are retained for paged access from the report's target entry.
-    report_changes: HashMap<(u64, Language, String), String>,
+    indexes: HashMap<(Category, Language, String), Index>,
+    sources: HashMap<String, Value>,
+    report_changes: HashMap<(u64, Language, String), Groups>,
+    pinned: Option<String>,
     recent: Option<Vec<String>>,
 }
 
@@ -86,10 +96,20 @@ impl KitTools {
         Self {
             client,
             indexes: HashMap::new(),
-            entries: HashMap::new(),
+            sources: HashMap::new(),
+            pinned: None,
             report_changes: HashMap::new(),
             recent: None,
         }
+    }
+
+    pub fn for_question(client: Client, question: &str) -> Self {
+        static EXACT: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
+            regex::Regex::new(r"\b(?:beta|release)_[0-9]+\.[0-9]+\.[0-9]+_[0-9]+\b").unwrap()
+        });
+        let mut tools = Self::new(client);
+        tools.pinned = EXACT.find(question).map(|v| v.as_str().to_owned());
+        tools
     }
 
     pub fn report_input(
@@ -106,32 +126,40 @@ impl KitTools {
             "updated"
         };
         let mut input = json!({"agent_id":page.id,"agent":page.slug,"prev":page.prev,"cur":page.cur,"status":status});
+        self.pinned = Some(page.cur.clone());
         let mut empty = true;
         for (label, language, snapshots) in [("en", Language::En, en), ("cn", Language::Cn, cn)] {
-            let changes = snapshots.changes();
+            let mut prepare = |raw: Value, version: &str, side: &str| {
+                let key = source_key(Category::Agents, page.id, language, version);
+                if raw.is_null() {
+                    self.sources.insert(format!("{key}/raw"), Value::Null);
+                    return Value::Null;
+                }
+                let view = crate::diff::snapshot(raw["agent"].clone(), raw["tooltips"].clone());
+                self.sources
+                    .insert(format!("{key}/raw"), catalog::agent_entry(raw));
+                let source = format!("{key}/{}/max", crate::diff::SKILL_LEVEL);
+                self.sources
+                    .insert(source.clone(), catalog::agent_entry(view.clone()));
+                input["sources"][label][side] = json!(source);
+                view
+            };
+            let normalized = Snapshots {
+                prev: prepare(snapshots.prev, &page.prev, "before"),
+                cur: prepare(snapshots.cur, &page.cur, "after"),
+            };
+            let changes = normalized.changes();
             empty &= changes.is_empty();
             input[label] = if status == "updated" && serde_json::to_vec(&changes)?.len() <= 8192 {
                 json!(changes)
             } else {
-                let mut sections = BTreeMap::new();
-                for change in &changes {
-                    let path = change.path.strip_prefix("agent.").unwrap_or(&change.path);
-                    let section = path.split(['.', '[', ' ']).next().unwrap_or(path);
-                    *sections.entry(section).or_insert(0usize) += 1;
-                }
-                self.report_changes.insert(
-                    (page.id, language, page.cur.clone()),
-                    serde_json::to_string(&changes)?,
-                );
-                json!({"change_count":changes.len(),"sections":sections,"selector":"@changes",
-                    "sample_paths":changes.iter().take(32).map(|c| &c.path).collect::<Vec<_>>()})
+                let count = changes.len();
+                let groups = Groups::new(changes);
+                let index = groups.index();
+                self.report_changes
+                    .insert((page.id, language, page.cur.clone()), groups);
+                json!({"change_count":count,"groups":index})
             };
-            for (version, snapshot) in [(&page.prev, snapshots.prev), (&page.cur, snapshots.cur)] {
-                self.entries.insert(
-                    (Category::Agents, page.id, language, version.clone()),
-                    catalog::agent_entry(snapshot),
-                );
-            }
         }
         if empty && status == "updated" {
             return Ok(None);
@@ -162,7 +190,7 @@ impl KitTools {
                         }
                         let shared = Arc::clone(&shared);
                         Box::pin(async move {
-                            let result = shared.lock().await.call(spec.name, args).await;
+                            let result = Self::dispatch(&shared, spec.name, args).await;
                             Ok(ToolOutput::json(
                                 result.unwrap_or_else(|err| json!({"error":err.to_string()})),
                             ))
@@ -171,6 +199,15 @@ impl KitTools {
                 )
             })
             .collect()
+    }
+
+    async fn dispatch(shared: &Mutex<Self>, name: &str, args: Value) -> Result<Value> {
+        if name != "compute" {
+            return shared.lock().await.call(name, args).await;
+        }
+        let calculation: Calculation = serde_json::from_value(args)?;
+        let prepared = calculation.prepare(&shared.lock().await.sources)?;
+        tokio::task::spawn_blocking(move || prepared.run()).await?
     }
 
     async fn revisions(&mut self) -> Result<&[String]> {
@@ -194,12 +231,18 @@ impl KitTools {
                     language: Language,
                     query: String,
                     offset: Option<usize>,
+                    version: Option<String>,
                 }
                 let q: Search = serde_json::from_value(args)?;
-                let index = match self.indexes.entry((q.category, q.language)) {
+                let version = self.version(q.version).await?;
+                let index = match self
+                    .indexes
+                    .entry((q.category, q.language, version.clone()))
+                {
                     std::collections::hash_map::Entry::Occupied(e) => e.into_mut(),
                     std::collections::hash_map::Entry::Vacant(e) => e.insert(
-                        Index::load(&self.client, q.category, q.language.upstream()).await?,
+                        Index::load(&self.client, q.category, q.language.upstream(), &version)
+                            .await?,
                     ),
                 };
                 index.search(q.category, &q.query, q.offset.unwrap_or_default())
@@ -214,64 +257,116 @@ impl KitTools {
                     version: Option<String>,
                     selector: Option<String>,
                     offset: Option<usize>,
+                    skill_level: Option<i64>,
+                    core_level: Option<u64>,
                 }
                 let q: Read = serde_json::from_value(args)?;
                 ensure!(q.id > 0, "Expected positive ID");
-                let version = match q.version {
-                    Some(v) => v,
-                    None if self.indexes.contains_key(&(q.category, q.language)) => {
-                        self.indexes[&(q.category, q.language)].revision.clone()
-                    }
-                    None => self
-                        .revisions()
-                        .await?
-                        .iter()
-                        .find(|name| name.starts_with("beta_"))
-                        .context("No beta versions")?
-                        .clone(),
-                };
-                let key = (q.category, q.id, q.language, version.clone());
-                if q.category == Category::Agents && q.selector.as_deref() == Some("@changes") {
+                let version = self.version(q.version).await?;
+                if q.category == Category::Agents
+                    && let Some(selector) =
+                        q.selector.as_deref().filter(|s| s.starts_with("@changes"))
+                {
                     let changes = self
                         .report_changes
                         .get(&(q.id, q.language, version.clone()))
                         .context("No paged diff for this entry and version")?;
                     return Ok(
-                        json!({"id":q.id,"version":version,"result":json_page(changes,q.offset.unwrap_or_default())?}),
+                        json!({"id":q.id,"version":version,"result":changes.read(selector,q.offset.unwrap_or_default())?}),
                     );
                 }
-                let entry = match self.entries.entry(key) {
-                    std::collections::hash_map::Entry::Occupied(e) => e.into_mut(),
-                    std::collections::hash_map::Entry::Vacant(e) => {
-                        crate::beta::revision_group(&version)?;
-                        e.insert(
-                            catalog::detail(
-                                &self.client,
-                                q.category,
-                                q.id,
-                                &version,
-                                q.language.upstream(),
-                            )
-                            .await?,
-                        )
-                    }
-                };
-                ensure!(!entry.is_null(), "Entry absent in this revision");
+                let key = source_key(q.category, q.id, q.language, &version);
+                let raw_key = format!("{key}/raw");
+                if !self.sources.contains_key(&raw_key) {
+                    crate::beta::revision_group(&version)?;
+                    let value = catalog::detail(
+                        &self.client,
+                        q.category,
+                        q.id,
+                        &version,
+                        q.language.upstream(),
+                    )
+                    .await?;
+                    self.sources.insert(raw_key.clone(), value);
+                }
+                ensure!(
+                    !self.sources[&raw_key].is_null(),
+                    "Entry absent in this revision"
+                );
+                let source =
+                    if q.category != Category::Agents || q.selector.as_deref() == Some("@raw") {
+                        ensure!(
+                            q.skill_level.is_none() && q.core_level.is_none(),
+                            "Levels apply to projected agent views only"
+                        );
+                        raw_key
+                    } else {
+                        let level = q.skill_level.unwrap_or(crate::diff::SKILL_LEVEL);
+                        ensure!((1..=16).contains(&level), "Skill level must be 1..16");
+                        let source = format!(
+                            "{key}/{level}/{}",
+                            q.core_level.map_or("max".to_owned(), |n| n.to_string())
+                        );
+                        if !self.sources.contains_key(&source) {
+                            let raw = &self.sources[&raw_key];
+                            if let Some(rank) = q.core_level {
+                                ensure!(
+                                    raw["core_skills"].as_array().is_some_and(|rows| rows
+                                        .iter()
+                                        .any(|r| r["level"].as_u64() == Some(rank))),
+                                    "Core rank absent in this revision"
+                                );
+                            }
+                            let mut agent = raw.clone();
+                            let tips = agent
+                                .as_object_mut()
+                                .context("Invalid agent")?
+                                .remove("tooltips")
+                                .unwrap_or(Value::Null);
+                            let view = crate::diff::snapshot_at(agent, tips, level, q.core_level);
+                            self.sources
+                                .insert(source.clone(), catalog::agent_entry(view));
+                        }
+                        source
+                    };
+                let entry = &self.sources[&source];
                 let offset = q.offset.unwrap_or_default();
                 let result = match q.selector {
                     Some(selector) => fragment(entry, &selector, offset)?,
                     None => crate::entry_view::page(q.category, entry, offset)?,
                 };
                 Ok(
-                    json!({"category":q.category,"id":q.id,"version":version,"language":match q.language {Language::En=>"en",Language::Cn=>"cn"},"result":result}),
+                    json!({"category":q.category,"id":q.id,"version":version,"language":match q.language {Language::En=>"en",Language::Cn=>"cn"},"source":source,"result":result}),
                 )
             }
             _ => bail!("Unknown tool"),
         }
     }
+
+    async fn version(&mut self, requested: Option<String>) -> Result<String> {
+        let version = match requested.or_else(|| self.pinned.clone()) {
+            None => self
+                .revisions()
+                .await?
+                .first()
+                .context("No beta or release revisions")?
+                .clone(),
+            Some(branch) if matches!(branch.as_str(), "beta" | "release") => self
+                .revisions()
+                .await?
+                .iter()
+                .find(|s| s.split('_').next() == Some(branch.as_str()))
+                .context("No revision for requested branch")?
+                .clone(),
+            Some(exact) => exact,
+        };
+        crate::beta::revision_group(&version)?;
+        self.pinned.get_or_insert_with(|| version.clone());
+        Ok(version)
+    }
 }
 
-fn json_page(serialized: &str, offset: usize) -> Result<Value> {
+pub(crate) fn json_page(serialized: &str, offset: usize) -> Result<Value> {
     let mut chars = serialized.chars().skip(offset).peekable();
     ensure!(
         chars.peek().is_some(),
@@ -379,6 +474,125 @@ mod tests {
 
     const PAGE: &str = "https://zzz.gachabase.net/diff/agents/1601/sunbringer?prev=beta_3.4.5_20694646&cur=beta_3.4.5_20699967";
 
+    #[tokio::test]
+    async fn questions_pin_the_newest_or_the_requested_revision() {
+        let beta = "beta_3.4.5_99";
+        let release = "release_3.3.0_10";
+        for (newest, older, branch) in [(beta, release, "release"), (release, beta, "beta")] {
+            let mut kit = KitTools::for_question(Client::new(), "Как работает навык?");
+            kit.recent = Some(vec![newest.into(), older.into()]);
+            assert_eq!(kit.version(None).await.unwrap(), newest);
+            assert_eq!(kit.version(Some(branch.into())).await.unwrap(), older);
+            assert_eq!(kit.version(None).await.unwrap(), newest);
+        }
+        let mut kit = KitTools::for_question(Client::new(), "Проверь beta_3.4.4_42.");
+        assert_eq!(kit.version(None).await.unwrap(), "beta_3.4.4_42");
+    }
+
+    #[tokio::test]
+    #[ignore = "uses public historical release and beta GachaBase catalogs"]
+    async fn public_pinned_search_then_read() {
+        for version in ["release_3.3.0_20574360", "beta_3.4.4_20541895"] {
+            let mut kit = KitTools::for_question(Client::new(), version);
+            let search = kit
+                .call(
+                    "search_gachabase",
+                    json!({"category":"agents","language":"en","query":"1011"}),
+                )
+                .await
+                .unwrap();
+            assert_eq!(search["version"], version);
+            assert_eq!(search["matches"][0]["id"], 1011);
+            let entry=kit.call("get_gachabase_entry",json!({"category":"agents","language":"en","id":1011,"selector":"/core_skills/0/level","core_level":3})).await.unwrap();
+            assert_eq!(entry["version"], version);
+            assert_eq!(entry["result"]["value"], 3);
+        }
+    }
+
+    #[tokio::test]
+    #[ignore = "walks both languages of a public historical GachaBase diff"]
+    async fn public_kafka_groups_cover_the_complete_diff() {
+        let client = Client::new();
+        let page=Comparison::parse("https://zzz.gachabase.net/diff/agents/1651/kafka?prev=beta_3.4.4_20541895&cur=beta_3.4.5_20691792").unwrap();
+        let (en, cn) =
+            tokio::try_join!(page.fetch(&client, "en"), page.fetch(&client, "chs")).unwrap();
+        let mut kit = KitTools::new(client);
+        let input: Value =
+            serde_json::from_str(&kit.report_input(&page, en, cn).unwrap().unwrap()).unwrap();
+        for (language, expected) in [("en", 201), ("cn", 105)] {
+            let mut seen = 0;
+            for group in input[language]["groups"].as_array().unwrap() {
+                let mut offset = 0;
+                loop {
+                    let page=kit.call("get_gachabase_entry",json!({"id":1651,"category":"agents","language":language,"version":page.cur,"selector":group["selector"],"offset":offset})).await.unwrap();
+                    let result = &page["result"];
+                    seen += result["changes"].as_array().unwrap().len();
+                    let Some(next) = result["next_offset"].as_u64() else {
+                        break;
+                    };
+                    assert!(next > offset);
+                    offset = next;
+                }
+            }
+            assert_eq!(seen, expected);
+        }
+    }
+
+    #[tokio::test]
+    async fn level_views_keep_originals_and_supply_numeric_compute_inputs() {
+        let mut kit = KitTools::for_question(Client::new(), "beta_3.4.4_42");
+        let key = "agents/1/en/beta_3.4.4_42/raw";
+        let raw = json!({"core_skills":[{"level":3,"skill_type_id":5,"text":"{CAL:1+AvatarSkillLevel(5)*2,1,0}"},{"level":7,"skill_type_id":5}],
+            "skill_data":[{"damage_multiplier_base":100,"damage_multiplier_step":20},{"damage_multiplier_base":200,"damage_multiplier_step":10}]});
+        kit.sources.insert(key.into(), raw.clone());
+        let mut args = json!({"id":1,"category":"agents","language":"en","skill_level":2,"core_level":3,"selector":"/core_skills"});
+        let view = kit.call("get_gachabase_entry", args.clone()).await.unwrap();
+        assert_eq!(
+            view["result"]["value"],
+            json!([{"level":3,"skill_type_id":5,"text":"7"}])
+        );
+        let bindings =
+            json!([{"source":view["source"],"path":"/skill_data/*/damage_multiplier_percent"}]);
+        let shared = Mutex::new(kit);
+        let value = KitTools::dispatch(
+            &shared,
+            "compute",
+            json!({"script":"sum(x0)","bindings":bindings}),
+        )
+        .await
+        .unwrap();
+        assert_eq!(value["result"], 3.3);
+        args["core_level"] = json!(4);
+        assert!(
+            KitTools::dispatch(&shared, "get_gachabase_entry", args.clone())
+                .await
+                .is_err()
+        );
+        args["core_level"] = Value::Null;
+        args["skill_level"] = Value::Null;
+        args["selector"] = json!("@raw");
+        let original = KitTools::dispatch(&shared, "get_gachabase_entry", args)
+            .await
+            .unwrap();
+        assert_eq!(
+            serde_json::from_str::<Value>(original["result"]["json_fragment"].as_str().unwrap())
+                .unwrap(),
+            raw
+        );
+        for script in ["bad_function(x0)", "1.0 / 0.0", "while true { }", "[[]]"] {
+            assert!(
+                KitTools::dispatch(
+                    &shared,
+                    "compute",
+                    json!({"script":script,"bindings":bindings})
+                )
+                .await
+                .is_err(),
+                "{script}"
+            );
+        }
+    }
+
     #[test]
     fn search_results_are_readable_and_unicode_pages_join_without_loss() {
         let text = "愿火".repeat(2200);
@@ -423,8 +637,8 @@ mod tests {
         );
         let mut args = json!({"category":"tutorials","id":301124,"language":"en","version":page.cur,"selector":null});
         let entry = json!({"name":{"key":"title","text":"Refringe"},"pages":[{"page":1,"text":{"text":"<color=#FFA9DD>Refringe</color>"}}]});
-        tools.entries.insert(
-            (Category::Tutorials, 301124, Language::En, page.cur.clone()),
+        tools.sources.insert(
+            format!("tutorials/301124/en/{}/raw", page.cur),
             entry.clone(),
         );
         let compact = tools

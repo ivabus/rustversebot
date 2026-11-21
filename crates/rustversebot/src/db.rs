@@ -417,14 +417,16 @@ impl Db {
         name: &str,
         command: &str,
         admin: i64,
+        capacity: bool,
     ) -> anyhow::Result<String> {
         // The decision, audit row, and cooldown trigger are one SQLite statement.
         self.optional_string("INSERT INTO ai_requests(user_id,username,full_name,command,decision)
             SELECT ?1,?2,?3,?4,CASE
-              WHEN ?1=?5 THEN 'admin'
+              WHEN ?1=?5 THEN CASE WHEN ?6 THEN 'admin' ELSE 'busy' END
               WHEN EXISTS(SELECT 1 FROM ai_bans WHERE user_id=?1) THEN 'banned'
               WHEN EXISTS(SELECT 1 FROM ai_cooldowns WHERE user_id=?1 AND until_unix>unixepoch()) THEN 'limited'
-              ELSE 'allowed' END RETURNING decision",params![user,username,name,command,admin])
+              WHEN NOT ?6 THEN 'busy'
+              ELSE 'allowed' END RETURNING decision",params![user,username,name,command,admin,capacity])
             .await?.context("missing AI access decision")
     }
 
@@ -1267,7 +1269,14 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let url = format!("file:{}", dir.path().join("limits.db").display());
         let db = Db::connect(&url).await.unwrap();
-        let ask = |id| db.admit_ai(id, Some("name"), "Player", "prompt", 99);
+        assert_eq!(
+            db.admit_ai(20, None, "Waiting", "prompt", 99, false)
+                .await
+                .unwrap(),
+            "busy"
+        );
+        assert_eq!(db.ai_users(1).await.unwrap()[0].decision, "busy");
+        let ask = |id| db.admit_ai(id, Some("name"), "Player", "prompt", 99, true);
         let (a, b) = tokio::join!(ask(10), ask(10));
         let mut outcomes = [a.unwrap(), b.unwrap()];
         outcomes.sort();
@@ -1276,7 +1285,7 @@ mod tests {
         db.ban_ai(10, true).await.unwrap();
         drop(db);
         let db = Db::connect(&url).await.unwrap();
-        let ask = |id| db.admit_ai(id, None, "Player", "diff", 99);
+        let ask = |id| db.admit_ai(id, None, "Player", "diff", 99, true);
         db.reset_ai_limit(10).await.unwrap();
         assert_eq!(ask(10).await.unwrap(), "banned");
         db.ban_ai(10, false).await.unwrap();

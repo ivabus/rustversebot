@@ -200,7 +200,7 @@ fn snapshot(table: &[Value], side: &str) -> Result<Value> {
     } else {
         Value::Null
     };
-    Ok(crate::diff::snapshot(dto, tooltips))
+    Ok(serde_json::json!({"agent":dto,"tooltips":tooltips}))
 }
 
 pub async fn recent_revisions(client: &Client) -> Result<Vec<String>> {

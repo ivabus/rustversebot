@@ -82,6 +82,7 @@ const TEMPLATES: &[EmbeddedTemplate] = &[
     template!("diff_picker", "txt"),
     template!("diff_button", "txt"),
     template!("ai_limit", "txt"),
+    template!("ai_busy", "txt"),
     template!("ai_reset_done", "txt"),
     template!("ai_users", "txt"),
     template!("ai_banned", "txt"),

@@ -279,7 +279,7 @@ pub async fn diff_command(
     chat: ChatId,
     user: Option<&teloxide::types::User>,
     args: &str,
-    state: &BotState,
+    state: &std::sync::Arc<BotState>,
 ) -> Result<()> {
     if args.trim().is_empty() {
         return picker(bot, chat, user, "menu", state).await;
@@ -292,7 +292,7 @@ pub async fn picker(
     chat: ChatId,
     user: Option<&teloxide::types::User>,
     action: &str,
-    state: &BotState,
+    state: &std::sync::Arc<BotState>,
 ) -> Result<()> {
     use teloxide::types::{InlineKeyboardButton, InlineKeyboardMarkup};
     let sender = BotTemplateSender::new(bot, &state.templates);
@@ -397,7 +397,7 @@ pub async fn command(
     chat: ChatId,
     user: Option<&teloxide::types::User>,
     args: &str,
-    state: &BotState,
+    state: &std::sync::Arc<BotState>,
     compare: bool,
 ) -> Result<()> {
     let sender = BotTemplateSender::new(bot, &state.templates);
@@ -410,69 +410,77 @@ pub async fn command(
             return Ok(());
         }
     };
-    let run = async {
-        if !crate::agent_access::admit(
-            bot,
-            chat,
-            None,
-            user,
-            if compare { "diff" } else { "betadiff" },
-            state,
-        )
-        .await?
-        {
-            return Ok(());
-        }
-        let model = state.ai_model().await?.cache_key();
-        let mut rows = revisions(&state.beta.client, prev, cur).await?;
-        if compare && rows.len() > 1 {
-            rows = vec![rustverse_ai::beta::comparison_range(&rows)?];
-        }
-        let prev = &rows.first().context("empty changelog")?.previous;
-        let cur = &rows.last().unwrap().current;
-        let settings = SchedulerSettings::from_env();
-        if rows.iter().all(|row| row.agents.is_empty()) {
-            sender
-                .send_message(chat, "beta_empty", &json!({"previous":prev,"current":cur}))
-                .await?;
-            return Ok(());
-        }
-        // Preflight the whole range so an over-budget command sends no partial albums.
-        if !crate::agent_access::is_admin(user, state)
-            && rows.iter().map(|r| r.agents.len()).sum::<usize>() > state.beta.manual_limit
-        {
-            let mut missing = 0;
-            for row in &rows {
-                for agent in &row.agents {
-                    if cached_report(state, row, agent, &model).await?.is_none() {
-                        missing += 1;
-                        if missing > state.beta.manual_limit {
-                            sender
-                                .send_message(
-                                    chat,
-                                    "beta_limit",
-                                    &json!({"limit":state.beta.manual_limit}),
-                                )
-                                .await?;
-                            return Ok(());
+    let Some(slot) = crate::agent_access::admit(
+        bot,
+        chat,
+        None,
+        user,
+        if compare { "diff" } else { "betadiff" },
+        state,
+    )
+    .await?
+    else {
+        return Ok(());
+    };
+    let model = state.ai_model().await?.cache_key();
+    let admin = crate::agent_access::is_admin(user, state);
+    let (prev, cur) = (prev.map(str::to_owned), cur.map(str::to_owned));
+    let state = state.clone();
+    let bot = bot.clone();
+    slot.send(Box::pin(async move {
+        let sender = BotTemplateSender::new(&bot, &state.templates);
+        let run = async {
+            let mut rows = revisions(&state.beta.client, prev.as_deref(), cur.as_deref()).await?;
+            if compare && rows.len() > 1 {
+                rows = vec![rustverse_ai::beta::comparison_range(&rows)?];
+            }
+            let prev = &rows.first().context("empty changelog")?.previous;
+            let cur = &rows.last().unwrap().current;
+            let settings = SchedulerSettings::from_env();
+            if rows.iter().all(|row| row.agents.is_empty()) {
+                sender
+                    .send_message(chat, "beta_empty", &json!({"previous":prev,"current":cur}))
+                    .await?;
+                return Ok(());
+            }
+            // Preflight the whole range so an over-budget command sends no partial albums.
+            if !admin
+                && rows.iter().map(|r| r.agents.len()).sum::<usize>() > state.beta.manual_limit
+            {
+                let mut missing = 0;
+                for row in &rows {
+                    for agent in &row.agents {
+                        if cached_report(&state, row, agent, &model).await?.is_none() {
+                            missing += 1;
+                            if missing > state.beta.manual_limit {
+                                sender
+                                    .send_message(
+                                        chat,
+                                        "beta_limit",
+                                        &json!({"limit":state.beta.manual_limit}),
+                                    )
+                                    .await?;
+                                return Ok(());
+                            }
                         }
                     }
                 }
             }
+            for row in &rows {
+                RevisionAlbums::new(&state, row, &model)
+                    .send(&bot, chat, &settings, false)
+                    .await?;
+            }
+            Ok::<(), anyhow::Error>(())
         }
-        for row in &rows {
-            RevisionAlbums::new(state, row, &model)
-                .send(bot, chat, &settings, false)
+        .await;
+        if let Err(error) = run {
+            sender
+                .send_message(chat, "error_generic", &json!({"error":error.to_string()}))
                 .await?;
         }
-        Ok::<(), anyhow::Error>(())
-    }
-    .await;
-    if let Err(error) = run {
-        sender
-            .send_message(chat, "error_generic", &json!({"error":error.to_string()}))
-            .await?;
-    }
+        Ok(())
+    }));
     Ok(())
 }
 

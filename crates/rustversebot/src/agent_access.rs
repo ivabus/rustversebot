@@ -14,14 +14,15 @@ pub fn is_admin(user: Option<&User>, state: &BotState) -> bool {
     user.and_then(|u| i64::try_from(u.id.0).ok()) == Some(state.admin_id)
 }
 
-pub async fn admit(
+pub async fn admit<'a>(
     bot: &Bot,
     chat: ChatId,
     thread: Option<ThreadId>,
     user: Option<&User>,
     command: &str,
-    state: &BotState,
-) -> Result<bool> {
+    state: &'a BotState,
+) -> Result<Option<tokio::sync::mpsc::Permit<'a, crate::ai_jobs::Job>>> {
+    let slot = state.ai_jobs.try_reserve().ok();
     let template = if let Some(user) = user {
         let decision = state
             .db
@@ -31,6 +32,7 @@ pub async fn admit(
                 &user.full_name(),
                 command,
                 state.admin_id,
+                slot.is_some(),
             )
             .await?;
         log::info!(
@@ -40,7 +42,8 @@ pub async fn admit(
             decision
         );
         match decision.as_str() {
-            "admin" | "allowed" => return Ok(true),
+            "admin" | "allowed" => return Ok(slot),
+            "busy" => "ai_busy",
             "banned" => "ai_banned",
             "limited" => "ai_limit",
             _ => anyhow::bail!("unknown AI access decision"),
@@ -51,7 +54,7 @@ pub async fn admit(
     BotTemplateSender::new(bot, &state.templates)
         .send_to_thread(chat, thread, template, &())
         .await?;
-    Ok(false)
+    Ok(None)
 }
 
 pub enum Action {

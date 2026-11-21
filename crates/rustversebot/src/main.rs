@@ -1,6 +1,7 @@
 #![recursion_limit = "256"]
 
 mod agent_access;
+mod ai_jobs;
 mod beta;
 mod bot_templates;
 mod db;
@@ -96,6 +97,7 @@ fn telegram_menu() -> Vec<teloxide::types::BotCommand> {
 
 /// Shared bot state accessible from all handlers and the scheduler.
 pub struct BotState {
+    pub(crate) ai_jobs: tokio::sync::mpsc::Sender<ai_jobs::Job>,
     pub(crate) beta: beta::BetaPages,
     pub db: db::Db,
     pub templates: templates::TemplateEngine,
@@ -144,7 +146,9 @@ async fn main() -> anyhow::Result<()> {
         .ok()
         .map(|value| value.trim_end_matches('/').to_owned())
         .filter(|value| !value.is_empty());
+    let (ai_jobs, ai_queue) = ai_jobs::channel();
     let state = Arc::new(BotState {
+        ai_jobs,
         beta: beta::BetaPages::new()?,
         db,
         templates,
@@ -163,6 +167,7 @@ async fn main() -> anyhow::Result<()> {
     }
     log::info!("Bot connected");
     let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+    let ai_task = tokio::spawn(ai_jobs::run(ai_queue, shutdown_rx.clone()));
 
     // Spawn the background scheduler
     let sched_bot = bot.clone();
@@ -233,6 +238,7 @@ async fn main() -> anyhow::Result<()> {
     }
 
     let _ = shutdown_tx.send(true);
+    ai_task.await?;
     if let Err(error) = scheduler_task.await {
         log::error!("Scheduler task could not be joined: {error}");
     }

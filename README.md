@@ -38,16 +38,26 @@ the limit. Empty normalized diffs produce a local report. The analysis compares
 the Core Passive at its highest available rank and other skills at level 12.
 
 - `list_recent_revisions` lists recent design revisions from beta and release.
-- `search_gachabase` searches the beta catalog by category, localized name,
+- `search_gachabase` searches a revision's catalog by category, localized name,
   alias, slug or ID. The categories are agents, W-Engines, drive discs,
   Bangboo and tutorials.
 - `get_gachabase_entry` reads a category and ID in English or Simplified Chinese.
   An optional exact version pins the result to a revision, including release
-  revisions. The default is the latest beta. A null selector returns compact
+  revisions. Both lookup tools reuse a pinned revision. Questions default to the
+  newest design revision across beta and release by GachaBase design timestamp.
+  Reports default to their target revision. A null selector returns compact
   pages, skills or effects, with presentation colors removed. Copy `next_offset`
   to continue at the next record. A `read` pointer identifies an oversized record.
-  Use a JSON pointer for original fields, `@raw` for the complete paginated DTO,
+  Use a JSON pointer for fields, `@raw` for the original paginated DTO with all ranks,
   or `text:<phrase>` to locate mentions in descriptions.
+  Agent reads accept `skill_level` and `core_level`. Reports use level 12 and maximum
+  Core Passive rank by default. Large diffs list selectors per group. Each group
+  pages whole changes and supplies separate read pointers for oversized values.
+- `compute` evaluates short Rhai scripts on numeric fields from the current run.
+  Bindings reference immutable sources and JSON pointers. For instance,
+  `/skill_data/*/damage_multiplier_percent` selects an array. With two such
+  bindings, `sum(x1) - sum(x0)` computes the difference between their totals.
+  Execution has bounded inputs, operations and output and exposes no I/O.
 
 The CLI reads the API key from `OPENAI_API_KEY` or, when it is unset or blank,
 from a single line in `~/.openai`. To analyze Sunbringer, run:
@@ -130,6 +140,9 @@ chats. Opening the picker is free. The administrator bypasses the cooldown and
 the manual range budget, and can use `/resetlimit <telegram_id>` to reset a
 user's cooldown. `BETA_MAX_NEW_REPORTS` defaults to 10 uncached reports per
 manual comparison. The scheduler tracks its own delivery progress.
+Manual generation runs separately from Telegram update handling with four active
+jobs and eight queue slots. A full queue replies immediately and consumes no
+cooldown. In-flight and queued jobs stop when the bot shuts down.
 
 The administrator can open `/aiusers [page]` in a private chat to look up
 Telegram IDs, names, last AI command, admission decision, Moscow time and

@@ -8,22 +8,22 @@ use serde::Serialize;
 use serde_json::{Value, json};
 
 static TERM: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"<Term:(\d+)></Term>").unwrap());
-const SKILL_LEVEL: i64 = 12;
+pub(crate) const SKILL_LEVEL: i64 = 12;
 static LINEAR_SKILL_VALUE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"\{CAL:([\d.]+)\+AvatarSkillLevel\(([0-9]+)\)\*([\d.]+),([\d.]+),([0-9])\}")
         .unwrap()
 });
 
 // In a CAL expression AvatarSkillLevel is the level itself. In a skill_data
-// record the base is already the level-1 value, so only eleven steps are added.
-fn skill_value(caps: &Captures<'_>, core_levels: &BTreeMap<u64, i64>) -> String {
+// record the base is the level-1 value, so growth uses (level - 1) steps.
+fn skill_value(caps: &Captures<'_>, core_levels: &BTreeMap<u64, i64>, skill_level: i64) -> String {
     let number = |i: usize| caps[i].parse::<f64>().ok();
     let (Some(base), Ok(skill_type), Some(step), Some(scale)) =
         (number(1), caps[2].parse::<u64>(), number(3), number(4))
     else {
         return caps[0].to_owned();
     };
-    let level = core_levels.get(&skill_type).copied().unwrap_or(SKILL_LEVEL);
+    let level = core_levels.get(&skill_type).copied().unwrap_or(skill_level);
     let value = (base + level as f64 * step) * scale;
     let precision: usize = caps[5].parse().expect("single decimal digit");
     let formatted = format!("{value:.precision$}");
@@ -37,11 +37,13 @@ fn skill_value(caps: &Captures<'_>, core_levels: &BTreeMap<u64, i64>) -> String 
     }
 }
 
-fn select_report_levels(agent: &mut Value) {
+fn select_levels(agent: &mut Value, skill_level: i64, core_level: Option<u64>) {
     if let Some(core) = agent.get_mut("core_skills").and_then(Value::as_array_mut)
         && let Some(max) = core.iter().filter_map(|v| v["level"].as_u64()).max()
     {
-        core.retain(|v| v["level"].as_u64() == Some(max) || v.get("level").is_none());
+        core.retain(|v| {
+            v["level"].as_u64() == Some(core_level.unwrap_or(max)) || v.get("level").is_none()
+        });
     }
     for section in ["skill_data", "unmapped_skill_data"] {
         let Some(rows) = agent.get_mut(section).and_then(Value::as_array_mut) else {
@@ -56,7 +58,7 @@ fn select_report_levels(agent: &mut Value) {
                     let step = row[key].as_i64()?;
                     Some((
                         stat.to_owned(),
-                        base.checked_add(step.checked_mul(SKILL_LEVEL - 1)?)?,
+                        base.checked_add(step.checked_mul(skill_level - 1)?)?,
                     ))
                 })
                 .collect();
@@ -73,8 +75,13 @@ fn select_report_levels(agent: &mut Value) {
     }
 }
 
-pub(crate) fn snapshot(mut agent: Value, mut tooltips: Value) -> Value {
-    select_report_levels(&mut agent);
+pub(crate) fn snapshot_at(
+    mut agent: Value,
+    mut tooltips: Value,
+    skill_level: i64,
+    core_level: Option<u64>,
+) -> Value {
+    select_levels(&mut agent, skill_level, core_level);
     let core_levels = agent["core_skills"]
         .as_array()
         .into_iter()
@@ -96,12 +103,15 @@ pub(crate) fn snapshot(mut agent: Value, mut tooltips: Value) -> Value {
         value: &mut Value,
         names: &BTreeMap<String, String>,
         core_levels: &BTreeMap<u64, i64>,
+        skill_level: i64,
     ) {
         match value {
             Value::String(s) => {
                 if s.contains("AvatarSkillLevel(") {
                     *s = LINEAR_SKILL_VALUE
-                        .replace_all(s, |caps: &Captures<'_>| skill_value(caps, core_levels))
+                        .replace_all(s, |caps: &Captures<'_>| {
+                            skill_value(caps, core_levels, skill_level)
+                        })
                         .into_owned();
                 }
                 if s.contains("<Term:") {
@@ -116,16 +126,22 @@ pub(crate) fn snapshot(mut agent: Value, mut tooltips: Value) -> Value {
                         .into_owned();
                 }
             }
-            Value::Array(items) => items.iter_mut().for_each(|v| expand(v, names, core_levels)),
+            Value::Array(items) => items
+                .iter_mut()
+                .for_each(|v| expand(v, names, core_levels, skill_level)),
             Value::Object(fields) => fields
                 .values_mut()
-                .for_each(|v| expand(v, names, core_levels)),
+                .for_each(|v| expand(v, names, core_levels, skill_level)),
             _ => {}
         }
     }
-    expand(&mut agent, &names, &core_levels);
-    expand(&mut tooltips, &names, &core_levels);
+    expand(&mut agent, &names, &core_levels, skill_level);
+    expand(&mut tooltips, &names, &core_levels, skill_level);
     json!({"agent": agent, "tooltips": tooltips})
+}
+
+pub(crate) fn snapshot(agent: Value, tooltips: Value) -> Value {
+    snapshot_at(agent, tooltips, SKILL_LEVEL, None)
 }
 
 #[derive(Serialize, Debug)]
@@ -148,6 +164,23 @@ fn compare(path: &str, before: Option<&Value>, after: Option<&Value>, out: &mut 
         return;
     }
     match (before, after) {
+        (None, Some(Value::Array(items))) | (Some(Value::Array(items)), None)
+            if !items.is_empty()
+                && path.starts_with("agent.")
+                && !path[6..].contains(['.', '[']) =>
+        {
+            for (index, item) in items.iter().enumerate() {
+                let suffix = item["id"]
+                    .as_u64()
+                    .map(|id| format!("id={id}"))
+                    .unwrap_or_else(|| index.to_string());
+                out.push(Change {
+                    path: format!("{path}[{suffix}]"),
+                    before: before.map(|_| item.clone()),
+                    after: after.map(|_| item.clone()),
+                });
+            }
+        }
         (Some(Value::Object(a)), Some(Value::Object(b))) => {
             for key in a.keys().chain(b.keys()).collect::<BTreeSet<_>>() {
                 let field = if path.is_empty() {
