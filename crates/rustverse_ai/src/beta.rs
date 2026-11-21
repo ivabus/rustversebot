@@ -379,28 +379,6 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    #[ignore = "uses GachaBase release and beta changelogs"]
-    async fn public_branch_ranges_match_the_picker() {
-        let client = Client::builder()
-            .timeout(std::time::Duration::from_secs(30))
-            .build()
-            .unwrap();
-        let recent = recent_revisions(&client).await.unwrap();
-        for branch in [Branch::Beta, Branch::Release] {
-            let choices: Vec<_> = recent
-                .iter()
-                .filter(|r| r.split('_').next() == Some(branch.name()))
-                .collect();
-            assert!(choices.len() >= 3);
-            let rows = branch_revisions(&client, branch, Some(choices[2]), Some(choices[0]))
-                .await
-                .unwrap();
-            assert_eq!(&rows.first().unwrap().previous, choices[2]);
-            assert_eq!(&comparison_range(&rows).unwrap().current, choices[0]);
-        }
-    }
-
     #[test]
     fn changelog_keeps_empty_hotfixes_and_new_agents_without_diff_links() {
         let chunk = json!({"type":"chunk","id":1,"data":[

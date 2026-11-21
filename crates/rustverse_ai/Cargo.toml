@@ -22,6 +22,3 @@ reqwest = { version = "0.12", default-features = false, features = ["json", "nat
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "time"] }
-
-[dev-dependencies]
-axum = "0.8"

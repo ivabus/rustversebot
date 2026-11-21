@@ -58,8 +58,6 @@
 
       rustversebot = craneLib.buildPackage (commonArgs // {
         inherit cargoArtifacts;
-        # Telegram and Responses integration tests use loopback HTTP servers.
-        __darwinAllowLocalNetworking = true;
         # The libsql-ffi workaround is only needed while producing the
         # dependency artifact. Keeping it here would strip the executable bit
         # when crane installs the finished bot.

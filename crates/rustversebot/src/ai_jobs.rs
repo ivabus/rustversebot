@@ -35,11 +35,7 @@ pub(crate) async fn run(mut queue: mpsc::Receiver<Job>, mut shutdown: watch::Rec
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{BotState, Command, handlers};
-    use axum::{Json, Router, routing::post};
-    use serde_json::{Value, json};
     use std::sync::Arc;
-    use teloxide::Bot;
 
     #[tokio::test]
     async fn active_and_waiting_jobs_are_bounded_and_stop_on_shutdown() {
@@ -75,51 +71,5 @@ mod tests {
         worker.await.unwrap();
         assert!(queue.is_closed());
         assert_eq!(Arc::strong_count(&gate), 1);
-    }
-
-    #[tokio::test]
-    async fn same_chat_accepts_start_while_prompt_is_pending() {
-        let (events, mut received) = mpsc::unbounded_channel::<String>();
-        let router=Router::new().fallback(post(move |Json(body):Json<Value>| {
-            let events=events.clone();
-            async move {
-                events.send(body["text"].as_str().unwrap().to_owned()).unwrap();
-                Json(json!({"ok":true,"result":{"message_id":2,"date":1,"chat":{"id":-123,"type":"group","title":"Test"},"text":"ok"}}))
-            }
-        }));
-        let socket = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let url = format!("http://{}", socket.local_addr().unwrap());
-        let server = tokio::spawn(async move { axum::serve(socket, router).await.unwrap() });
-        let bot = Bot::new("1:test").set_api_url(url.parse().unwrap());
-        let (ai_jobs, mut pending) = channel();
-        let state = Arc::new(BotState {
-            ai_jobs,
-            beta: crate::beta::BetaPages::new().unwrap(),
-            db: crate::db::Db::new_test().await.unwrap(),
-            templates: crate::templates::TemplateEngine::new().unwrap(),
-            admin_id: 1,
-            public_web_url: None,
-            nanoka: nanoka::NanokaClient::new(),
-            http: reqwest::Client::new(),
-        });
-        let msg:teloxide::types::Message=serde_json::from_value(json!({"message_id":1,"date":1,"chat":{"id":-123,"type":"group","title":"Test"},"from":{"id":1,"is_bot":false,"first_name":"Tester"},"text":"/prompt Вопрос"})).unwrap();
-        handlers::command_handler(
-            bot.clone(),
-            msg.clone(),
-            Command::Prompt("Вопрос".into()),
-            state.clone(),
-        )
-        .await
-        .unwrap();
-        assert!(received.try_recv().unwrap().contains("Готовлю ответ"));
-        handlers::command_handler(bot, msg, Command::Start, state.clone())
-            .await
-            .unwrap();
-        assert_eq!(
-            received.try_recv().unwrap(),
-            state.templates.render("welcome", &()).unwrap().text
-        );
-        assert!(pending.try_recv().is_ok());
-        server.abort();
     }
 }

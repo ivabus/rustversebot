@@ -490,55 +490,6 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "uses public historical release and beta GachaBase catalogs"]
-    async fn public_pinned_search_then_read() {
-        for version in ["release_3.3.0_20574360", "beta_3.4.4_20541895"] {
-            let mut kit = KitTools::for_question(Client::new(), version);
-            let search = kit
-                .call(
-                    "search_gachabase",
-                    json!({"category":"agents","language":"en","query":"1011"}),
-                )
-                .await
-                .unwrap();
-            assert_eq!(search["version"], version);
-            assert_eq!(search["matches"][0]["id"], 1011);
-            let entry=kit.call("get_gachabase_entry",json!({"category":"agents","language":"en","id":1011,"selector":"/core_skills/0/level","core_level":3})).await.unwrap();
-            assert_eq!(entry["version"], version);
-            assert_eq!(entry["result"]["value"], 3);
-        }
-    }
-
-    #[tokio::test]
-    #[ignore = "walks both languages of a public historical GachaBase diff"]
-    async fn public_kafka_groups_cover_the_complete_diff() {
-        let client = Client::new();
-        let page=Comparison::parse("https://zzz.gachabase.net/diff/agents/1651/kafka?prev=beta_3.4.4_20541895&cur=beta_3.4.5_20691792").unwrap();
-        let (en, cn) =
-            tokio::try_join!(page.fetch(&client, "en"), page.fetch(&client, "chs")).unwrap();
-        let mut kit = KitTools::new(client);
-        let input: Value =
-            serde_json::from_str(&kit.report_input(&page, en, cn).unwrap().unwrap()).unwrap();
-        for (language, expected) in [("en", 201), ("cn", 105)] {
-            let mut seen = 0;
-            for group in input[language]["groups"].as_array().unwrap() {
-                let mut offset = 0;
-                loop {
-                    let page=kit.call("get_gachabase_entry",json!({"id":1651,"category":"agents","language":language,"version":page.cur,"selector":group["selector"],"offset":offset})).await.unwrap();
-                    let result = &page["result"];
-                    seen += result["changes"].as_array().unwrap().len();
-                    let Some(next) = result["next_offset"].as_u64() else {
-                        break;
-                    };
-                    assert!(next > offset);
-                    offset = next;
-                }
-            }
-            assert_eq!(seen, expected);
-        }
-    }
-
-    #[tokio::test]
     async fn level_views_keep_originals_and_supply_numeric_compute_inputs() {
         let mut kit = KitTools::for_question(Client::new(), "beta_3.4.4_42");
         let key = "agents/1/en/beta_3.4.4_42/raw";

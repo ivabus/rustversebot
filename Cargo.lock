@@ -2716,7 +2716,6 @@ name = "rustverse_ai"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "axum",
  "clap",
  "log",
  "md5",
