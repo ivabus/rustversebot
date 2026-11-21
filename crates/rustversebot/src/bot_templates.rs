@@ -8,7 +8,7 @@ use teloxide::{
 };
 
 /// Telegram's documented text and media-caption limits.
-const MESSAGE_LIMIT: usize = 4096;
+pub(crate) const MESSAGE_LIMIT: usize = 4096;
 const CAPTION_LIMIT: usize = 1024;
 
 /// Renders templates and sends them with the parse mode implied by their

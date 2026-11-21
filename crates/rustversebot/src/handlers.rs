@@ -40,6 +40,7 @@ pub async fn command_handler(
         Command::Register(uid) => cmd_register(&bot, msg, &uid, &state).await,
         Command::Unregister(uid) => cmd_unregister(&bot, chat_id, &uid, &state).await,
         Command::Status => cmd_status(&bot, chat_id, &state).await,
+        Command::Promocodes => cmd_promocodes(&bot, chat_id, &state).await,
         Command::Next => cmd_endgame_pair(&bot, chat_id, SeasonPosition::Next, &state).await,
         Command::Current => cmd_endgame_pair(&bot, chat_id, SeasonPosition::Current, &state).await,
         Command::Previous => {
@@ -581,6 +582,30 @@ async fn cmd_start(bot: &Bot, chat_id: ChatId, state: &BotState) -> anyhow::Resu
     BotTemplateSender::new(bot, &state.templates)
         .send_message(chat_id, "welcome", &())
         .await?;
+    Ok(())
+}
+
+// ── /promocodes ──
+
+async fn cmd_promocodes(bot: &Bot, chat_id: ChatId, state: &BotState) -> anyhow::Result<()> {
+    let sender = BotTemplateSender::new(bot, &state.templates);
+    match crate::promocodes::fetch(&state.http).await {
+        Ok(list) => {
+            for page in list.messages(&state.templates)? {
+                sender.send_rendered_message(chat_id, page).await?;
+            }
+        }
+        Err(error) => {
+            log::warn!("Could not fetch promo codes: {error:#}");
+            sender
+                .send_message(
+                    chat_id,
+                    "promocodes",
+                    &serde_json::json!({"unavailable": true}),
+                )
+                .await?;
+        }
+    }
     Ok(())
 }
 

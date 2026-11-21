@@ -1,6 +1,7 @@
 mod bot_templates;
 mod db;
 mod handlers;
+mod promocodes;
 mod scheduler;
 mod season_time;
 mod templates;
@@ -22,6 +23,9 @@ enum Command {
     Unregister(String),
     /// Show the current endgame season status.
     Status,
+    /// Show ZZZ promo codes with redemption links.
+    #[command(aliases = ["codes", "promo"], hide_aliases)]
+    Promocodes,
     /// Show the next pair of mode seasons.
     Next,
     /// Show the current pair of mode seasons.
@@ -71,6 +75,7 @@ pub struct BotState {
     pub admin_id: i64,
     pub public_web_url: Option<String>,
     pub nanoka: nanoka::NanokaClient,
+    pub http: reqwest::Client,
 }
 
 #[tokio::main]
@@ -105,6 +110,10 @@ async fn main() -> anyhow::Result<()> {
         admin_id,
         public_web_url,
         nanoka: nanoka::NanokaClient::new().with_lang("en"),
+        http: reqwest::Client::builder()
+            .user_agent(concat!("rustversebot/", env!("CARGO_PKG_VERSION")))
+            .timeout(std::time::Duration::from_secs(10))
+            .build()?,
     });
 
     let bot = Bot::from_env();
@@ -209,6 +218,18 @@ async fn shutdown_signal() -> std::io::Result<()> {
 #[cfg(test)]
 mod command_tests {
     use super::*;
+
+    #[test]
+    fn promocode_aliases_resolve_in_private_and_group_chats() {
+        for command in ["/promocodes", "/codes", "/promo"] {
+            for text in [command.to_owned(), format!("{command}@bot")] {
+                assert!(matches!(
+                    Command::parse(&text, "bot"),
+                    Ok(Command::Promocodes)
+                ));
+            }
+        }
+    }
 
     #[test]
     fn detail_and_top_commands_match_the_public_menu() {

@@ -196,6 +196,7 @@ mod tests {
             admin_id: 1,
             public_web_url: None,
             nanoka: nanoka::NanokaClient::new().with_lang("en"),
+            http: reqwest::Client::new(),
         })
     }
 
