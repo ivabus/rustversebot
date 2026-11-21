@@ -43,7 +43,22 @@ async fn previews(
             .timeout(Duration::from_secs(5))
             .send()
             .await;
-        if !result.is_ok_and(|r| r.status().is_success()) {
+        let Ok(response) = result else { return };
+        if response.status().as_u16() == 429 {
+            let Ok(body) = response.json::<serde_json::Value>().await else {
+                return;
+            };
+            let Some(seconds) = body
+                .pointer("/parameters/retry_after")
+                .and_then(|v| v.as_u64())
+            else {
+                return;
+            };
+            tokio::time::sleep(Duration::from_secs(seconds)).await;
+            // Read the latest preview after the wait; the answer may already be complete.
+            continue;
+        }
+        if !response.status().is_success() {
             return;
         }
         last = Some(text);
@@ -97,13 +112,8 @@ pub async fn command(bot: &Bot, msg: &Message, question: &str, state: &BotState)
     .await;
     match result {
         Ok(text) => {
-            for chunk in telegram_html::chunks(&text) {
-                if !chunk.trim().is_empty() {
-                    sender
-                        .send_to_thread(chat, thread, "prompt_answer", &json!({"text":chunk}))
-                        .await?;
-                }
-            }
+            let attempts = crate::scheduler::SchedulerSettings::from_env().retry_attempts;
+            send_answer(&sender, chat, thread, &text, attempts).await?;
         }
         Err(err) => {
             sender
@@ -119,12 +129,88 @@ pub async fn command(bot: &Bot, msg: &Message, question: &str, state: &BotState)
     Ok(())
 }
 
+async fn send_answer(
+    sender: &BotTemplateSender<'_>,
+    chat: ChatId,
+    thread: Option<ThreadId>,
+    text: &str,
+    attempts: usize,
+) -> Result<()> {
+    for chunk in telegram_html::chunks(text)
+        .into_iter()
+        .filter(|c| !c.trim().is_empty())
+    {
+        let data = json!({"text":chunk});
+        for attempt in 1..=attempts.max(1) {
+            match sender
+                .send_to_thread(chat, thread, "prompt_answer", &data)
+                .await
+            {
+                Ok(_) => break,
+                Err(err) => match err.downcast_ref::<teloxide::RequestError>() {
+                    Some(teloxide::RequestError::RetryAfter(wait)) if attempt < attempts => {
+                        tokio::time::sleep(wait.duration()).await;
+                    }
+                    _ => return Err(err),
+                },
+            }
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use axum::{Json, Router, routing::post};
     use serde_json::Value;
     use teloxide::types::MessageId;
+
+    #[tokio::test]
+    async fn retry_after_resends_only_the_rejected_html_chunk() {
+        use axum::response::IntoResponse;
+        let received = std::sync::Arc::new(std::sync::Mutex::new(Vec::<Value>::new()));
+        let log = received.clone();
+        let router=Router::new().fallback(post(move |Json(body):Json<Value>| {
+            let log=log.clone();
+            async move {
+                let mut calls=log.lock().unwrap();
+                calls.push(body);
+                if calls.len()==2 {
+                    return (axum::http::StatusCode::TOO_MANY_REQUESTS,Json(json!({"ok":false,"error_code":429,
+                        "description":"Too Many Requests: retry after 0","parameters":{"retry_after":0}}))).into_response();
+                }
+                Json(json!({"ok":true,"result":{"message_id":1,"date":1,"chat":{"id":123,"type":"private"},"text":"ok"}})).into_response()
+            }
+        }));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = format!("http://{}/", listener.local_addr().unwrap())
+            .parse()
+            .unwrap();
+        tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+        let bot = Bot::new("1:test").set_api_url(endpoint);
+        let templates = crate::templates::TemplateEngine::new().unwrap();
+        let answer = format!("**{}х**", "я".repeat(crate::bot_templates::MESSAGE_LIMIT));
+        send_answer(
+            &BotTemplateSender::new(&bot, &templates),
+            ChatId(123),
+            Some(ThreadId(MessageId(5))),
+            &answer,
+            2,
+        )
+        .await
+        .unwrap();
+        let calls = received.lock().unwrap();
+        assert_eq!(calls.len(), 3);
+        assert_ne!(calls[0]["text"], calls[1]["text"]);
+        assert_eq!(calls[1], calls[2]);
+        assert_eq!(calls[2]["text"], "<b>х</b>");
+        assert!(
+            calls
+                .iter()
+                .all(|c| c["parse_mode"] == "HTML" && c["message_thread_id"] == 5)
+        );
+    }
 
     #[tokio::test]
     async fn draft_posts_balanced_html_using_the_original_topic() {

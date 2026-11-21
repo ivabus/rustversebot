@@ -19,7 +19,7 @@ use teloxide::{prelude::*, utils::command::BotCommands};
 
 /// All bot commands, matched case-insensitively.
 #[derive(BotCommands, Clone)]
-#[command(rename_rule = "lowercase")]
+#[command(rename_rule = "lowercase", parse_with = command_text)]
 enum Command {
     /// Show the welcome message and usage.
     Start,
@@ -77,6 +77,11 @@ enum Command {
     /// List all registered UIDs in this chat.
     #[command(rename = "uids")]
     Uids,
+}
+
+// Every command with an argument takes the complete text after the command.
+fn command_text(text: String) -> Result<(String,), teloxide::utils::command::ParseError> {
+    Ok((text,))
 }
 
 fn telegram_menu() -> Vec<teloxide::types::BotCommand> {
