@@ -34,6 +34,7 @@
 //! }
 //! ```
 
+pub mod calendar;
 pub mod types;
 
 use regex::Regex;

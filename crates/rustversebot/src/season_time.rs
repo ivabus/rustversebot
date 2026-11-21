@@ -1,18 +1,6 @@
-use chrono::{DateTime, FixedOffset, NaiveDateTime, TimeZone, Utc};
-
-/// The shared season calendar follows the Europe game server year-round.
-pub const EUROPE_SERVER: FixedOffset = FixedOffset::east_opt(3600).unwrap();
-const MOSCOW: FixedOffset = FixedOffset::east_opt(3 * 3600).unwrap();
-pub const WALL_TIME: &str = "%Y-%m-%d %H:%M:%S";
-
-pub fn parse_server_time(value: &str, zone: FixedOffset) -> Option<DateTime<Utc>> {
-    let local = NaiveDateTime::parse_from_str(value, WALL_TIME).ok()?;
-    Some(zone.from_local_datetime(&local).single()?.to_utc())
-}
-
-pub fn parse_europe_time(value: &str) -> Option<DateTime<Utc>> {
-    parse_server_time(value, EUROPE_SERVER)
-}
+use chrono::{DateTime, FixedOffset, Utc};
+use nanoka::calendar::MOSCOW;
+pub use nanoka::calendar::{EUROPE_SERVER, WALL_TIME, parse_europe_time, parse_server_time};
 
 pub fn moscow_time(time: DateTime<Utc>) -> String {
     time.with_timezone(&MOSCOW)

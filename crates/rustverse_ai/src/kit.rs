@@ -1,4 +1,7 @@
-use std::{collections::HashMap, sync::Arc};
+use std::{
+    collections::{BTreeSet, HashMap},
+    sync::Arc,
+};
 
 use anyhow::{Context, Result, bail, ensure};
 use reqwest::Client;
@@ -21,9 +24,9 @@ pub(crate) const PAGE_CHARS: usize = 4096;
 
 #[derive(Serialize)]
 pub(crate) struct ToolSpec {
-    name: &'static str,
-    description: &'static str,
-    parameters: Value,
+    pub(crate) name: &'static str,
+    pub(crate) description: &'static str,
+    pub(crate) parameters: Value,
 }
 
 pub(crate) fn definitions() -> Vec<ToolSpec> {
@@ -83,11 +86,57 @@ fn source_key(category: Category, id: u64, language: Language, version: &str) ->
     format!("{}/{id}/{}/{version}", category.path(), language.upstream())
 }
 
+/// Verified lookups from this turn. The delivered text identifies the chosen team and room.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+pub struct SeasonReference {
+    pub mode: String,
+    pub season_id: u64,
+    pub requested: String,
+    pub page: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+}
+
+#[derive(Debug, Default, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TurnReferences {
+    pub seasons: BTreeSet<SeasonReference>,
+    pub revisions: BTreeSet<String>,
+    pub entries: BTreeSet<String>,
+}
+
+impl TurnReferences {
+    pub fn is_empty(&self) -> bool {
+        self.seasons.is_empty() && self.revisions.is_empty() && self.entries.is_empty()
+    }
+
+    fn record(&mut self, name: &str, result: &Value) {
+        if name == "get_endgame_season"
+            && let (Some(mode), Some(id)) = (result["mode"].as_str(), result["season_id"].as_u64())
+        {
+            self.seasons.insert(SeasonReference {
+                mode: mode.into(),
+                season_id: id,
+                requested: result["requested_season"].as_str().unwrap_or(mode).into(),
+                page: result["offset"].as_u64().unwrap_or_default() as usize,
+                path: result["path"].as_str().map(str::to_owned),
+            });
+        }
+        if let Some(version) = result["version"].as_str() {
+            self.revisions.insert(version.into());
+        }
+        if let Some(source) = result["source"].as_str() {
+            self.entries.insert(source.into());
+        }
+    }
+}
+
 pub(crate) struct KitTools {
+    pub references: Arc<Mutex<TurnReferences>>,
     client: Client,
     indexes: HashMap<(Category, Language, String), Index>,
     sources: HashMap<String, Value>,
     report_changes: HashMap<(u64, Language, String), Groups>,
+    seasons: Option<crate::seasons::SeasonTools>,
     pinned: Option<String>,
     recent: Option<Vec<String>>,
 }
@@ -96,8 +145,10 @@ impl KitTools {
     pub fn new(client: Client) -> Self {
         Self {
             client,
+            references: Default::default(),
             indexes: HashMap::new(),
             sources: HashMap::new(),
+            seasons: None,
             pinned: None,
             report_changes: HashMap::new(),
             recent: None,
@@ -109,6 +160,7 @@ impl KitTools {
             regex::Regex::new(r"\b(?:beta|release)_[0-9]+\.[0-9]+\.[0-9]+_[0-9]+\b").unwrap()
         });
         let mut tools = Self::new(client);
+        tools.seasons = Some(crate::seasons::SeasonTools::new(nanoka::NanokaClient::new()));
         tools.pinned = EXACT.find(question).map(|v| v.as_str().to_owned());
         tools
     }
@@ -169,8 +221,12 @@ impl KitTools {
     }
 
     pub fn into_tools(self, research_updates: bool) -> Vec<DynamicTool> {
+        let mut specs = definitions();
+        if self.seasons.is_some() {
+            specs.extend(crate::seasons::definitions());
+        }
         let shared = Arc::new(Mutex::new(self));
-        definitions()
+        specs
             .into_iter()
             .map(|mut spec| {
                 let shared = Arc::clone(&shared);
@@ -204,7 +260,12 @@ impl KitTools {
 
     async fn dispatch(shared: &Mutex<Self>, name: &str, args: Value) -> Result<Value> {
         if name != "compute" {
-            return shared.lock().await.call(name, args).await;
+            let mut kit = shared.lock().await;
+            let result = kit.call(name, args).await?;
+            if kit.seasons.is_some() {
+                kit.references.lock().await.record(name, &result);
+            }
+            return Ok(result);
         }
         let calculation: Calculation = serde_json::from_value(args)?;
         let prepared = calculation.prepare(&shared.lock().await.sources)?;
@@ -220,6 +281,34 @@ impl KitTools {
 
     async fn call(&mut self, name: &str, args: Value) -> Result<Value> {
         match name {
+            "list_endgame_seasons" | "get_endgame_season" => {
+                let mut args = args;
+                let path = args
+                    .as_object_mut()
+                    .and_then(|args| args.remove("selector"));
+                let mut result = self
+                    .seasons
+                    .as_mut()
+                    .context("Season tools unavailable")?
+                    .call(name, args)
+                    .await?;
+                if let Some(source) = result["source"].as_str() {
+                    self.sources
+                        .entry(source.to_owned())
+                        .or_insert_with(|| result.clone());
+                    if let Some(path) = path.as_ref().and_then(Value::as_str) {
+                        ensure!(
+                            path.starts_with("/zones/"),
+                            "Expected a pointer into the zones of this page"
+                        );
+                        let value = result.pointer(path).context("Unknown zone field")?.clone();
+                        result.as_object_mut().unwrap().remove("zones");
+                        result["path"] = json!(path);
+                        result["value"] = value;
+                    }
+                }
+                Ok(result)
+            }
             "list_recent_revisions" => {
                 ensure!(args == json!({}), "Expected empty arguments");
                 Ok(json!(self.revisions().await?))
@@ -479,6 +568,9 @@ fn find_entries(v: &Value, path: &str, term: &str, full_text: bool, matches: &mu
         _ => {}
     }
 }
+
+#[cfg(test)]
+mod run_tests;
 
 #[cfg(test)]
 mod tests {

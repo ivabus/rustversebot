@@ -1747,6 +1747,7 @@ dependencies = [
 name = "nanoka"
 version = "0.1.0"
 dependencies = [
+ "chrono",
  "clap",
  "regex",
  "reqwest 0.12.28",
@@ -2716,9 +2717,12 @@ name = "rustverse_ai"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "chrono",
  "clap",
+ "futures-util",
  "log",
  "md5",
+ "nanoka",
  "regex",
  "reqwest 0.12.28",
  "rhai",
@@ -2736,6 +2740,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "nanoka",
+ "pulldown-cmark",
  "reqwest 0.12.28",
  "rustverse",
  "serde",
@@ -2750,6 +2755,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "axum",
+ "bytes",
  "chrono",
  "env_logger",
  "libsql",
@@ -2757,6 +2763,7 @@ dependencies = [
  "minijinja",
  "nanoka",
  "pulldown-cmark",
+ "reqwest 0.11.27",
  "reqwest 0.12.28",
  "rustverse",
  "rustverse_ai",

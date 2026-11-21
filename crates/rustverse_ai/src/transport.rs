@@ -1,4 +1,9 @@
-use std::time::{Duration, SystemTime};
+use crate::context::InputBudget;
+use std::{
+    sync::Arc,
+    time::{Duration, SystemTime},
+};
+use tokio::sync::Mutex;
 
 use rig_core::{
     error::{ErrorReport, ProviderError},
@@ -9,16 +14,28 @@ use rig_core::{
 use rig_reqwest::{ReqwestClient, reqwest};
 
 /// Retry a rejected Responses request in place, retaining the agent's transcript.
-pub(super) struct ReportHttp(ReqwestClient);
+#[derive(Clone)]
+pub(super) struct ReportHttp {
+    client: rig_core::http_client::DynHttpClient,
+    budget: Arc<Mutex<InputBudget>>,
+}
 
-impl ReportHttp {
-    pub fn new() -> anyhow::Result<Self> {
+pub(super) struct Provider {
+    pub config: rig_core::providers::openai::OpenAIConfig,
+    pub client: rig_core::http_client::DynHttpClient,
+}
+
+impl Provider {
+    pub fn new(key: &str) -> anyhow::Result<Self> {
         let client = reqwest::Client::builder()
             .connect_timeout(Duration::from_secs(15))
             .timeout(Duration::from_secs(180))
             .redirect(reqwest::redirect::Policy::none())
             .build()?;
-        Ok(Self(ReqwestClient::from(client)))
+        Ok(Self {
+            config: rig_core::providers::openai::OpenAIConfig::new(key.to_owned()),
+            client: rig_core::http_client::DynHttpClient::new(ReqwestClient::from(client)),
+        })
     }
 }
 
@@ -26,7 +43,7 @@ impl ReportHttp {
     clippy::result_large_err,
     reason = "Rig requires its transport error, including Retry-After headers"
 )]
-async fn retry_rejected<T, F: Future<Output = Result<T>>>(
+pub(super) async fn retry_rejected<T, F: Future<Output = Result<T>>>(
     mut send: impl FnMut() -> F,
 ) -> Result<T> {
     for seconds in [1, 2] {
@@ -52,23 +69,69 @@ async fn retry_rejected<T, F: Future<Output = Result<T>>>(
     send().await
 }
 
+pub(super) fn context_rejected(error: &rig_core::http_client::Error) -> bool {
+    error
+        .non_success_body()
+        .and_then(|body| serde_json::from_str::<serde_json::Value>(body).ok())
+        .is_some_and(|body| {
+            body.pointer("/error/code")
+                .is_some_and(|code| code == "context_length_exceeded")
+        })
+}
+
+impl ReportHttp {
+    pub fn new(client: rig_core::http_client::DynHttpClient, budget: InputBudget) -> Self {
+        Self {
+            client,
+            budget: Arc::new(Mutex::new(budget)),
+        }
+    }
+
+    #[allow(
+        clippy::result_large_err,
+        reason = "Rig expects its original transport error with provider headers"
+    )]
+    async fn send_response<T, F: Future<Output = Result<T>>>(
+        &self,
+        request: Request<Bytes>,
+        send: impl Fn(Request<Bytes>) -> F,
+    ) -> Result<T> {
+        let mut budget = self.budget.lock().await;
+        loop {
+            let (prepared, count) = budget
+                .prepare(&self.client, request.clone())
+                .await
+                .map_err(rig_core::http_client::Error::permanent)?;
+            match retry_rejected(|| send(prepared.clone())).await {
+                Err(err) if context_rejected(&err) => budget.restrict(count),
+                result => return result,
+            }
+        }
+    }
+}
+
 impl HttpClientExt for ReportHttp {
     fn send(
         &self,
         request: Request<Bytes>,
     ) -> impl Future<Output = Result<Response<LazyBody>>> + Send + 'static {
-        let client = self.0.clone();
-        async move { retry_rejected(|| client.send(request.clone())).await }
+        let transport = self.clone();
+        async move {
+            transport
+                .send_response(request, |r| transport.client.send(r))
+                .await
+        }
     }
 
     fn send_multipart(
         &self,
         request: Request<MultipartForm>,
     ) -> impl Future<Output = Result<Response<LazyBody>>> + Send + 'static {
-        self.0.send_multipart(request)
+        self.client.send_multipart(request)
     }
 
     async fn send_streaming(&self, request: Request<Bytes>) -> Result<StreamingResponse> {
-        retry_rejected(|| self.0.send_streaming(request.clone())).await
+        self.send_response(request, |r| self.client.send_streaming(r))
+            .await
     }
 }

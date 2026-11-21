@@ -33,9 +33,16 @@ Simplified Chinese and sends the changed fields from both languages to the
 GachaBase serves Simplified Chinese as `chs`; the model receives it under `cn`.
 
 The Rig agent chooses when to look up evidence, revise its interpretation and
-return an answer. A run has up to 12 model turns with a final text-only turn at
-the limit. Empty normalized diffs produce a local report. The analysis compares
+return an answer. Tools stay available until the agent finishes. Individual
+HTTP requests have timeouts. Empty normalized diffs produce a local report. The analysis compares
 the Core Passive at its highest available rank and other skills at level 12.
+
+Before each model turn the agent counts the assembled Responses input, including
+tool definitions and results. At 384,000 tokens it summarizes completed history and
+counts again. Smaller model windows use an earlier threshold with room for the reply.
+The current question and pending tool calls stay intact. Numeric sources remain
+available to `compute` throughout the run. Telegram shows «Сжимаю контекст…» during
+compaction. Summary generation contributes to the request's token and cost totals.
 
 - `list_recent_revisions` lists recent design revisions from beta and release.
 - `search_gachabase` searches a revision's catalog by category, localized name,
@@ -54,9 +61,7 @@ the Core Passive at its highest available rank and other skills at level 12.
   Use a JSON pointer for fields, `@raw` for the original paginated DTO with all ranks,
   or `text:<phrase>` to locate mentions in descriptions.
   For agents, `@team` reads the Core Passive and Additional Ability summaries
-  with paths to their full conditions. In an interactive team comparison using
-  this view, the next turn after 24 catalog lookups switches to calculation
-  or a final answer. The same switch occurs with two tool turns left.
+  with paths to their full conditions.
   Agent reads accept `skill_level` and `core_level`. Reports use level 12 and maximum
   Core Passive rank by default. Large diffs list selectors per group. Each group
   pages whole changes and supplies separate read pointers for oversized values.
@@ -130,6 +135,16 @@ Reply to any part of a completed answer with a text question to continue, or
 use `/prompt <question>` as a reply. A standalone command starts a new conversation.
 libSQL caches each delivered question and answer for 24 hours. The agent receives
 the unexpired turns leading to that specific answer in the same chat and topic.
+Delivered turns also keep the Nanoka season IDs and GachaBase revisions and entries
+consulted for that answer. The agent receives these references with the original
+questions and answers, with participant labels for group follow-ups.
+
+Interactive questions can use `list_endgame_seasons` to browse both modes or filter
+by mode, and `get_endgame_season` to read rooms, enemies and buffs by exact ID,
+`current` or `next`. Relative selectors use the same European rotation as Telegram's
+season commands. Previews have a separate status and no official dates. Following
+up about a room uses the selected season ID even after a rotation changes.
+
 In groups, participants can continue a visible answer under their own access
 and rate limits. Separate replies to an earlier answer create independent branches.
 
@@ -141,6 +156,9 @@ predecessor, including hotfixes within the same version. Use
 The bot sends one album per revision in chronological order, with a separate PNG
 for each changed character. A single page is sent on its own. For more than ten
 pages it sends numbered albums. Captions link each character to the exact GachaBase diff.
+During generation, a status message shows the revision pair, current step and
+model usage. The bot removes it after Telegram confirms the last album. If Telegram
+rejects photo processing, the bot sends that batch as original PNG documents.
 
 Manual AI commands share one request per Telegram user per 60 seconds across
 chats. Opening the picker is free. The administrator bypasses the cooldown and
@@ -314,6 +332,7 @@ nix run .#rustversebot
 GitHub Actions configures Attic as a substituter before the build.
 The workflow first builds and uploads the `cargoArtifacts` dependencies.
 It then builds the bot and uploads its runtime closure.
+The separate Rust CI workflow runs the workspace tests.
 Unchanged build inputs let later builds reuse the dependency artifacts.
 The workflow runs on a native ARM64 macOS runner.
 

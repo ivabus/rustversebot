@@ -1,6 +1,4 @@
-use crate::season_time::{
-    EUROPE_SERVER, display_wall_time, moscow_date, moscow_time, parse_europe_time,
-};
+use crate::season_time::{EUROPE_SERVER, display_wall_time, moscow_date, moscow_time};
 use chrono::{DateTime, Utc};
 use nanoka::types::{EndgameType, SeasonMeta};
 use std::{collections::HashMap, sync::Arc};
@@ -129,38 +127,17 @@ pub async fn command_handler(
     Ok(())
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum SeasonPosition {
-    Previous,
-    Current,
-    Next,
-}
+use nanoka::calendar::{
+    IndexedSeason, SeasonPosition, current_live_season, endgame_index_sort, indexed_season,
+    select_indexed_season,
+};
 
-impl SeasonPosition {
-    const fn command_name(self) -> &'static str {
-        match self {
-            Self::Previous => "previous",
-            Self::Current => "current",
-            Self::Next => "next",
-        }
+fn position_labels(position: SeasonPosition) -> (&'static str, &'static str) {
+    match position {
+        SeasonPosition::Previous => ("previous", "Предыдущий сезон"),
+        SeasonPosition::Current => ("current", "Текущий сезон"),
+        SeasonPosition::Next => ("next", "Следующий сезон"),
     }
-
-    const fn caption(self) -> &'static str {
-        match self {
-            Self::Previous => "Предыдущий сезон",
-            Self::Current => "Текущий сезон",
-            Self::Next => "Следующий сезон",
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct IndexedSeason {
-    id: u64,
-    sequence_id: u64,
-    is_preview: bool,
-    starts_at: DateTime<Utc>,
-    ends_at: Option<DateTime<Utc>>,
 }
 
 fn indexed_season_end(season: &IndexedSeason) -> String {
@@ -170,100 +147,15 @@ fn indexed_season_end(season: &IndexedSeason) -> String {
         .unwrap_or_else(|| "—".into())
 }
 
-fn indexed_season(
-    id: &str,
-    meta: &SeasonMeta,
-    endgame_type: EndgameType,
-    sort: u32,
-) -> Option<IndexedSeason> {
-    if !(id.len() == 5 || id.len() == 6) || meta.sort != sort {
-        return None;
-    }
-    let id = id.parse::<u64>().ok()?;
-    if EndgameType::from_id(id) != Some(endgame_type) {
-        return None;
-    }
-    let (begin, end) = match meta.live_begin.as_deref() {
-        Some(start) => (start, meta.live_end.as_deref()),
-        None => (meta.begin.as_deref()?, meta.end.as_deref()),
-    };
-    let sequence_id = if id >= 100_000 { id / 10 } else { id };
-    Some(IndexedSeason {
-        id,
-        sequence_id,
-        is_preview: id != sequence_id && meta.live_begin.is_none(),
-        starts_at: parse_europe_time(begin)?,
-        ends_at: end.and_then(parse_europe_time),
-    })
-}
-
-fn select_indexed_season(
-    seasons: &HashMap<String, SeasonMeta>,
-    endgame_type: EndgameType,
-    sort: u32,
-    position: SeasonPosition,
-    now: DateTime<Utc>,
-) -> Option<IndexedSeason> {
-    let entries: Vec<_> = seasons
-        .iter()
-        .filter_map(|(id, meta)| indexed_season(id, meta, endgame_type, sort))
-        .collect();
-    let current = current_live_season(&entries, now)?;
-    let selected = match position {
-        SeasonPosition::Current => Some(current),
-        SeasonPosition::Previous => entries
-            .iter()
-            .filter(|s| !s.is_preview && s.starts_at < current.starts_at)
-            .max_by_key(|s| (s.starts_at, s.id == s.sequence_id, s.id)),
-        SeasonPosition::Next => {
-            let next_live = entries
-                .iter()
-                .filter(|s| !s.is_preview && s.starts_at > current.starts_at)
-                .min_by_key(|s| (s.starts_at, s.id != s.sequence_id, s.id));
-            let preview = entries
-                .iter()
-                .filter(|s| s.is_preview && s.sequence_id == current.sequence_id + 1)
-                .min_by_key(|s| s.id);
-            match next_live {
-                Some(live) if live.sequence_id == current.sequence_id + 1 => Some(live),
-                _ => preview.or(next_live),
-            }
-        }
-    };
-    selected.cloned()
-}
-
-fn current_live_season(entries: &[IndexedSeason], now: DateTime<Utc>) -> Option<&IndexedSeason> {
-    entries
-        .iter()
-        .filter(|s| !s.is_preview)
-        .filter(|s| {
-            s.starts_at <= now
-                && s.ends_at
-                    .is_none_or(|end| now.timestamp() <= end.timestamp())
-        })
-        .max_by_key(|s| (s.starts_at, s.id == s.sequence_id, s.id))
-}
-
 fn indexed_season_date(season: &IndexedSeason) -> String {
     moscow_date(season.starts_at)
-}
-
-fn endgame_index_sort(endgame_type: EndgameType) -> u32 {
-    match endgame_type {
-        EndgameType::ShiyuDefence => 1,
-        EndgameType::DeadlyAssault => 9,
-    }
 }
 
 async fn endgame_season_index(
     endgame_type: EndgameType,
     state: &BotState,
 ) -> anyhow::Result<HashMap<String, SeasonMeta>> {
-    Ok(match endgame_type {
-        EndgameType::ShiyuDefence => state.nanoka.get_seasons().await?,
-        EndgameType::DeadlyAssault => state.nanoka.get_boss_seasons().await?,
-    })
+    Ok(state.nanoka.get_seasons_by_type(endgame_type).await?)
 }
 
 async fn available_endgame_seasons(
@@ -397,6 +289,7 @@ async fn cmd_endgame_pair(
     position: SeasonPosition,
     state: &BotState,
 ) -> anyhow::Result<()> {
+    let (command, caption) = position_labels(position);
     let (deadly_index, shiyu_index) =
         tokio::try_join!(state.nanoka.get_boss_seasons(), state.nanoka.get_seasons())?;
     let now = Utc::now();
@@ -405,10 +298,7 @@ async fn cmd_endgame_pair(
     let (Some(deadly), Some(shiyu)) = (deadly, shiyu) else {
         bot.send_message(
             chat_id,
-            format!(
-                "Не удалось найти полную пару сезонов для /{}.",
-                position.command_name()
-            ),
+            format!("Не удалось найти полную пару сезонов для /{}.", command),
         )
         .await?;
         return Ok(());
@@ -433,9 +323,9 @@ async fn cmd_endgame_pair(
 
     let album_caption = format!(
         "<b>Deadly Assault</b> · {} · <b>{}</b>\n<b>Shiyu Defense</b> · {} · <b>{}</b>",
-        position.caption(),
+        caption,
         indexed_season_date(&deadly),
-        position.caption(),
+        caption,
         indexed_season_date(&shiyu)
     );
     let media = vec![
@@ -534,13 +424,15 @@ pub async fn callback_handler(
     if let Some(action) = data.strip_prefix("diff:") {
         bot.answer_callback_query(query.id.clone()).await?;
         if let Some(message) = &query.message {
-            let address = message.regular_message().map(Into::into).unwrap_or(
-                crate::prompt::MessageAddress {
-                    chat: message.chat().id,
-                    thread: None,
-                    message_id: message.id(),
-                },
-            );
+            let address =
+                message
+                    .regular_message()
+                    .map(Into::into)
+                    .unwrap_or(crate::agent::MessageAddress {
+                        chat: message.chat().id,
+                        thread: None,
+                        message_id: message.id(),
+                    });
             crate::beta::picker(&bot, address, Some(&query.from), action, &state).await?;
         }
         return Ok(());

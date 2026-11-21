@@ -1,5 +1,6 @@
 #![recursion_limit = "256"]
 
+mod agent;
 mod agent_access;
 mod ai_jobs;
 mod beta;

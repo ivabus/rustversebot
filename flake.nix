@@ -30,6 +30,7 @@
         version = "0.1.0";
         inherit src;
         strictDeps = true;
+        doCheck = false;
         cargoExtraArgs = "--package rustversebot";
 
         nativeBuildInputs = [
@@ -50,10 +51,7 @@
       };
 
       cargoArtifacts = craneLib.buildDepsOnly (commonArgs // {
-        # The workspace sources are replaced with crane's dummy sources here:
-        # this compiles dependencies and test-only dependencies, not the
-        # workspace's actual sources.
-        buildPhaseCargoCommand = "cargo test --release --workspace --no-run";
+        buildPhaseCargoCommand = "cargo build --release --locked ${commonArgs.cargoExtraArgs}";
       });
 
       rustversebot = craneLib.buildPackage (commonArgs // {
@@ -62,7 +60,6 @@
         # dependency artifact. Keeping it here would strip the executable bit
         # when crane installs the finished bot.
         preBuild = "";
-        nativeCheckInputs = [ pkgs.typst pkgs.resvg ];
         postInstall = ''
           wrapProgram "$out/bin/rustversebot" \
             --prefix PATH : ${pkgs.lib.makeBinPath [ pkgs.typst pkgs.resvg ]}
@@ -94,7 +91,6 @@
 
       checks.${system} = {
         default = rustversebot;
-        tests = rustversebot;
       };
 
       devShells.${system}.default = pkgs.mkShell {

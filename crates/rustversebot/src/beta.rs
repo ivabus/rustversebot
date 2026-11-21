@@ -1,22 +1,20 @@
-use crate::scheduler::SchedulerSettings;
-use crate::{BotState, bot_templates::BotTemplateSender};
 use crate::{
-    prompt::{self, LiveMessage, MessageAddress},
-    templates::RenderedTemplate,
+    BotState,
+    agent::{self, AgentRun, ChatAgent, MessageAddress, Outcome, Status},
+    bot_templates::BotTemplateSender,
+    scheduler::SchedulerSettings,
 };
 use anyhow::{Context, Result};
-use rustverse_ai::PromptProgress;
 use rustverse_ai::beta::{AgentChange, Branch, Revision, branch_revisions, revisions};
 use serde_json::json;
 use std::{
     collections::{BTreeMap, HashSet},
     time::Duration,
 };
-use teloxide::{
-    prelude::*,
-    types::{InputFile, InputMedia, InputMediaDocument, InputMediaPhoto, ParseMode, ThreadId},
-};
-use tokio::{sync::watch, time::Instant};
+use teloxide::prelude::*;
+
+mod album;
+use album::{Page, album_groups, send_album};
 
 pub(crate) struct BetaPages {
     pub(crate) client: reqwest::Client,
@@ -76,7 +74,7 @@ async fn report(
     rev: &Revision,
     agent: &AgentChange,
     model: &str,
-    status: Option<&mut DiffStatus<'_>>,
+    status: Option<&mut AgentRun<'_>>,
 ) -> Result<String> {
     if let Some(text) = cached_report(state, rev, agent, model).await? {
         return Ok(text);
@@ -110,211 +108,40 @@ async fn report(
         Ok(text)
     };
     if let Some(status) = status {
-        let last = status.update("report", Some(&agent.name)).await?;
-        let (tx, rx) = watch::channel(PromptProgress::default());
-        let (text, ()) = tokio::join!(
-            generate(Some(tx)),
-            status.updates(&agent.name, rx.clone(), last)
-        );
-        add_usage(&mut status.totals, &rx.borrow());
-        text
+        status
+            .track(
+                diff_status(
+                    Some(&rev.previous),
+                    Some(&rev.current),
+                    DiffStage::Report,
+                    Some(&agent.name),
+                ),
+                |tx| generate(Some(tx)),
+            )
+            .await
     } else {
         generate(None).await
     }
 }
 
-struct DiffStatus<'a> {
-    output: prompt::LiveOutput<'a>,
-    target: LiveMessage,
-    model: &'a str,
-    totals: PromptProgress,
-    retry_at: Option<Instant>,
+#[derive(Clone, Copy, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+enum DiffStage {
+    Prepare,
+    Report,
+    Render,
+    Send,
 }
 
-fn add_usage(progress: &mut PromptProgress, other: &PromptProgress) {
-    progress.tools += other.tools;
-    progress.tokens = progress
-        .tokens
-        .zip(other.tokens)
-        .and_then(|(a, b)| a.checked_add(b));
-    progress.cost_usd = match (progress.turns, other.turns) {
-        (_, 0) => progress.cost_usd,
-        (0, _) => other.cost_usd,
-        _ => progress.cost_usd.zip(other.cost_usd).map(|(a, b)| a + b),
-    };
-    progress.turns += other.turns;
-}
-
-impl DiffStatus<'_> {
-    fn footer(&self, stage: &str, agent: Option<&str>) -> Result<RenderedTemplate> {
-        prompt::status_footer(
-            self.output.templates,
-            self.model,
-            &self.totals,
-            Some(stage),
-            agent,
-        )
-    }
-
-    async fn update(&mut self, stage: &str, agent: Option<&str>) -> Result<String> {
-        let rendered = self.footer(stage, agent)?;
-        self.output
-            .show_stage(self.target, &rendered.text, &mut self.retry_at)
-            .await;
-        Ok(rendered.text)
-    }
-
-    async fn updates(&mut self, agent: &str, rx: watch::Receiver<PromptProgress>, last: String) {
-        self.output
-            .updates(self.target, rx, last, &mut self.retry_at, |p| {
-                let mut progress = p.clone();
-                add_usage(&mut progress, &self.totals);
-                Ok(prompt::status_footer(
-                    self.output.templates,
-                    self.model,
-                    &progress,
-                    Some("report"),
-                    Some(agent),
-                )?
-                .text)
-            })
-            .await;
-    }
-
-    async fn finish(&self, rendered: RenderedTemplate) -> Result<()> {
-        if let Some(at) = self.retry_at {
-            tokio::time::sleep_until(at).await;
-        }
-        let edit = match self.target {
-            LiveMessage::Group(id) => Some(id),
-            LiveMessage::Draft => None,
-        };
-        self.output.send(rendered, edit).await?;
-        Ok(())
-    }
-}
-
-const ALBUM_LIMIT: usize = 10;
-
-fn album_groups<T>(mut items: &[T]) -> Vec<&[T]> {
-    let mut groups = Vec::new();
-    while !items.is_empty() {
-        // Keep the last two pages together when ten would leave a singleton.
-        let count = if items.len() == ALBUM_LIMIT + 1 {
-            ALBUM_LIMIT - 1
-        } else {
-            items.len().min(ALBUM_LIMIT)
-        };
-        let (group, rest) = items.split_at(count);
-        groups.push(group);
-        items = rest;
-    }
-    groups
-}
-
-#[derive(Clone)]
-struct Page {
-    file: InputFile,
-    photo: bool,
-}
-
-impl Page {
-    fn new(id: u64, png: Vec<u8>) -> Result<Self> {
-        anyhow::ensure!(png.len() >= 24, "incomplete PNG");
-        let width = u32::from_be_bytes(png[16..20].try_into()?);
-        let height = u32::from_be_bytes(png[20..24].try_into()?);
-        let photo = width.saturating_add(height) <= 10000
-            && width.max(height) <= width.min(height).saturating_mul(20)
-            && png.len() <= 10_000_000;
-        Ok(Self {
-            photo,
-            file: InputFile::memory(png).file_name(format!("beta-{id}.png")),
-        })
-    }
-}
-
-fn album_media(pages: &[Page], caption: &str) -> Vec<InputMedia> {
-    let photos = pages.iter().all(|page| page.photo);
-    pages
-        .iter()
-        .enumerate()
-        .map(|(index, page)| {
-            // Telegram requires a document album to contain documents exclusively.
-            let caption = (index == 0).then(|| caption.to_owned());
-            if photos {
-                let mut media = InputMediaPhoto::new(page.file.clone());
-                media.parse_mode = caption.as_ref().map(|_| ParseMode::Html);
-                media.caption = caption;
-                InputMedia::Photo(media)
-            } else {
-                let mut media = InputMediaDocument::new(page.file.clone());
-                media.parse_mode = caption.as_ref().map(|_| ParseMode::Html);
-                media.caption = caption;
-                InputMedia::Document(media)
-            }
-        })
-        .collect()
-}
-
-async fn send_album(
-    bot: &Bot,
-    chat: ChatId,
-    thread: Option<ThreadId>,
-    pages: &[Page],
-    caption: &str,
-    settings: &SchedulerSettings,
-) -> Result<()> {
-    anyhow::ensure!(
-        (1..=ALBUM_LIMIT).contains(&pages.len()),
-        "invalid album size"
-    );
-    let mut attempt = 1;
-    loop {
-        tokio::time::sleep(settings.request_spacing).await;
-        let result = match pages {
-            [page] if page.photo => {
-                let mut request = bot
-                    .send_photo(chat, page.file.clone())
-                    .parse_mode(ParseMode::Html)
-                    .caption(caption);
-                if let Some(thread) = thread {
-                    request = request.message_thread_id(thread);
-                }
-                request.await.map(|_| ())
-            }
-            [page] => {
-                let mut request = bot
-                    .send_document(chat, page.file.clone())
-                    .parse_mode(ParseMode::Html)
-                    .caption(caption);
-                if let Some(thread) = thread {
-                    request = request.message_thread_id(thread);
-                }
-                request.await.map(|_| ())
-            }
-            _ => {
-                let mut request = bot.send_media_group(chat, album_media(pages, caption));
-                if let Some(thread) = thread {
-                    request = request.message_thread_id(thread);
-                }
-                request.await.map(|_| ())
-            }
-        };
-        match result {
-            Ok(()) => return Ok(()),
-            Err(error) if attempt < settings.retry_attempts => {
-                let wait = match error {
-                    teloxide::RequestError::RetryAfter(seconds) => seconds.duration(),
-                    teloxide::RequestError::Network(_) => {
-                        settings.retry_base_delay * (1u32 << (attempt - 1).min(8))
-                    }
-                    other => return Err(other.into()),
-                };
-                tokio::time::sleep(wait).await;
-                attempt += 1;
-            }
-            Err(error) => return Err(error.into()),
-        }
+fn diff_status(
+    previous: Option<&str>,
+    current: Option<&str>,
+    stage: DiffStage,
+    character: Option<&str>,
+) -> Status<'static> {
+    Status::Activity {
+        template: "diff_status",
+        context: json!({ "previous":previous, "current":current, "stage":stage, "character":character }),
     }
 }
 
@@ -341,7 +168,7 @@ impl<'a> RevisionAlbums<'a> {
         bot: &Bot,
         chat: ChatId,
         settings: &SchedulerSettings,
-        mut status: Option<&mut DiffStatus<'_>>,
+        mut status: Option<&mut AgentRun<'_>>,
     ) -> Result<()> {
         let automatic = status.is_none();
         let row = self.revision;
@@ -381,7 +208,14 @@ impl<'a> RevisionAlbums<'a> {
                             report(self.state, row, agent, self.model, status.as_deref_mut())
                                 .await?;
                         if let Some(status) = status.as_deref_mut() {
-                            status.update("render", Some(&agent.name)).await?;
+                            status
+                                .show(&diff_status(
+                                    Some(&row.previous),
+                                    Some(&row.current),
+                                    DiffStage::Render,
+                                    Some(&agent.name),
+                                ))
+                                .await?;
                         }
                         entry.insert(Page::new(
                             agent.id,
@@ -401,9 +235,16 @@ impl<'a> RevisionAlbums<'a> {
                 "part":index+1, "parts":groups.len(), "links":links
             }))?;
             if let Some(status) = status.as_deref_mut() {
-                status.update("send", None).await?;
+                status
+                    .show(&diff_status(
+                        Some(&row.previous),
+                        Some(&row.current),
+                        DiffStage::Send,
+                        None,
+                    ))
+                    .await?;
             }
-            let thread = status.as_ref().and_then(|s| s.output.address.thread);
+            let thread = status.as_ref().and_then(|s| s.address().thread);
             send_album(bot, chat, thread, &pages, &caption.text, settings).await?;
             if automatic {
                 self.state
@@ -574,102 +415,98 @@ pub async fn command(
             return Ok(());
         }
     };
-    let Some(slot) = crate::agent_access::admit(
+    agent::launch(
         bot,
-        chat,
-        address.thread,
+        address,
         user,
         if compare { "diff" } else { "betadiff" },
         state,
+        Diff {
+            previous: prev.map(str::to_owned),
+            current: cur.map(str::to_owned),
+            compare,
+            admin: crate::agent_access::is_admin(user, state),
+        },
     )
-    .await?
-    else {
-        return Ok(());
-    };
-    let selection = state.ai_model().await?;
-    let model = selection.cache_key();
-    let display_model = selection.to_string();
-    let initial = prompt::status_footer(
-        &state.templates,
-        &display_model,
-        &PromptProgress::default(),
-        Some("prepare"),
-        None,
-    )?;
-    let output = prompt::LiveOutput {
-        bot,
-        templates: &state.templates,
-        address,
-    };
-    let target = output.start(initial).await?;
-    let admin = crate::agent_access::is_admin(user, state);
-    let (prev, cur) = (prev.map(str::to_owned), cur.map(str::to_owned));
-    let state = state.clone();
-    let bot = bot.clone();
-    slot.send(Box::pin(async move {
-        let mut status = DiffStatus {
-            output: prompt::LiveOutput {
-                bot: &bot,
-                templates: &state.templates,
-                address,
-            },
-            target,
-            model: &display_model,
-            totals: PromptProgress::default(),
-            retry_at: None,
-        };
-        let run = async {
-            let mut rows = revisions(&state.beta.client, prev.as_deref(), cur.as_deref()).await?;
-            if compare && rows.len() > 1 {
-                rows = vec![rustverse_ai::beta::comparison_range(&rows)?];
-            }
-            for row in &mut rows {
-                row.group_forms(&state.beta.client).await?;
-            }
-            let prev = &rows.first().context("empty changelog")?.previous;
-            let cur = &rows.last().unwrap().current;
-            let settings = SchedulerSettings::from_env();
-            if rows.iter().all(|row| row.agents.is_empty()) {
-                return state
-                    .templates
-                    .render("beta_empty", &json!({"previous":prev,"current":cur}));
-            }
-            // Preflight the whole range so an over-budget command sends no partial albums.
-            if !admin
-                && rows.iter().map(|r| r.agents.len()).sum::<usize>() > state.beta.manual_limit
-            {
-                let mut missing = 0;
-                for row in &rows {
-                    for agent in &row.agents {
-                        if cached_report(&state, row, agent, &model).await?.is_none() {
-                            missing += 1;
-                            if missing > state.beta.manual_limit {
-                                return state.templates.render(
-                                    "beta_limit",
-                                    &json!({"limit":state.beta.manual_limit}),
-                                );
-                            }
+    .await
+}
+
+struct Diff {
+    previous: Option<String>,
+    current: Option<String>,
+    compare: bool,
+    admin: bool,
+}
+
+impl ChatAgent for Diff {
+    fn initial_status(&self) -> Status<'_> {
+        diff_status(
+            self.previous.as_deref(),
+            self.current.as_deref(),
+            DiffStage::Prepare,
+            None,
+        )
+    }
+
+    async fn execute(&self, status: &mut AgentRun<'_>, state: &BotState) -> Result<Outcome> {
+        let model = status.model().cache_key();
+        let chat = status.address().chat;
+        let bot = status.bot().clone();
+        let mut rows = revisions(
+            &state.beta.client,
+            self.previous.as_deref(),
+            self.current.as_deref(),
+        )
+        .await?;
+        if self.compare && rows.len() > 1 {
+            rows = vec![rustverse_ai::beta::comparison_range(&rows)?];
+        }
+        let prev = rows.first().context("empty changelog")?.previous.clone();
+        let cur = rows.last().unwrap().current.clone();
+        status
+            .show(&diff_status(
+                Some(&prev),
+                Some(&cur),
+                DiffStage::Prepare,
+                None,
+            ))
+            .await?;
+        for row in &mut rows {
+            row.group_forms(&state.beta.client).await?;
+        }
+        let settings = SchedulerSettings::from_env();
+        if rows.iter().all(|row| row.agents.is_empty()) {
+            return state
+                .templates
+                .render("beta_empty", &json!({"previous":prev,"current":cur}))
+                .map(Outcome::Notice);
+        }
+        // Preflight the whole range so an over-budget command sends no partial albums.
+        if !self.admin
+            && rows.iter().map(|r| r.agents.len()).sum::<usize>() > state.beta.manual_limit
+        {
+            let mut missing = 0;
+            for row in &rows {
+                for agent in &row.agents {
+                    if cached_report(state, row, agent, &model).await?.is_none() {
+                        missing += 1;
+                        if missing > state.beta.manual_limit {
+                            return state
+                                .templates
+                                .render("beta_limit", &json!({"limit":state.beta.manual_limit}))
+                                .map(Outcome::Notice);
                         }
                     }
                 }
             }
-            for row in &rows {
-                RevisionAlbums::new(&state, row, &model)
-                    .send(&bot, chat, &settings, Some(&mut status))
-                    .await?;
-            }
-            status.footer("complete", None)
         }
-        .await;
-        let final_message = match run {
-            Ok(rendered) => rendered,
-            Err(error) => state
-                .templates
-                .render("error_generic", &json!({"error":error.to_string()}))?,
-        };
-        status.finish(final_message).await
-    }));
-    Ok(())
+        for row in &rows {
+            RevisionAlbums::new(state, row, &model)
+                .send(&bot, chat, &settings, Some(status))
+                .await?;
+        }
+        Ok(Outcome::MediaDelivered)
+    }
 }
 
 pub async fn poll(bot: &Bot, state: &BotState, settings: &SchedulerSettings) -> Result<()> {
@@ -764,54 +601,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn rendering_status_keeps_total_usage_across_agents_and_cache_hits() {
-        let templates = crate::templates::TemplateEngine::new().unwrap();
-        let mut totals = PromptProgress::default();
-        let usage = PromptProgress {
-            turns: 2,
-            tools: 3,
-            tokens: Some(150),
-            cost_usd: Some(0.025),
-            ..Default::default()
-        };
-        add_usage(&mut totals, &usage);
-        add_usage(&mut totals, &usage);
-        add_usage(&mut totals, &PromptProgress::default());
-        let rendered =
-            prompt::status_footer(&templates, "model", &totals, Some("render"), Some("A&B"))
-                .unwrap();
-        assert!(
-            rendered
-                .text
-                .starts_with("<b>A&amp;B</b>\n<i>Рендеринг карточки…</i>")
-        );
-        assert!(
-            rendered
-                .text
-                .contains("Вызовы инструментов: 6 · Ходы: 4 · Токены: 300 · Стоимость: ≈ $0,05")
-        );
-        add_usage(
-            &mut totals,
-            &PromptProgress {
-                turns: 1,
-                tokens: None,
-                cost_usd: None,
-                ..Default::default()
-            },
-        );
-        let done =
-            prompt::status_footer(&templates, "model", &totals, Some("complete"), None).unwrap();
-        assert!(done.text.contains("Сравнение готово"));
-        assert!(done.text.contains("Токены: — · Стоимость: —"));
-    }
-
-    #[test]
     fn release_caption_escapes_names_and_links_only_sent_entries() {
         let template = crate::templates::TemplateEngine::new().unwrap();
         let caption=template.render("beta_album",&json!({"release":true,"hotfix":false,"comparison":false,
             "previous":"release_3.2.0_1","current":"release_3.3.0_2","part":1,"parts":1,
             "links":[{"name":"A & B","url":"https://zzz.gachabase.net/diff/agents/1/a?prev=x&cur=y"}]})).unwrap();
-        assert_eq!(caption.parse_mode(), Some(ParseMode::Html));
+        assert_eq!(caption.parse_mode(), Some(teloxide::types::ParseMode::Html));
         assert!(caption.text.contains("Релиз патча") && caption.text.contains(">A &amp; B</a>"));
         assert_eq!(
             scraper::Html::parse_fragment(&caption.text)
@@ -822,46 +617,5 @@ mod tests {
                 .attr("href"),
             Some("https://zzz.gachabase.net/diff/agents/1/a?prev=x&cur=y")
         );
-    }
-
-    #[test]
-    fn album_sizes_preserve_every_page_in_order() {
-        for (count, sizes) in [
-            (0, vec![]),
-            (1, vec![1]),
-            (2, vec![2]),
-            (10, vec![10]),
-            (11, vec![9, 2]),
-            (12, vec![10, 2]),
-            (20, vec![10, 10]),
-            (21, vec![10, 9, 2]),
-        ] {
-            let agents: Vec<_> = (0..count).collect();
-            let albums = album_groups(&agents);
-            assert_eq!(albums.iter().map(|g| g.len()).collect::<Vec<_>>(), sizes);
-            assert_eq!(albums.concat(), agents);
-        }
-    }
-
-    #[test]
-    fn album_uses_one_media_type_and_only_one_caption() {
-        let page = || Page {
-            file: InputFile::memory(vec![1]),
-            photo: true,
-        };
-        let mut pages = [page(), page()];
-        for photos in [true, false] {
-            pages[1].photo = photos;
-            let media = album_media(&pages, "r1 → r2");
-            assert_eq!(media.len(), 2);
-            for (i, item) in media.iter().enumerate() {
-                let caption = match (photos, item) {
-                    (true, InputMedia::Photo(m)) => &m.caption,
-                    (false, InputMedia::Document(m)) => &m.caption,
-                    _ => panic!("unexpected media type"),
-                };
-                assert_eq!(caption.as_deref(), (i == 0).then_some("r1 → r2"));
-            }
-        }
     }
 }

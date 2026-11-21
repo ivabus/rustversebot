@@ -10,6 +10,7 @@ use tokio::sync::watch;
 #[serde(rename_all = "snake_case")]
 pub enum PromptStage {
     Preparing,
+    Compacting,
     Researching,
     Writing,
     Complete,
@@ -20,6 +21,8 @@ pub enum PromptStage {
 pub struct PromptProgress {
     pub stage: PromptStage,
     pub turns: usize,
+    #[serde(skip)]
+    pub usage_reports: usize,
     pub tools: usize,
     pub research_status: Option<String>,
     /// Total confirmed input and output tokens across completed model turns.
@@ -36,6 +39,7 @@ impl Default for PromptProgress {
         Self {
             stage: PromptStage::Preparing,
             turns: 0,
+            usage_reports: 0,
             tools: 0,
             research_status: None,
             tokens: Some(0),
@@ -81,7 +85,7 @@ impl AgentHook for Preview {
         event: ModelTurnFinished<'_>,
     ) -> ModelTurnAction {
         if let Self::Progress(tx) = self {
-            tx.send_modify(|p| p.record_usage(event.turn, event.usage));
+            tx.send_modify(|p| p.record_usage(event.usage));
         }
         ModelTurnAction::Continue
     }
@@ -102,12 +106,17 @@ impl AgentHook for Preview {
 }
 
 impl PromptProgress {
-    fn record_usage(&mut self, turn: usize, usage: rig_core::completion::Usage) {
+    pub(crate) fn record_usage(&mut self, usage: rig_core::completion::Usage) {
         self.tokens = self
             .tokens
             .zip(usage.total_tokens)
             .and_then(|(a, b)| a.checked_add(b));
-        let previous = if turn == 1 { Some(0.0) } else { self.cost_usd };
+        let previous = if self.usage_reports == 0 {
+            Some(0.0)
+        } else {
+            self.cost_usd
+        };
+        self.usage_reports += 1;
         self.cost_usd = previous
             .zip(
                 usage
@@ -161,14 +170,14 @@ mod tests {
         let mut progress = PromptProgress::default();
         let priced = |value| Usage::new().cost(Cost::from_total(value));
         assert_eq!(progress.cost_usd, None);
-        progress.record_usage(1, priced(0.25));
-        progress.record_usage(2, priced(0.5));
+        progress.record_usage(priced(0.25));
+        progress.record_usage(priced(0.5));
         assert_eq!(progress.cost_usd, Some(0.75));
-        progress.record_usage(3, Usage::new());
-        progress.record_usage(4, priced(0.125));
+        progress.record_usage(Usage::new());
+        progress.record_usage(priced(0.125));
         assert_eq!(progress.cost_usd, None);
         let mut free = PromptProgress::default();
-        free.record_usage(1, priced(0.0));
+        free.record_usage(priced(0.0));
         assert_eq!(free.cost_usd, Some(0.0));
     }
 

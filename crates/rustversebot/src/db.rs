@@ -3,7 +3,15 @@ use libsql::{Builder, Connection, Database, params};
 use serde::Serialize;
 use std::collections::HashMap;
 
-const SCHEMA_VERSION: i64 = 12;
+const SCHEMA_VERSION: i64 = 13;
+
+#[derive(Default)]
+pub struct DeliveredTurn<'a> {
+    pub question: &'a str,
+    pub answer: &'a str,
+    pub author: Option<i64>,
+    pub references: rustverse_ai::TurnReferences,
+}
 
 #[derive(Default)]
 pub struct PromptSession {
@@ -297,6 +305,15 @@ impl Db {
             .await
             .context("applying migration 12")?;
         }
+        if version < 13 {
+            tx.execute_batch(
+                "ALTER TABLE prompt_turns ADD COLUMN author INTEGER;
+                ALTER TABLE prompt_turns ADD COLUMN lookup_refs TEXT;
+                PRAGMA user_version=13;",
+            )
+            .await
+            .context("applying migration 13")?;
+        }
         tx.commit().await.context("committing migrations")?;
         Ok(())
     }
@@ -344,25 +361,38 @@ impl Db {
         chat: i64,
         topic: Option<i32>,
         reply_to: i32,
+        participant: Option<i64>,
     ) -> anyhow::Result<Option<PromptSession>> {
         let mut rows=self.connection()?.query(
-            "WITH RECURSIVE history(message_id,parent_id,question,answer,depth) AS (
-                SELECT message_id,parent_id,question,answer,0 FROM prompt_turns
+            "WITH RECURSIVE history(message_id,parent_id,question,answer,author,lookup_refs,depth) AS (
+                SELECT message_id,parent_id,question,answer,author,lookup_refs,0 FROM prompt_turns
                 WHERE chat_id=?1 AND topic_id IS ?2 AND expires_at>unixepoch()
                   AND message_id=COALESCE((SELECT first_id FROM prompt_parts WHERE chat_id=?1 AND message_id=?3),?3)
                 UNION ALL
-                SELECT p.message_id,p.parent_id,p.question,p.answer,h.depth+1
+                SELECT p.message_id,p.parent_id,p.question,p.answer,p.author,p.lookup_refs,h.depth+1
                 FROM history h JOIN prompt_turns p ON p.chat_id=?1 AND p.message_id=h.parent_id
                 WHERE p.topic_id IS ?2 AND p.expires_at>unixepoch()
-             ) SELECT message_id,question,answer FROM history ORDER BY depth DESC",
+             ) SELECT message_id,question,answer,author,lookup_refs FROM history ORDER BY depth DESC",
             params![chat,topic,reply_to]).await?;
         let mut session = PromptSession::default();
         while let Some(row) = rows.next().await? {
             session.last_answer = Some(row.get(0)?);
-            session.turns.push(rustverse_ai::PromptTurn {
-                question: row.get(1)?,
-                answer: row.get(2)?,
-            });
+            let mut question: String = row.get(1)?;
+            if let Some(author) = row.get::<Option<i64>>(3)? {
+                let speaker = if Some(author) == participant {
+                    "Текущий участник"
+                } else {
+                    "Другой участник"
+                };
+                question = format!("[{speaker}] {question}");
+            }
+            let mut answer: String = row.get(2)?;
+            if let Some(refs) = row.get::<Option<String>>(4)? {
+                answer.push_str(&format!("\n\nПроверенные источники этой реплики: {refs}"));
+            }
+            session
+                .turns
+                .push(rustverse_ai::PromptTurn { question, answer });
         }
         Ok(session.last_answer.map(|_| session))
     }
@@ -373,14 +403,16 @@ impl Db {
         topic: Option<i32>,
         message: i32,
         parent: Option<i32>,
-        question: &str,
-        answer: &str,
+        turn: &DeliveredTurn<'_>,
     ) -> anyhow::Result<()> {
+        let refs = (!turn.references.is_empty())
+            .then(|| serde_json::to_string(&turn.references))
+            .transpose()?;
         self.connection()?
             .execute(
-                "INSERT INTO prompt_turns(chat_id,topic_id,message_id,parent_id,question,answer)
-             VALUES(?1,?2,?3,?4,?5,?6) ON CONFLICT(chat_id,message_id) DO NOTHING",
-                params![chat, topic, message, parent, question, answer],
+                "INSERT INTO prompt_turns(chat_id,topic_id,message_id,parent_id,question,answer,author,lookup_refs)
+             VALUES(?1,?2,?3,?4,?5,?6,?7,?8) ON CONFLICT(chat_id,message_id) DO NOTHING",
+                params![chat, topic, message, parent, turn.question, turn.answer, turn.author, refs],
             )
             .await?;
         Ok(())
@@ -1317,16 +1349,46 @@ mod tests {
         let url = format!("file:{}", dir.path().join("prompts.db").display());
         let topic = Some(7);
         let db = Db::connect(&url).await.unwrap();
-        db.save_prompt_turn(-1, topic, 100, None, "Q1", "A1")
-            .await
-            .unwrap();
+        db.save_prompt_turn(
+            -1,
+            topic,
+            100,
+            None,
+            &DeliveredTurn {
+                question: "Q1",
+                answer: "A1",
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
         db.save_prompt_part(-1, 100, 101).await.unwrap();
-        db.save_prompt_turn(-1, topic, 105, Some(100), "Q2", "A2")
-            .await
-            .unwrap();
-        db.save_prompt_turn(-1, topic, 106, Some(100), "Q3", "A3")
-            .await
-            .unwrap();
+        db.save_prompt_turn(
+            -1,
+            topic,
+            105,
+            Some(100),
+            &DeliveredTurn {
+                question: "Q2",
+                answer: "A2",
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        db.save_prompt_turn(
+            -1,
+            topic,
+            106,
+            Some(100),
+            &DeliveredTurn {
+                question: "Q3",
+                answer: "A3",
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
         db.save_prompt_part(-1, 106, 107).await.unwrap();
         drop(db);
         let db = Db::connect(&url).await.unwrap();
@@ -1335,7 +1397,11 @@ mod tests {
             (105, vec![("Q1", "A1"), ("Q2", "A2")]),
             (107, vec![("Q1", "A1"), ("Q3", "A3")]),
         ] {
-            let session = db.prompt_session(-1, topic, id).await.unwrap().unwrap();
+            let session = db
+                .prompt_session(-1, topic, id, None)
+                .await
+                .unwrap()
+                .unwrap();
             assert_eq!(
                 session
                     .turns
@@ -1346,17 +1412,37 @@ mod tests {
             );
         }
         assert_eq!(
-            db.prompt_session(-1, topic, 107)
+            db.prompt_session(-1, topic, 107, None)
                 .await
                 .unwrap()
                 .unwrap()
                 .last_answer,
             Some(106)
         );
-        assert!(db.prompt_session(-2, topic, 101).await.unwrap().is_none());
-        assert!(db.prompt_session(-1, None, 101).await.unwrap().is_none());
-        assert!(db.prompt_session(-1, Some(8), 101).await.unwrap().is_none());
-        assert!(db.prompt_session(-1, topic, 999).await.unwrap().is_none());
+        assert!(
+            db.prompt_session(-2, topic, 101, None)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            db.prompt_session(-1, None, 101, None)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            db.prompt_session(-1, Some(8), 101, None)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            db.prompt_session(-1, topic, 999, None)
+                .await
+                .unwrap()
+                .is_none()
+        );
         db.connection()
             .unwrap()
             .execute(
@@ -1365,9 +1451,14 @@ mod tests {
             )
             .await
             .unwrap();
-        assert!(db.prompt_session(-1, topic, 101).await.unwrap().is_none());
+        assert!(
+            db.prompt_session(-1, topic, 101, None)
+                .await
+                .unwrap()
+                .is_none()
+        );
         assert_eq!(
-            db.prompt_session(-1, topic, 105)
+            db.prompt_session(-1, topic, 105, None)
                 .await
                 .unwrap()
                 .unwrap()
@@ -1391,6 +1482,79 @@ mod tests {
             .unwrap()
             .is_none()
         );
+    }
+
+    #[tokio::test]
+    async fn branch_remembers_exact_season_and_attributes_constraints_to_the_speaker() {
+        let db = Db::new_test().await.unwrap();
+        let save = |season| rustverse_ai::TurnReferences {
+            seasons: [rustverse_ai::SeasonReference {
+                mode: "shiyu_defense".into(),
+                season_id: season,
+                requested: "next".into(),
+                page: 0,
+                path: None,
+            }]
+            .into(),
+            ..Default::default()
+        };
+        db.save_prompt_turn(
+            -1,
+            Some(8),
+            100,
+            None,
+            &DeliveredTurn {
+                question: "Нет Кафки",
+                answer: "Комната 2",
+                author: Some(21),
+                references: save(62053),
+            },
+        )
+        .await
+        .unwrap();
+        db.save_prompt_turn(
+            -1,
+            Some(8),
+            101,
+            Some(100),
+            &DeliveredTurn {
+                question: "А сейчас?",
+                answer: "Новый сезон",
+                author: Some(22),
+                references: save(62054),
+            },
+        )
+        .await
+        .unwrap();
+        db.save_prompt_turn(
+            -1,
+            Some(8),
+            102,
+            Some(100),
+            &DeliveredTurn {
+                question: "А в первой?",
+                answer: "Тот же сезон",
+                author: Some(21),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        let branch = db
+            .prompt_session(-1, Some(8), 102, Some(22))
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(branch.turns[0].question.starts_with("[Другой участник]"));
+        assert!(branch.turns[0].answer.contains("62053"));
+        assert!(branch.turns.iter().all(|t| !t.answer.contains("62054")));
+        let other = db
+            .prompt_session(-1, Some(8), 101, Some(22))
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(other.turns[1].question.starts_with("[Текущий участник]"));
+        assert!(other.turns[1].answer.contains("62054"));
     }
 
     #[tokio::test]

@@ -230,7 +230,11 @@ pub async fn render(
     fs::write(root.join("template.typ"), template.source()).await?;
     fs::write(root.join("prelude.typ"), include_bytes!("../prelude.typ")).await?;
     fs::write(root.join("inpin.ttf"), include_bytes!("../inpin.ttf")).await?;
-    fs::write(root.join("input.json"), serde_json::to_vec(input)?).await?;
+    let data = match template {
+        Template::BetaAgent => serde_json::to_vec(&beta::template_data(input)?)?,
+        _ => serde_json::to_vec(input)?,
+    };
+    fs::write(root.join("input.json"), data).await?;
     if let Some(season) = season {
         fs::write(root.join("season.json"), serde_json::to_vec(season)?).await?;
     }
