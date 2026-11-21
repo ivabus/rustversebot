@@ -1,0 +1,5 @@
+Пользователи ИИ · страница {{ page }}
+{% for u in users %}
+{{ u.id }} · {{ u.name }}{% if u.username %} (@{{ u.username }}){% endif %}{% if u.banned %} · заблокирован{% endif %}
+{{ u.last_seen }} МСК · /{{ u.command }} · {% if u.decision == "banned" %}отказ в доступе{% elif u.decision == "limited" %}минутный лимит{% else %}разрешено{% endif %} · обращений {{ u.requests }}
+{% else %}Записей на этой странице нет.{% endfor %}

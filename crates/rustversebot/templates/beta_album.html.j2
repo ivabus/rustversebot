@@ -1,0 +1,5 @@
+<b>ZZZ · {% if comparison %}Сравнение ревизий{% elif hotfix %}Хотфикс{% elif release %}Релиз патча{% else %}Обновление беты{% endif %}</b> · {% if release %}релизная ветка{% else %}бета{% endif %}{% if parts > 1 %} · Часть {{ part }}/{{ parts }}{% endif %}
+<code>{{ previous }}</code> → <code>{{ current }}</code>
+
+Изменения на GachaBase
+{% for link in links %}<a href="{{ link.url }}">{{ link.name }}</a>{% if not loop.last %} · {% endif %}{% endfor %}

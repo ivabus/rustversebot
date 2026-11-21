@@ -32,19 +32,20 @@ Simplified Chinese and sends the changed fields from both languages to the
 [OpenAI Responses API](https://developers.openai.com/api/reference/resources/responses/methods/create).
 GachaBase serves Simplified Chinese as `chs`; the model receives it under `cn`.
 
-The input includes the current character's numeric `agent_id`. The model can
-call `read_kit` with any GachaBase agent ID and language (`en` or `cn`). The
-revision can be `current`, `previous` (relative to the input diff), or an exact
-name such as `beta_3.4.5_20699967`. The tool searches entries by localized
-name or ID and reads individual fields by JSON pointer, for example
-`/mindscapes/1/description/text` for M2. Long results are paginated.
-`list_recent_revisions` returns the ten latest beta design revision names, newest first.
+The Rig agent chooses when to look up evidence, revise its interpretation and
+return an answer. A run has up to 12 model turns with a final text-only turn at
+the limit. Empty normalized diffs produce a local report. The analysis compares
+the Core Passive at its highest available rank and other skills at level 12.
 
-The model drafts the report, then reviews it against both diffs and the tool
-results. It can read more kit fragments during review. The CLI prints the reviewed
-report with the agent's name and a subtitle showing the exact `prev` → `cur` revisions.
-Both passes compare the Core Passive at its highest available rank and other skills
-at level 12, before Mindscape level bonuses.
+- `list_recent_revisions` lists recent design revisions from beta and release.
+- `search_gachabase` searches the beta catalog by category, localized name,
+  alias, slug or ID. The categories are agents, W-Engines, drive discs,
+  Bangboo and tutorials.
+- `get_gachabase_entry` reads a category and ID in English or Simplified Chinese.
+  An optional exact version pins the result to a revision, including release
+  revisions. The default is the latest beta. A selector can read a JSON pointer,
+  search a record by ID or name, or find descriptions with `text:<phrase>`.
+  Long results include a continuation offset.
 
 The CLI reads the API key from `OPENAI_API_KEY` or, when it is unset or blank,
 from a single line in `~/.openai`. To analyze Sunbringer, run:
@@ -84,17 +85,41 @@ The default model is `gpt-6.2-sol` with `high` reasoning effort. Select another 
 ./dev/beta analyze 'https://zzz.gachabase.net/diff/agents/1651/kafka?prev=beta_3.4.4_20541895&cur=beta_3.4.5_20691792&lang=chs' > my-report.md
 ```
 
+`/prompt <вопрос>` asks the same agent a standalone question. In private chats
+the bot streams temporary Telegram drafts and sends the completed answer as
+persistent messages. Both use Telegram HTML for emphasis, quotations, code and
+HTTP(S) links. Groups receive the completed answer.
+
+`/diff` opens a beta/release picker. Choose the starting and ending design
+revisions for a direct comparison. `/diff <prev> <cur>` accepts exact names.
 `/betadiff` compares the latest GachaBase beta design revision with its immediate
 predecessor, including hotfixes within the same version. Use
 `/betadiff beta_3.4.4_20541895 beta_3.4.5_20691792` for an explicit range.
-The bot collects the agent changes in every intervening changelog entry and sends
-one PNG per character, including intermediate changes in chronological order.
+The bot sends one album per revision in chronological order, with a separate PNG
+for each changed character. A single page is sent on its own. For more than ten
+pages it sends numbered albums. Captions link each character to the exact GachaBase diff.
+
+Manual AI commands share one request per Telegram user per 60 seconds across
+chats. Opening the picker is free. The administrator bypasses the cooldown and
+the manual range budget, and can use `/resetlimit <telegram_id>` to reset a
+user's cooldown. `BETA_MAX_NEW_REPORTS` defaults to 10 uncached reports per
+manual comparison. The scheduler tracks its own delivery progress.
+
+The administrator can open `/aiusers [page]` in a private chat to look up
+Telegram IDs, names, last AI command, admission decision, Moscow time and
+request count. The access journal stores each attempt, including denials.
+Question text, model answers and credentials are excluded from its schema.
+`/aiban <telegram_id>` and `/aiunban <telegram_id>` revoke and restore access
+to manual AI commands across all chats. A cooldown reset preserves the ban.
 
 With an OpenAI key configured for the bot, the scheduler monitors the changelog
-for chats with registered UIDs. The first poll records the current revision for
-each new chat. Later polls deliver missed revisions in order. Reviewed reports
-are cached by revision pair and agent, and each chat's confirmed page deliveries
-survive restarts. Oversized pages are sent as PNG files to preserve the whole image.
+for chats with registered UIDs. The first poll records independent beta and release
+baselines per chat. Later polls deliver missed revisions in order within each branch. Reports
+are cached in libSQL by revision pair, agent, OpenAI model and a fingerprint of
+the system instructions, review prompt and tools. Commands and hotfix polls
+reuse this cache across chats and restarts. Earlier unversioned reports are
+recomputed on demand. A confirmed album records all its page deliveries atomically.
+An album containing an oversized page is sent as a group of PNG documents.
 
 `rustverse_images` renders each page at 1280 pixels wide with automatic height,
 using the Deadly Assault palette, cards, font and watermark. To render a saved report:

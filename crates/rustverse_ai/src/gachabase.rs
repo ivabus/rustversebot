@@ -11,7 +11,20 @@ pub(crate) struct Snapshots {
 
 impl Snapshots {
     pub fn changes(&self) -> Vec<Change> {
-        changes(&self.prev, &self.cur)
+        // Index a new or removed character by section so the model can page it.
+        let empty = serde_json::json!({"agent":{}, "tooltips":{}});
+        changes(
+            if self.prev.is_null() {
+                &empty
+            } else {
+                &self.prev
+            },
+            if self.cur.is_null() {
+                &empty
+            } else {
+                &self.cur
+            },
+        )
     }
 }
 
@@ -190,7 +203,7 @@ fn snapshot(table: &[Value], side: &str) -> Result<Value> {
     Ok(crate::diff::snapshot(dto, tooltips))
 }
 
-pub(crate) async fn recent_revisions(client: &Client) -> Result<Vec<String>> {
+pub async fn recent_revisions(client: &Client) -> Result<Vec<String>> {
     let page: Value = client
         .get("https://zzz.gachabase.net/timeline/__data.json")
         .send()
@@ -210,29 +223,34 @@ pub(crate) async fn recent_revisions(client: &Client) -> Result<Vec<String>> {
         })
         .context("Отсутствуют timelineRevisions")?;
     let rows = resolve(field(table, &table[0], "timelineRevisions")?, table, 0)?;
-    beta_revision_names(&rows)
+    revision_names(&rows)
 }
 
-fn beta_revision_names(rows: &Value) -> Result<Vec<String>> {
+fn revision_names(rows: &Value) -> Result<Vec<String>> {
     let mut revisions = Vec::new();
     for row in rows.as_array().context("Некорректная лента ревизий")? {
-        if row["branch"] == "beta"
+        if let Some(branch @ ("beta" | "release")) = row["branch"].as_str()
             && let (Some(version), Some(id), Some(time)) = (
                 row["version"].as_str(),
                 row["design_revision"].as_u64(),
                 row["design_timestamp"].as_u64(),
             )
         {
-            revisions.push((time, id, format!("beta_{version}_{id}")));
+            revisions.push((time, id, format!("{branch}_{version}_{id}")));
         }
     }
     revisions.sort_unstable_by(|a, b| b.cmp(a));
     let mut seen = std::collections::HashSet::new();
+    let mut counts = [0; 2];
     Ok(revisions
         .into_iter()
         .map(|(_, _, name)| name)
         .filter(|name| seen.insert(name.clone()))
-        .take(10)
+        .filter(|name| {
+            let count = &mut counts[usize::from(name.starts_with("release_"))];
+            *count += 1;
+            *count <= 10
+        })
         .collect())
 }
 
@@ -294,7 +312,8 @@ mod tests {
             .collect();
         rows.push(rows[0].clone());
         rows.push(json!({"branch":"release","version":"3.4.5","design_revision":13,"design_timestamp":100}));
-        let names = beta_revision_names(&json!(rows)).unwrap();
+        let mut names = revision_names(&json!(rows)).unwrap();
+        assert_eq!(names.remove(0), "release_3.4.5_13");
         assert_eq!(
             names,
             (1..=10)

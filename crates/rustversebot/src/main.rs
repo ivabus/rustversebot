@@ -1,10 +1,15 @@
+#![recursion_limit = "256"]
+
+mod agent_access;
 mod beta;
 mod bot_templates;
 mod db;
 mod handlers;
 mod promocodes;
+mod prompt;
 mod scheduler;
 mod season_time;
+mod telegram_html;
 mod templates;
 mod web;
 
@@ -37,6 +42,18 @@ enum Command {
     Endgame(String),
     /// Изменения агентов за последнюю бету: /betadiff [prev cur].
     BetaDiff(String),
+    /// Спросить о Zenless Zone Zero по данным GachaBase: /prompt <вопрос>.
+    Prompt(String),
+    /// Сравнить версии беты или релиза по данным GachaBase.
+    Diff(String),
+    /// Сбросить минутный лимит пользователя (для администратора).
+    ResetLimit(String),
+    /// Журнал пользователей ИИ (для администратора).
+    AiUsers(String),
+    /// Заблокировать доступ пользователя к ИИ (для администратора).
+    AiBan(String),
+    /// Восстановить доступ пользователя к ИИ (для администратора).
+    AiUnban(String),
     /// Show Deadly Assault details: /da [uid].
     #[command(rename = "da")]
     Da(String),

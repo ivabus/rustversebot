@@ -47,7 +47,62 @@ pub async fn command_handler(
             cmd_endgame_pair(&bot, chat_id, SeasonPosition::Previous, &state).await
         }
         Command::Endgame(id) => cmd_endgame(&bot, chat_id, &id, &state).await,
-        Command::BetaDiff(args) => crate::beta::command(&bot, chat_id, &args, &state).await,
+        Command::BetaDiff(args) => {
+            crate::beta::command(
+                &bot,
+                chat_id,
+                crate::agent_access::sender(&msg),
+                &args,
+                &state,
+                false,
+            )
+            .await
+        }
+        Command::Diff(args) => {
+            crate::beta::diff_command(
+                &bot,
+                chat_id,
+                crate::agent_access::sender(&msg),
+                &args,
+                &state,
+            )
+            .await
+        }
+        Command::AiUsers(args) => {
+            crate::agent_access::manage(
+                &bot,
+                &msg,
+                crate::agent_access::Action::Users,
+                &args,
+                &state,
+            )
+            .await
+        }
+        Command::AiBan(args) => {
+            crate::agent_access::manage(&bot, &msg, crate::agent_access::Action::Ban, &args, &state)
+                .await
+        }
+        Command::AiUnban(args) => {
+            crate::agent_access::manage(
+                &bot,
+                &msg,
+                crate::agent_access::Action::Unban,
+                &args,
+                &state,
+            )
+            .await
+        }
+        Command::ResetLimit(args) => {
+            crate::agent_access::manage(
+                &bot,
+                &msg,
+                crate::agent_access::Action::Reset,
+                &args,
+                &state,
+            )
+            .await
+        }
+        Command::Prompt(question) => crate::prompt::command(&bot, &msg, &question, &state).await,
         Command::TopDeadly => cmd_top(&bot, chat_id, "deadly_assault", &state).await,
         Command::TopShiyu => cmd_top(&bot, chat_id, "shiyu_defense", &state).await,
         Command::Cookie(cookie) => cmd_cookie(&bot, msg, &cookie, &state).await,
@@ -466,6 +521,13 @@ pub async fn callback_handler(
         bot.answer_callback_query(query.id).await?;
         return Ok(());
     };
+    if let Some(action) = data.strip_prefix("diff:") {
+        bot.answer_callback_query(query.id.clone()).await?;
+        if let Some(message) = &query.message {
+            crate::beta::picker(&bot, message.chat().id, Some(&query.from), action, &state).await?;
+        }
+        return Ok(());
+    }
     if let Some(endgame_callback) = parse_endgame_callback(data) {
         return handle_endgame_callback(&bot, query, endgame_callback, &state).await;
     }

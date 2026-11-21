@@ -1,183 +1,320 @@
-use std::collections::HashMap;
+use std::{
+    collections::{BTreeMap, HashMap},
+    sync::Arc,
+};
 
 use anyhow::{Context, Result, bail, ensure};
 use reqwest::Client;
-use serde::Deserialize;
+use rig_core::{
+    message::ToolName,
+    tool::{DynamicTool, ToolOutput},
+};
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use tokio::sync::Mutex;
 
-use crate::gachabase::{Comparison, Snapshots, recent_revisions};
+use crate::{
+    catalog::{self, Category, Index},
+    gachabase::{Comparison, Snapshots, recent_revisions},
+};
 
-const SECTIONS: &[&str] = &[
-    "skills",
-    "mindscapes",
-    "core_skills",
-    "tooltips",
-    "moves",
-    "base_stats",
-    "skill_data",
-    "unmapped_skill_data",
-    "promotions",
-    "potentials",
-    "forms",
-    "entity_skills",
-    "attack_properties",
-    "animator_patterns",
-];
+const PAGE_CHARS: usize = 4096;
 
-pub(crate) fn definitions() -> Value {
-    json!([{
-        "type": "function", "name": "read_kit", "strict": true,
-        "description": "Read part of any ZZZ agent's kit from GachaBase at the report levels. /core_skills contains the highest rank starting at index 0; other skill values use level 12. Use the input diff's agent_id for the character under analysis. Search by localized name or numeric entry ID to find JSON pointers, then read a pointer. An empty selector lists sections.",
-        "parameters": {"type":"object","additionalProperties":false,
-            "properties":{
-                "agent_id":{"type":"integer","description":"Numeric GachaBase agent ID (not a skill ID)."},
-                "revision":{"type":"string","description":"current or previous relative to the input diff, or an exact revision name such as beta_3.4.5_20699967."},
-                "language":{"type":"string","enum":["en","cn"]},
-                "selector":{"type":"string","description":"Name substring, exact record ID, or a JSON pointer such as /mindscapes/1/description/text. Array indices are zero-based."},
-                "offset":{"type":"integer","description":"Start at 0. To continue, copy next_offset from the result."}
-            }, "required":["agent_id","revision","language","selector","offset"]}
-    },{
-        "type":"function","name":"list_recent_revisions","strict":true,
-        "description":"List the ten latest distinct GachaBase beta design revision names, newest first. Pass a name directly to read_kit.",
-        "parameters":{"type":"object","properties":{},"required":[],"additionalProperties":false}
-    }])
+#[derive(Serialize)]
+pub(crate) struct ToolSpec {
+    name: &'static str,
+    description: &'static str,
+    parameters: Value,
 }
 
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct KitQuery {
-    agent_id: u64,
-    revision: String,
-    language: String,
-    selector: String,
-    offset: usize,
+pub(crate) fn definitions() -> Vec<ToolSpec> {
+    let category =
+        json!({"type":"string","enum":["agents","w-engines","drive-discs","bangboo","tutorials"]});
+    let language = json!({"type":"string","enum":["en","cn"]});
+    let offset = json!({"type":["integer","null"],"minimum":0,"description":"Start at 0 or null. Copy next_offset to continue."});
+    vec![
+        ToolSpec {
+            name: "list_recent_revisions",
+            description: "Recent GachaBase design revisions, newest first, up to ten each for beta and release.",
+            parameters: json!({"type":"object","properties":{},"required":[],"additionalProperties":false}),
+        },
+        ToolSpec {
+            name: "search_gachabase",
+            description: "Search the latest beta catalog by localized name, alias, slug or ID. Empty query browses a category. Pass category and a result ID to get_gachabase_entry.",
+            parameters: json!({"type":"object","additionalProperties":false,"properties":{
+                "category":category,"query":{"type":"string"},"language":language,"offset":offset
+            },"required":["category","query","language","offset"]}),
+        },
+        ToolSpec {
+            name: "get_gachabase_entry",
+            description: "Read a GachaBase record by category and ID. Null version reads the latest beta; pass an exact revision for history. Null selector reads the whole paginated entry. An empty string lists fields; JSON pointer reads a field, name or sub-record ID finds paths, text:<phrase> finds descriptions. Agent values are normalized at report levels.",
+            parameters: json!({"type":"object","additionalProperties":false,"properties":{
+                "category":category,"id":{"type":"integer","minimum":1},"language":language,
+                "version":{"type":["string","null"]},"selector":{"type":["string","null"]},"offset":offset
+            },"required":["category","id","language","version","selector","offset"]}),
+        },
+    ]
 }
 
-pub(crate) struct KitTools<'a> {
-    pub client: &'a Client,
-    pub comparison: &'a Comparison,
-    pub en: &'a Snapshots,
-    pub cn: &'a Snapshots,
-    cache: HashMap<(u64, String, String), Value>,
+#[derive(Clone, Copy, Hash, Eq, PartialEq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+enum Language {
+    En,
+    Cn,
+}
+
+impl Language {
+    fn upstream(self) -> &'static str {
+        match self {
+            Self::En => "en",
+            Self::Cn => "chs",
+        }
+    }
+}
+
+pub(crate) struct KitTools {
+    client: Client,
+    indexes: HashMap<(Category, Language), Index>,
+    entries: HashMap<(Category, u64, Language, String), Value>,
+    // Only large diffs are retained for paged access from the report's target entry.
+    report_changes: HashMap<(u64, Language, String), String>,
     recent: Option<Vec<String>>,
 }
 
-impl<'a> KitTools<'a> {
-    pub fn new(
-        client: &'a Client,
-        comparison: &'a Comparison,
-        en: &'a Snapshots,
-        cn: &'a Snapshots,
-    ) -> Self {
+impl KitTools {
+    pub fn new(client: Client) -> Self {
         Self {
             client,
-            comparison,
-            en,
-            cn,
-            cache: HashMap::new(),
+            indexes: HashMap::new(),
+            entries: HashMap::new(),
+            report_changes: HashMap::new(),
             recent: None,
         }
     }
 
-    pub async fn call(&mut self, name: &str, arguments: &str) -> Result<Value> {
-        match name {
-            "list_recent_revisions" => {
-                ensure!(
-                    serde_json::from_str::<Value>(arguments)? == json!({}),
-                    "Expected empty arguments"
-                );
-                if self.recent.is_none() {
-                    self.recent = Some(recent_revisions(self.client).await?);
+    pub fn report_input(
+        &mut self,
+        page: &Comparison,
+        en: Snapshots,
+        cn: Snapshots,
+    ) -> Result<Option<String>> {
+        let status = if en.prev.is_null() {
+            "added"
+        } else if en.cur.is_null() {
+            "removed"
+        } else {
+            "updated"
+        };
+        let mut input = json!({"agent_id":page.id,"agent":page.slug,"prev":page.prev,"cur":page.cur,"status":status});
+        let mut empty = true;
+        for (label, language, snapshots) in [("en", Language::En, en), ("cn", Language::Cn, cn)] {
+            let changes = snapshots.changes();
+            empty &= changes.is_empty();
+            input[label] = if status == "updated" && serde_json::to_vec(&changes)?.len() <= 8192 {
+                json!(changes)
+            } else {
+                let mut sections = BTreeMap::new();
+                for change in &changes {
+                    let path = change.path.strip_prefix("agent.").unwrap_or(&change.path);
+                    let section = path.split(['.', '[', ' ']).next().unwrap_or(path);
+                    *sections.entry(section).or_insert(0usize) += 1;
                 }
-                Ok(json!({"revisions":self.recent}))
+                self.report_changes.insert(
+                    (page.id, language, page.cur.clone()),
+                    serde_json::to_string(&changes)?,
+                );
+                json!({"change_count":changes.len(),"sections":sections,"selector":"@changes",
+                    "sample_paths":changes.iter().take(32).map(|c| &c.path).collect::<Vec<_>>()})
+            };
+            for (version, snapshot) in [(&page.prev, snapshots.prev), (&page.cur, snapshots.cur)] {
+                self.entries.insert(
+                    (Category::Agents, page.id, language, version.clone()),
+                    catalog::agent_entry(snapshot),
+                );
             }
-            "read_kit" => self.read(serde_json::from_str(arguments)?).await,
-            _ => bail!("Unknown tool: {name}"),
         }
+        if empty && status == "updated" {
+            return Ok(None);
+        }
+        Ok(Some(serde_json::to_string(&input)?))
     }
 
-    async fn read(&mut self, query: KitQuery) -> Result<Value> {
-        let (localized, lang) = match query.language.as_str() {
-            "en" => (self.en, "en"),
-            "cn" => (self.cn, "chs"),
-            _ => bail!("Expected language en or cn"),
-        };
-        let revision = match query.revision.as_str() {
-            "current" => self.comparison.cur.as_str(),
-            "previous" => self.comparison.prev.as_str(),
-            name => name,
-        };
-        ensure!(
-            !revision.is_empty() && query.agent_id > 0,
-            "Expected an agent ID and revision"
-        );
-        let snapshot = if query.agent_id == self.comparison.id && revision == self.comparison.cur {
-            &localized.cur
-        } else if query.agent_id == self.comparison.id && revision == self.comparison.prev {
-            &localized.prev
-        } else {
-            let key = (query.agent_id, revision.to_owned(), lang.to_owned());
-            match self.cache.entry(key) {
-                std::collections::hash_map::Entry::Occupied(entry) => entry.into_mut(),
-                std::collections::hash_map::Entry::Vacant(entry) => entry.insert(
-                    self.comparison
-                        .agent_snapshot(self.client, query.agent_id, revision, lang)
-                        .await?,
-                ),
+    pub fn into_tools(self) -> Vec<DynamicTool> {
+        let shared = Arc::new(Mutex::new(self));
+        definitions()
+            .into_iter()
+            .map(|spec| {
+                let shared = Arc::clone(&shared);
+                DynamicTool::new(
+                    ToolName::new(spec.name).expect("static tool name"),
+                    spec.description,
+                    spec.parameters,
+                    move |args| {
+                        let shared = Arc::clone(&shared);
+                        Box::pin(async move {
+                            let result = shared.lock().await.call(spec.name, args).await;
+                            Ok(ToolOutput::json(
+                                result.unwrap_or_else(|err| json!({"error":err.to_string()})),
+                            ))
+                        })
+                    },
+                )
+            })
+            .collect()
+    }
+
+    async fn revisions(&mut self) -> Result<&[String]> {
+        if self.recent.is_none() {
+            self.recent = Some(recent_revisions(&self.client).await?);
+        }
+        Ok(self.recent.as_deref().unwrap_or_default())
+    }
+
+    async fn call(&mut self, name: &str, args: Value) -> Result<Value> {
+        match name {
+            "list_recent_revisions" => {
+                ensure!(args == json!({}), "Expected empty arguments");
+                Ok(json!(self.revisions().await?))
             }
-        };
-        Ok(
-            json!({"agent_id":query.agent_id,"agent":snapshot.pointer("/agent/name/text"),
-            "revision":revision,"language":query.language,"result":fragment(snapshot, &query.selector, query.offset)?}),
-        )
+            "search_gachabase" => {
+                #[derive(Deserialize)]
+                #[serde(deny_unknown_fields)]
+                struct Search {
+                    category: Category,
+                    language: Language,
+                    query: String,
+                    offset: Option<usize>,
+                }
+                let q: Search = serde_json::from_value(args)?;
+                let index = match self.indexes.entry((q.category, q.language)) {
+                    std::collections::hash_map::Entry::Occupied(e) => e.into_mut(),
+                    std::collections::hash_map::Entry::Vacant(e) => e.insert(
+                        Index::load(&self.client, q.category, q.language.upstream()).await?,
+                    ),
+                };
+                index.search(q.category, &q.query, q.offset.unwrap_or_default())
+            }
+            "get_gachabase_entry" => {
+                #[derive(Deserialize)]
+                #[serde(deny_unknown_fields)]
+                struct Read {
+                    category: Category,
+                    id: u64,
+                    language: Language,
+                    version: Option<String>,
+                    selector: Option<String>,
+                    offset: Option<usize>,
+                }
+                let q: Read = serde_json::from_value(args)?;
+                ensure!(q.id > 0, "Expected positive ID");
+                let version = match q.version {
+                    Some(v) => v,
+                    None if self.indexes.contains_key(&(q.category, q.language)) => {
+                        self.indexes[&(q.category, q.language)].revision.clone()
+                    }
+                    None => self
+                        .revisions()
+                        .await?
+                        .iter()
+                        .find(|name| name.starts_with("beta_"))
+                        .context("No beta versions")?
+                        .clone(),
+                };
+                let key = (q.category, q.id, q.language, version.clone());
+                if q.category == Category::Agents && q.selector.as_deref() == Some("@changes") {
+                    let changes = self
+                        .report_changes
+                        .get(&(q.id, q.language, version.clone()))
+                        .context("No paged diff for this entry and version")?;
+                    return Ok(
+                        json!({"id":q.id,"version":version,"result":json_page(changes,q.offset.unwrap_or_default())?}),
+                    );
+                }
+                let entry = match self.entries.entry(key) {
+                    std::collections::hash_map::Entry::Occupied(e) => e.into_mut(),
+                    std::collections::hash_map::Entry::Vacant(e) => {
+                        crate::beta::revision_group(&version)?;
+                        e.insert(
+                            catalog::detail(
+                                &self.client,
+                                q.category,
+                                q.id,
+                                &version,
+                                q.language.upstream(),
+                            )
+                            .await?,
+                        )
+                    }
+                };
+                ensure!(!entry.is_null(), "Entry absent in this revision");
+                let offset = q.offset.unwrap_or_default();
+                let result = match q.selector {
+                    Some(selector) => fragment(entry, &selector, offset)?,
+                    None => json_page(&serde_json::to_string(entry)?, offset)?,
+                };
+                Ok(
+                    json!({"category":q.category,"id":q.id,"version":version,"language":match q.language {Language::En=>"en",Language::Cn=>"cn"},"result":result}),
+                )
+            }
+            _ => bail!("Unknown tool"),
+        }
     }
 }
 
-fn section<'a>(snapshot: &'a Value, key: &str) -> Option<&'a Value> {
-    if key == "tooltips" {
-        snapshot.get(key)
-    } else {
-        snapshot["agent"].get(key)
-    }
+fn json_page(serialized: &str, offset: usize) -> Result<Value> {
+    let mut chars = serialized.chars().skip(offset).peekable();
+    ensure!(
+        chars.peek().is_some(),
+        "Offset exceeds the length of this fragment"
+    );
+    let part: String = chars.by_ref().take(PAGE_CHARS).collect();
+    Ok(json!({"json_fragment":part,"next_offset":chars.next().map(|_| offset + PAGE_CHARS)}))
+}
+
+fn pointer_key(key: &str) -> String {
+    key.replace('~', "~0").replace('/', "~1")
 }
 
 fn fragment(snapshot: &Value, selector: &str, offset: usize) -> Result<Value> {
-    const PAGE_CHARS: usize = 4096;
     const PAGE_MATCHES: usize = 12;
+    ensure!(!snapshot.is_null(), "Character absent in this revision");
     if selector.is_empty() {
-        let sections: Vec<_> = SECTIONS
-            .iter()
-            .filter(|key| section(snapshot, key).is_some())
-            .map(|key| format!("/{key}"))
+        let sections: Vec<_> = snapshot
+            .as_object()
+            .into_iter()
+            .flat_map(|o| o.keys())
+            .map(|key| format!("/{}", pointer_key(key)))
             .collect();
         return Ok(json!({"sections":sections}));
     }
     if let Some(path) = selector.strip_prefix('/') {
         let (key, _) = path.split_once('/').unwrap_or((path, ""));
-        ensure!(SECTIONS.contains(&key), "Unknown kit section {key}");
-        let value = section(snapshot, key)
+        let decoded = key.replace("~1", "/").replace("~0", "~");
+        let value = snapshot
+            .get(&decoded)
             .and_then(|s| s.pointer(&path[key.len()..]))
             .context("Kit path does not exist in this revision")?;
         let serialized = serde_json::to_string(value)?;
-        let len = serialized.chars().count();
-        ensure!(
-            offset < len,
-            "Offset exceeds the length of this fragment ({len})"
-        );
-        if offset == 0 && len <= PAGE_CHARS {
+        if offset == 0 && serialized.chars().take(PAGE_CHARS + 1).count() <= PAGE_CHARS {
             return Ok(json!({"path":selector,"value":value}));
         }
-        let part: String = serialized.chars().skip(offset).take(PAGE_CHARS).collect();
-        let end = offset.saturating_add(PAGE_CHARS);
-        return Ok(
-            json!({"path":selector,"json_fragment":part,"next_offset":(end < len).then_some(end)}),
-        );
+        let mut page = json_page(&serialized, offset)?;
+        page["path"] = json!(selector);
+        return Ok(page);
     }
     let mut matches = Vec::new();
-    let term = selector.to_lowercase();
-    for key in SECTIONS {
-        if let Some(value) = section(snapshot, key) {
-            find_entries(value, &format!("/{key}"), &term, &mut matches);
+    let text = selector.strip_prefix("text:");
+    let term = text.unwrap_or(selector).trim().to_lowercase();
+    ensure!(!term.is_empty(), "Expected a non-empty search term");
+    if let Some(fields) = snapshot.as_object() {
+        for (key, value) in fields {
+            find_entries(
+                value,
+                &format!("/{}", pointer_key(key)),
+                &term,
+                text.is_some(),
+                &mut matches,
+            );
         }
     }
     let end = offset.saturating_add(PAGE_MATCHES).min(matches.len());
@@ -185,30 +322,39 @@ fn fragment(snapshot: &Value, selector: &str, offset: usize) -> Result<Value> {
     Ok(json!({"matches":matches[offset..end],"next_offset":(end < matches.len()).then_some(end)}))
 }
 
-fn find_entries(v: &Value, path: &str, term: &str, matches: &mut Vec<Value>) {
+fn find_entries(v: &Value, path: &str, term: &str, full_text: bool, matches: &mut Vec<Value>) {
     match v {
         Value::Object(fields) => {
             let name = v
                 .pointer("/name/text")
                 .or_else(|| v.get("name"))
                 .and_then(Value::as_str);
-            if name.is_some_and(|s| s.to_lowercase().contains(term))
-                || v["id"].as_u64().is_some_and(|id| id.to_string() == term)
+            if !full_text
+                && (name.is_some_and(|s| s.to_lowercase().contains(term))
+                    || v["id"].as_u64().is_some_and(|id| id.to_string() == term))
             {
                 matches
                     .push(json!({"path":path,"name":name,"id":v.get("id"),"level":v.get("level")}));
             }
             for (key, child) in fields {
-                if child.is_array() || child.is_object() {
-                    let key = key.replace('~', "~0").replace('/', "~1");
-                    find_entries(child, &format!("{path}/{key}"), term, matches);
+                if full_text || child.is_array() || child.is_object() {
+                    find_entries(
+                        child,
+                        &format!("{path}/{}", pointer_key(key)),
+                        term,
+                        full_text,
+                        matches,
+                    );
                 }
             }
         }
         Value::Array(items) => {
             for (i, child) in items.iter().enumerate() {
-                find_entries(child, &format!("{path}/{i}"), term, matches);
+                find_entries(child, &format!("{path}/{i}"), term, full_text, matches);
             }
+        }
+        Value::String(s) if full_text && s.to_lowercase().contains(term) => {
+            matches.push(json!({"path":path}));
         }
         _ => {}
     }
@@ -242,46 +388,25 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn tool_outputs_match_call_ids_revisions_and_languages() {
-        let client = Client::new();
+    async fn read_versioned_character_fields_without_network() {
         let page = Comparison::parse(PAGE).unwrap();
-        let snapshot = |text| json!({"agent":{"mindscapes":[{"description":text}]}});
-        let en = Snapshots {
-            prev: snapshot("before"),
-            cur: snapshot("after"),
+        let snapshots = || Snapshots {
+            prev: json!({"agent":{"skills":[{"id":8,"text":"older effect"}]}}),
+            cur: json!({"agent":{"skills":[{"id":8,"text":"new effect"}]}}),
         };
-        let cn = Snapshots {
-            prev: snapshot("以前"),
-            cur: snapshot("目前"),
-        };
-        let mut tools = KitTools::new(&client, &page, &en, &cn);
-        let call = |id, revision: &str, lang| {
-            json!({"type":"function_call","call_id":id,"name":"read_kit",
-            "arguments":json!({"agent_id":1601,"revision":revision,"language":lang,
-                "selector":"/mindscapes/0/description","offset":0}).to_string()})
-        };
-        let output = [
-            call("a", "previous", "cn"),
-            call("b", "current", "en"),
-            call("c", &page.prev, "en"),
-            call("d", "current", "unknown"),
-        ];
-        let results = crate::tool_outputs(&output, &mut tools).await.unwrap();
-        for (result, (id, text)) in
-            results
-                .iter()
-                .zip([("a", "以前"), ("b", "after"), ("c", "before")])
-        {
-            assert_eq!(result["type"], "function_call_output");
-            assert_eq!(result["call_id"], id);
-            let body: Value = serde_json::from_str(result["output"].as_str().unwrap()).unwrap();
-            assert_eq!(body["result"]["value"], text);
-            assert_eq!(
-                body["revision"],
-                if id == "b" { &page.cur } else { &page.prev }.as_str()
-            );
-        }
-        assert_eq!(results[3]["call_id"], "d");
-        assert!(results[3]["output"].as_str().unwrap().contains("error"));
+        let mut tools = KitTools::new(Client::new());
+        let input = tools
+            .report_input(&page, snapshots(), snapshots())
+            .unwrap()
+            .unwrap();
+        assert!(input.contains("older effect"));
+        let args = json!({"category":"agents","id":1601,"language":"cn","version":page.prev,"selector":"text:OLDER"});
+        let result = tools.call("get_gachabase_entry", args).await.unwrap();
+        assert_eq!(result["result"]["matches"][0]["path"], "/skills/0/text");
+        let args = json!({"category":"agents","id":1601,"language":"en","version":page.cur,"selector":"/skills/0/text"});
+        assert_eq!(
+            tools.call("get_gachabase_entry", args).await.unwrap()["result"]["value"],
+            "new effect"
+        );
     }
 }

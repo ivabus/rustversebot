@@ -3,7 +3,19 @@ use libsql::{Builder, Connection, Database, params};
 use serde::Serialize;
 use std::collections::HashMap;
 
-const SCHEMA_VERSION: i64 = 7;
+const SCHEMA_VERSION: i64 = 10;
+
+#[derive(Serialize)]
+pub struct AgentUser {
+    id: i64,
+    username: Option<String>,
+    name: String,
+    last_seen: String,
+    command: String,
+    decision: String,
+    requests: i64,
+    banned: bool,
+}
 
 /// A compact, normalized copy of a production season from Nanoka's index.
 /// Details and rendered cards deliberately remain outside the cache.
@@ -209,6 +221,49 @@ impl Db {
                  PRAGMA user_version = 7;"
             ).await.context("applying migration 7")?;
         }
+        if version < 8 {
+            // Old rows do not identify the model or prompts used to generate them.
+            tx.execute_batch(
+                "ALTER TABLE beta_reports RENAME TO beta_reports_v7;
+                 CREATE TABLE beta_reports(previous TEXT NOT NULL, current TEXT NOT NULL, agent INTEGER NOT NULL,
+                    model TEXT NOT NULL, prompt_version TEXT NOT NULL, report TEXT NOT NULL,
+                    PRIMARY KEY(previous,current,agent,model,prompt_version));
+                 INSERT INTO beta_reports SELECT previous,current,agent,'','',report FROM beta_reports_v7;
+                 DROP TABLE beta_reports_v7;
+                 PRAGMA user_version = 8;"
+            ).await.context("applying migration 8")?;
+        }
+        if version < 9 {
+            tx.execute_batch(
+                "DROP TRIGGER reset_beta_cursor;
+                 CREATE TABLE revision_cursors(chat_id INTEGER NOT NULL, branch TEXT NOT NULL,
+                    revision TEXT NOT NULL, PRIMARY KEY(chat_id,branch));
+                 INSERT INTO revision_cursors SELECT chat_id,'beta',revision FROM beta_cursors;
+                 DROP TABLE beta_cursors;
+                 CREATE TRIGGER reset_revision_cursor AFTER DELETE ON users
+                   WHEN NOT EXISTS (SELECT 1 FROM users WHERE chat_id=OLD.chat_id)
+                   BEGIN DELETE FROM revision_cursors WHERE chat_id=OLD.chat_id; END;
+                 CREATE TABLE ai_cooldowns(user_id INTEGER PRIMARY KEY, until_unix INTEGER NOT NULL);
+                 PRAGMA user_version=9;"
+            ).await.context("applying migration 9")?;
+        }
+        if version < 10 {
+            tx.execute_batch(
+                "CREATE TABLE ai_bans(user_id INTEGER PRIMARY KEY);
+                 CREATE TABLE ai_requests(id INTEGER PRIMARY KEY, user_id INTEGER NOT NULL,
+                   username TEXT, full_name TEXT NOT NULL, command TEXT NOT NULL,
+                   decision TEXT NOT NULL, at_unix INTEGER NOT NULL DEFAULT (unixepoch()));
+                 CREATE INDEX ai_requests_user ON ai_requests(user_id,id);
+                 CREATE TRIGGER start_ai_cooldown AFTER INSERT ON ai_requests
+                 WHEN NEW.decision='allowed' BEGIN
+                   INSERT INTO ai_cooldowns VALUES(NEW.user_id, NEW.at_unix+60)
+                   ON CONFLICT(user_id) DO UPDATE SET until_unix=excluded.until_unix;
+                 END;
+                 PRAGMA user_version=10;",
+            )
+            .await
+            .context("applying migration 10")?;
+        }
         tx.commit().await.context("committing migrations")?;
         Ok(())
     }
@@ -234,17 +289,79 @@ impl Db {
         .await
     }
 
-    pub async fn beta_cursors(&self, latest: &str) -> anyhow::Result<Vec<(i64, String)>> {
+    pub async fn admit_ai(
+        &self,
+        user: i64,
+        username: Option<&str>,
+        name: &str,
+        command: &str,
+        admin: i64,
+    ) -> anyhow::Result<String> {
+        // The decision, audit row, and cooldown trigger are one SQLite statement.
+        self.optional_string("INSERT INTO ai_requests(user_id,username,full_name,command,decision)
+            SELECT ?1,?2,?3,?4,CASE
+              WHEN ?1=?5 THEN 'admin'
+              WHEN EXISTS(SELECT 1 FROM ai_bans WHERE user_id=?1) THEN 'banned'
+              WHEN EXISTS(SELECT 1 FROM ai_cooldowns WHERE user_id=?1 AND until_unix>unixepoch()) THEN 'limited'
+              ELSE 'allowed' END RETURNING decision",params![user,username,name,command,admin])
+            .await?.context("missing AI access decision")
+    }
+
+    pub async fn ban_ai(&self, user: i64, banned: bool) -> anyhow::Result<()> {
+        let sql = if banned {
+            "INSERT OR IGNORE INTO ai_bans VALUES(?1)"
+        } else {
+            "DELETE FROM ai_bans WHERE user_id=?1"
+        };
+        self.connection()?.execute(sql, [user]).await?;
+        Ok(())
+    }
+
+    pub async fn ai_users(&self, page: u32) -> anyhow::Result<Vec<AgentUser>> {
+        let mut rows=self.connection()?.query(
+          "SELECT r.user_id,substr(r.username,1,32),substr(replace(replace(r.full_name,char(10),' '),char(13),' '),1,64),datetime(r.at_unix,'unixepoch','+3 hours'),
+                  r.command,r.decision,g.n,b.user_id IS NOT NULL
+           FROM (SELECT max(id) AS last_id,count(*) AS n FROM ai_requests GROUP BY user_id) g
+           JOIN ai_requests r ON r.id=g.last_id LEFT JOIN ai_bans b ON b.user_id=r.user_id
+           ORDER BY r.id DESC LIMIT 15 OFFSET ?1",[i64::from(page.saturating_sub(1))*15]).await?;
+        let mut users = Vec::new();
+        while let Some(r) = rows.next().await? {
+            users.push(AgentUser {
+                id: r.get(0)?,
+                username: r.get(1)?,
+                name: r.get(2)?,
+                last_seen: r.get(3)?,
+                command: r.get(4)?,
+                decision: r.get(5)?,
+                requests: r.get(6)?,
+                banned: r.get::<i64>(7)? != 0,
+            });
+        }
+        Ok(users)
+    }
+
+    pub async fn reset_ai_limit(&self, user: i64) -> anyhow::Result<()> {
+        self.connection()?
+            .execute("DELETE FROM ai_cooldowns WHERE user_id=?1", [user])
+            .await?;
+        Ok(())
+    }
+
+    pub async fn revision_cursors(
+        &self,
+        branch: &str,
+        latest: &str,
+    ) -> anyhow::Result<Vec<(i64, String)>> {
         let conn = self.connection()?;
         conn.execute(
-            "INSERT OR IGNORE INTO beta_cursors SELECT DISTINCT chat_id, ?1 FROM users",
-            [latest],
+            "INSERT OR IGNORE INTO revision_cursors SELECT DISTINCT chat_id, ?1, ?2 FROM users",
+            [branch, latest],
         )
         .await?;
         let mut rows = conn
             .query(
-                "SELECT chat_id, revision FROM beta_cursors WHERE revision != ?1 ORDER BY chat_id",
-                [latest],
+                "SELECT chat_id, revision FROM revision_cursors WHERE branch=?1 AND revision != ?2 ORDER BY chat_id",
+                [branch,latest],
             )
             .await?;
         let mut out = Vec::new();
@@ -254,25 +371,57 @@ impl Db {
         Ok(out)
     }
 
-    pub async fn advance_beta(&self, chat: i64, prev: &str, cur: &str) -> anyhow::Result<()> {
+    pub async fn advance_revision(
+        &self,
+        chat: i64,
+        branch: &str,
+        prev: &str,
+        cur: &str,
+    ) -> anyhow::Result<()> {
         self.connection()?
             .execute(
-                "UPDATE beta_cursors SET revision=?3 WHERE chat_id=?1 AND revision=?2",
-                params![chat, prev, cur],
+                "UPDATE revision_cursors SET revision=?4 WHERE chat_id=?1 AND branch=?2 AND revision=?3",
+                params![chat, branch, prev, cur],
             )
             .await?;
         Ok(())
     }
 
-    pub async fn beta_delivered(&self, chat: i64, cur: &str, id: u64) -> anyhow::Result<bool> {
-        Ok(self.optional_string("SELECT revision FROM beta_deliveries WHERE chat_id=?1 AND revision=?2 AND agent=?3",params![chat,cur,i64::try_from(id)?]).await?.is_some())
+    pub async fn delivered_beta_agents(
+        &self,
+        chat: i64,
+        cur: &str,
+    ) -> anyhow::Result<std::collections::HashSet<u64>> {
+        let mut rows = self
+            .connection()?
+            .query(
+                "SELECT agent FROM beta_deliveries WHERE chat_id=?1 AND revision=?2",
+                params![chat, cur],
+            )
+            .await?;
+        let mut agents = std::collections::HashSet::new();
+        while let Some(row) = rows.next().await? {
+            agents.insert(u64::try_from(row.get::<i64>(0)?)?);
+        }
+        Ok(agents)
     }
 
-    pub async fn mark_beta_delivered(&self, chat: i64, cur: &str, id: u64) -> anyhow::Result<()> {
+    pub async fn mark_beta_delivered(
+        &self,
+        chat: i64,
+        cur: &str,
+        ids: &[u64],
+    ) -> anyhow::Result<()> {
+        let ids: Vec<i64> = ids
+            .iter()
+            .copied()
+            .map(i64::try_from)
+            .collect::<Result<_, _>>()?;
         self.connection()?
             .execute(
-                "INSERT OR IGNORE INTO beta_deliveries VALUES(?1,?2,?3)",
-                params![chat, cur, i64::try_from(id)?],
+                "INSERT OR IGNORE INTO beta_deliveries(chat_id,revision,agent)
+                 SELECT ?1, ?2, value FROM json_each(?3)",
+                params![chat, cur, serde_json::to_string(&ids)?],
             )
             .await?;
         Ok(())
@@ -283,10 +432,12 @@ impl Db {
         prev: &str,
         cur: &str,
         id: u64,
+        model: &str,
+        prompt_version: &str,
     ) -> anyhow::Result<Option<String>> {
         self.optional_string(
-            "SELECT report FROM beta_reports WHERE previous=?1 AND current=?2 AND agent=?3",
-            params![prev, cur, i64::try_from(id)?],
+            "SELECT report FROM beta_reports WHERE previous=?1 AND current=?2 AND agent=?3 AND model=?4 AND prompt_version=?5",
+            params![prev, cur, i64::try_from(id)?, model, prompt_version],
         )
         .await
     }
@@ -295,12 +446,15 @@ impl Db {
         prev: &str,
         cur: &str,
         id: u64,
+        model: &str,
+        prompt_version: &str,
         text: &str,
     ) -> anyhow::Result<()> {
         self.connection()?
             .execute(
-                "INSERT OR IGNORE INTO beta_reports VALUES(?1,?2,?3,?4)",
-                params![prev, cur, i64::try_from(id)?, text],
+                "INSERT OR IGNORE INTO beta_reports(previous,current,agent,model,prompt_version,report)
+                 VALUES(?1,?2,?3,?4,?5,?6)",
+                params![prev, cur, i64::try_from(id)?, model, prompt_version, text],
             )
             .await?;
         Ok(())
@@ -922,28 +1076,158 @@ mod tests {
         let db = Db::connect(&url).await.unwrap();
         db.add_user(10, 1, "1", None).await.unwrap();
         db.add_user(20, 2, "2", None).await.unwrap();
-        assert!(db.beta_cursors("r1").await.unwrap().is_empty());
-        db.mark_beta_delivered(10, "r2", 1601).await.unwrap();
-        db.advance_beta(20, "r1", "r2").await.unwrap();
-        db.save_beta_report("r1", "r2", 1601, "reviewed text")
+        assert!(db.revision_cursors("beta", "r1").await.unwrap().is_empty());
+        assert!(
+            db.revision_cursors("release", "release_1")
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        db.mark_beta_delivered(10, "r2", &[1601, 1603])
+            .await
+            .unwrap();
+        db.advance_revision(20, "beta", "r1", "r2").await.unwrap();
+        db.save_beta_report("r1", "r2", 1601, "model", "v1", "reviewed text")
             .await
             .unwrap();
         drop(db);
         let db = Db::connect(&url).await.unwrap();
         assert_eq!(
-            db.beta_cursors("r2").await.unwrap(),
+            db.revision_cursors("beta", "r2").await.unwrap(),
             vec![(10, "r1".into())]
         );
-        assert!(db.beta_delivered(10, "r2", 1601).await.unwrap());
-        assert!(!db.beta_delivered(10, "r2", 1651).await.unwrap());
-        assert!(!db.beta_delivered(20, "r2", 1601).await.unwrap());
+        let delivered = db.delivered_beta_agents(10, "r2").await.unwrap();
+        assert_eq!(delivered, std::collections::HashSet::from([1601, 1603]));
+        assert!(db.delivered_beta_agents(20, "r2").await.unwrap().is_empty());
         assert_eq!(
-            db.beta_report("r1", "r2", 1601).await.unwrap().as_deref(),
+            db.beta_report("r1", "r2", 1601, "model", "v1")
+                .await
+                .unwrap()
+                .as_deref(),
             Some("reviewed text")
         );
         db.remove_user(10, "1").await.unwrap();
         db.add_user(10, 1, "3", None).await.unwrap();
-        assert!(db.beta_cursors("r2").await.unwrap().is_empty());
+        assert!(db.revision_cursors("beta", "r2").await.unwrap().is_empty());
+        assert!(
+            db.revision_cursors("release", "release_1")
+                .await
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn ai_cooldowns_are_atomic_global_expire_and_reset_per_user() {
+        let dir = tempfile::tempdir().unwrap();
+        let url = format!("file:{}", dir.path().join("limits.db").display());
+        let db = Db::connect(&url).await.unwrap();
+        let ask = |id| db.admit_ai(id, Some("name"), "Player", "prompt", 99);
+        let (a, b) = tokio::join!(ask(10), ask(10));
+        let mut outcomes = [a.unwrap(), b.unwrap()];
+        outcomes.sort();
+        assert_eq!(outcomes, ["allowed", "limited"]);
+        assert_eq!(ask(20).await.unwrap(), "allowed");
+        db.ban_ai(10, true).await.unwrap();
+        drop(db);
+        let db = Db::connect(&url).await.unwrap();
+        let ask = |id| db.admit_ai(id, None, "Player", "diff", 99);
+        db.reset_ai_limit(10).await.unwrap();
+        assert_eq!(ask(10).await.unwrap(), "banned");
+        db.ban_ai(10, false).await.unwrap();
+        assert_eq!(ask(10).await.unwrap(), "allowed");
+        assert_eq!(ask(20).await.unwrap(), "limited");
+        db.connection()
+            .unwrap()
+            .execute(
+                "UPDATE ai_cooldowns SET until_unix=unixepoch() WHERE user_id=20",
+                (),
+            )
+            .await
+            .unwrap();
+        assert_eq!(ask(20).await.unwrap(), "allowed");
+        assert_eq!(ask(99).await.unwrap(), "admin");
+        assert_eq!(ask(99).await.unwrap(), "admin");
+        let users = db.ai_users(1).await.unwrap();
+        assert_eq!(users.len(), 3);
+        let user = users.iter().find(|u| u.id == 10).unwrap();
+        assert_eq!(
+            (user.requests, user.decision.as_str(), user.banned),
+            (4, "allowed", false)
+        );
+    }
+
+    #[tokio::test]
+    async fn beta_report_cache_migrates_and_isolates_prompt_versions() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("previous-schema.db");
+        {
+            let database = Builder::new_local(&path).build().await.unwrap();
+            database.connect().unwrap().execute_batch(
+                "CREATE TABLE users(chat_id INTEGER);
+                 CREATE TABLE beta_cursors(chat_id INTEGER PRIMARY KEY,revision TEXT NOT NULL);
+                 INSERT INTO beta_cursors VALUES(77,'old_beta');
+                 CREATE TRIGGER reset_beta_cursor AFTER DELETE ON users BEGIN DELETE FROM beta_cursors WHERE chat_id=OLD.chat_id; END;
+                 CREATE TABLE beta_reports(previous TEXT, current TEXT, agent INTEGER, report TEXT,
+                     PRIMARY KEY(previous,current,agent));
+                 INSERT INTO beta_reports VALUES('before','after',42,'unversioned');
+                 PRAGMA user_version=7;"
+            ).await.unwrap();
+        }
+        let db = Db::connect(&format!("file:{}", path.display()))
+            .await
+            .unwrap();
+        assert_eq!(
+            db.revision_cursors("beta", "new").await.unwrap(),
+            vec![(77, "old_beta".into())]
+        );
+        assert!(
+            db.revision_cursors("release", "first")
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            db.beta_report("before", "after", 42, "sol", "v1")
+                .await
+                .unwrap()
+                .is_none()
+        );
+        for (model, version, report) in [
+            ("sol", "v1", "first"),
+            ("sol", "v2", "second"),
+            ("other", "v2", "third"),
+        ] {
+            db.save_beta_report("before", "after", 42, model, version, report)
+                .await
+                .unwrap();
+        }
+        for (model, version, report) in [
+            ("", "", "unversioned"),
+            ("sol", "v1", "first"),
+            ("sol", "v2", "second"),
+            ("other", "v2", "third"),
+        ] {
+            assert_eq!(
+                db.beta_report("before", "after", 42, model, version)
+                    .await
+                    .unwrap()
+                    .as_deref(),
+                Some(report)
+            );
+        }
+        assert!(
+            db.beta_report("after", "before", 42, "sol", "v2")
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            db.beta_report("before", "after", 43, "sol", "v2")
+                .await
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[tokio::test]

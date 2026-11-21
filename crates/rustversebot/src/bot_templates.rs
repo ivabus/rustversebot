@@ -30,11 +30,21 @@ impl<'a> BotTemplateSender<'a> {
         template: &str,
         data: &S,
     ) -> anyhow::Result<Message> {
+        self.send_to_thread(chat_id, None, template, data).await
+    }
+
+    pub async fn send_to_thread<S: Serialize>(
+        &self,
+        chat_id: ChatId,
+        thread: Option<teloxide::types::ThreadId>,
+        template: &str,
+        data: &S,
+    ) -> anyhow::Result<Message> {
         let rendered = self
             .templates
             .render(template, data)
             .with_context(|| format!("failed to render Telegram template {template}"))?;
-        send_rendered_message(self.bot, chat_id, rendered)
+        send_rendered_to_thread(self.bot, chat_id, thread, rendered)
             .await
             .with_context(|| format!("failed to send Telegram template {template}"))
     }
@@ -127,10 +137,32 @@ pub async fn send_rendered_message(
     chat_id: ChatId,
     rendered: RenderedTemplate,
 ) -> anyhow::Result<Message> {
-    validate_length("composed", &rendered.text, MESSAGE_LIMIT, "message")?;
+    send_rendered_to_thread(bot, chat_id, None, rendered).await
+}
+
+async fn send_rendered_to_thread(
+    bot: &Bot,
+    chat_id: ChatId,
+    thread: Option<teloxide::types::ThreadId>,
+    rendered: RenderedTemplate,
+) -> anyhow::Result<Message> {
+    // Telegram applies its limit after parsing entities. Escaped code and URLs
+    // can make the HTML source substantially longer than its visible text.
+    if rendered.parse_mode() == Some(ParseMode::Html) && rendered.text.len() > MESSAGE_LIMIT {
+        let visible = scraper::Html::parse_fragment(&rendered.text)
+            .root_element()
+            .text()
+            .collect::<String>();
+        validate_length("composed", &visible, MESSAGE_LIMIT, "message")?;
+    } else {
+        validate_length("composed", &rendered.text, MESSAGE_LIMIT, "message")?;
+    }
 
     let mode = selected_parse_mode(&rendered);
-    let request = bot.send_message(chat_id, rendered.text);
+    let mut request = bot.send_message(chat_id, rendered.text);
+    if let Some(thread) = thread {
+        request = request.message_thread_id(thread);
+    }
     match mode {
         Some(mode) => Ok(request.parse_mode(mode).await?),
         None => Ok(request.await?),
