@@ -52,6 +52,7 @@ impl<'a> BotTemplateSender<'a> {
     pub async fn send_message_with_keyboard<S: Serialize>(
         &self,
         chat_id: ChatId,
+        thread: Option<teloxide::types::ThreadId>,
         template: &str,
         data: &S,
         keyboard: InlineKeyboardMarkup,
@@ -59,10 +60,13 @@ impl<'a> BotTemplateSender<'a> {
         let rendered = self.templates.render(template, data)?;
         validate_length(template, &rendered.text, MESSAGE_LIMIT, "message")?;
         let mode = rendered.parse_mode();
-        let request = self
+        let mut request = self
             .bot
             .send_message(chat_id, rendered.text)
             .reply_markup(keyboard);
+        if let Some(thread) = thread {
+            request = request.message_thread_id(thread);
+        }
         match mode {
             Some(mode) => Ok(request.parse_mode(mode).await?),
             None => Ok(request.await?),

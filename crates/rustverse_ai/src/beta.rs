@@ -1,5 +1,8 @@
 //! Read character changes from GachaBase beta and release changelogs.
-use crate::gachabase::{Comparison, Snapshots, field, referenced, resolve};
+use crate::{
+    PromptProgress, catalog,
+    gachabase::{Comparison, Snapshots, field, referenced, resolve},
+};
 use anyhow::{Context, Result, bail, ensure};
 use reqwest::Client;
 use serde_json::Value;
@@ -12,6 +15,15 @@ pub struct AgentChange {
     pub slug: String,
     pub status: String,
     pub assets_changed: bool,
+    pub forms: Vec<AgentChange>,
+}
+
+impl AgentChange {
+    pub fn changed_members(&self) -> impl Iterator<Item = &AgentChange> {
+        std::iter::once(self)
+            .chain(&self.forms)
+            .filter(|member| member.status != "unchanged")
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -136,6 +148,7 @@ fn decode_group(body: &str, branch: Branch) -> Result<(Vec<Revision>, Option<Str
                                 .context("missing agent change status")?
                                 .into(),
                             assets_changed: entry["assets_changed"] == true,
+                            forms: Vec::new(),
                         },
                     );
                 }
@@ -299,6 +312,80 @@ pub fn diff_url(revision: &Revision, agent: &AgentChange) -> Result<reqwest::Url
     Ok(url)
 }
 
+impl Revision {
+    /// Alternate avatar IDs share a family number. Only an explicit entry in the
+    /// main avatar's forms list establishes ownership at the selected revision.
+    pub async fn group_forms(&mut self, client: &Client) -> Result<()> {
+        let mut grouped: BTreeMap<_, _> = self
+            .agents
+            .iter()
+            .filter(|agent| agent.id % 10 == 1)
+            .map(|agent| (agent.id, agent.clone()))
+            .collect();
+        for (revision, removed) in [(&self.current, false), (&self.previous, true)] {
+            let mut families = BTreeMap::<u64, Vec<&AgentChange>>::new();
+            for agent in &self.agents {
+                if agent.id % 10 != 1
+                    && matches!(agent.status.as_str(), "deleted" | "removed") == removed
+                {
+                    families
+                        .entry(agent.id / 10 * 10 + 1)
+                        .or_default()
+                        .push(agent);
+                }
+            }
+            if families.is_empty() {
+                continue;
+            }
+            let roster =
+                catalog::Index::load(client, catalog::Category::Agents, "en", revision).await?;
+            for (candidate, members) in families {
+                let owner = if roster.contains(candidate) {
+                    catalog::detail(client, catalog::Category::Agents, candidate, revision, "en")
+                        .await?
+                } else {
+                    Value::Null
+                };
+                for member in members {
+                    attach_form(&mut grouped, member, &owner);
+                }
+            }
+        }
+        self.agents = grouped.into_values().collect();
+        Ok(())
+    }
+}
+
+fn attach_form(grouped: &mut BTreeMap<u64, AgentChange>, agent: &AgentChange, main: &Value) {
+    let form = main["forms"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .find(|form| form["id"].as_u64() == Some(agent.id));
+    let (Some(id), Some(slug), Some(form)) = (main["id"].as_u64(), main["slug"].as_str(), form)
+    else {
+        grouped.insert(agent.id, agent.clone());
+        return;
+    };
+    let owner = grouped.entry(id).or_insert_with(|| AgentChange {
+        id,
+        slug: slug.into(),
+        name: main
+            .pointer("/name/text")
+            .and_then(Value::as_str)
+            .unwrap_or(slug)
+            .into(),
+        status: "unchanged".into(),
+        assets_changed: false,
+        forms: Vec::new(),
+    });
+    let mut member = agent.clone();
+    if let Some(name) = form.pointer("/name/text").and_then(Value::as_str) {
+        member.name = name.into();
+    }
+    owner.forms.push(member);
+}
+
 pub async fn agent_report(
     client: &Client,
     revision: &Revision,
@@ -306,6 +393,60 @@ pub async fn agent_report(
     key: &str,
     model: &str,
 ) -> Result<String> {
+    report_with_progress(client, revision, agent, key, model, None).await
+}
+
+pub async fn report_with_progress(
+    client: &Client,
+    revision: &Revision,
+    agent: &AgentChange,
+    key: &str,
+    model: &str,
+    progress: Option<tokio::sync::watch::Sender<PromptProgress>>,
+) -> Result<String> {
+    let mut tools = crate::kit::KitTools::new(client.clone());
+    let mut parts = Vec::new();
+    let mut assets = Vec::new();
+    for member in agent.changed_members() {
+        let (page, en, cn) = report_snapshots(client, revision, member).await?;
+        if let Some(input) = tools.report_input(&page, en, cn)? {
+            parts.push(if agent.forms.is_empty() {
+                input
+            } else {
+                format!("{} (ID {}):\n{input}", member.name, member.id)
+            });
+        }
+        if member.assets_changed {
+            assets.push(member.name.as_str());
+        }
+    }
+    let input = (!parts.is_empty()).then(|| {
+        let mut input = parts.join("\n\n");
+        if !agent.forms.is_empty() {
+            input = format!(
+                "Подготовь один отчёт для {} (ID {}). Записи относятся к одному агенту и его формам. Общие изменения опиши один раз, отличия привяжи к названиям форм. При необходимости сверяй механику с основным агентом.\n\n{input}",
+                agent.name, agent.id
+            );
+        }
+        input
+    });
+    let text = crate::write_report(tools, input, key, model, progress).await?;
+    let mut report =
+        crate::format_report(&agent.name, &revision.previous, &revision.current, &text);
+    if !assets.is_empty() {
+        report.push_str(&format!(
+            "\n\n### Ресурсы персонажа\n- Обновлены игровые ресурсы: {}.",
+            assets.join(", ")
+        ));
+    }
+    Ok(report)
+}
+
+async fn report_snapshots(
+    client: &Client,
+    revision: &Revision,
+    agent: &AgentChange,
+) -> Result<(Comparison, Snapshots, Snapshots)> {
     let url = diff_url(revision, agent)?;
     let page = Comparison::parse(url.as_str())?;
     let comparison = &page;
@@ -328,13 +469,7 @@ pub async fn agent_report(
         }
     };
     let (en, cn) = tokio::try_join!(snapshots("en"), snapshots("chs"))?;
-    let mut report = super::analyze_snapshots(client, page, en, cn, key, model).await?;
-    if agent.assets_changed {
-        report.push_str(
-            "\n\n### Ресурсы персонажа\n- GachaBase отметил обновление игровых ресурсов.",
-        );
-    }
-    Ok(report)
+    Ok((page, en, cn))
 }
 
 #[cfg(test)]
@@ -342,15 +477,47 @@ mod tests {
     use super::*;
     use serde_json::json;
 
-    #[test]
-    fn direct_comparison_respects_presence_at_the_endpoints() {
-        let agent = |id, status: &str| AgentChange {
+    fn agent(id: u64, status: &str) -> AgentChange {
+        AgentChange {
             id,
             name: format!("Agent {id}"),
             slug: format!("agent-{id}"),
             status: status.into(),
             assets_changed: false,
-        };
+            forms: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn form_changes_share_one_owner_even_if_only_the_form_changed() {
+        let main = json!({"id":1601, "slug":"sunbringer", "name":{"text":"Sunbringer"},
+            "forms":[{"id":1602,"name":{"text":"Lindverne"}},{"id":1603,"name":{"text":"Dracaene"}}]});
+        for main_changed in [false, true] {
+            let mut grouped = BTreeMap::new();
+            if main_changed {
+                grouped.insert(1601, agent(1601, "updated"));
+            }
+            attach_form(&mut grouped, &agent(1602, "removed"), &main);
+            attach_form(&mut grouped, &agent(1603, "updated"), &main);
+            attach_form(&mut grouped, &agent(1604, "new"), &main);
+            assert_eq!(grouped.keys().copied().collect::<Vec<_>>(), [1601, 1604]);
+            let owner = &grouped[&1601];
+            assert_eq!(owner.forms[1].name, "Dracaene");
+            assert_eq!(owner.forms[0].status, "removed");
+            let ids: Vec<_> = owner.changed_members().map(|a| a.id).collect();
+            assert_eq!(
+                ids,
+                if main_changed {
+                    vec![1601, 1602, 1603]
+                } else {
+                    vec![1602, 1603]
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn direct_comparison_respects_presence_at_the_endpoints() {
         let rows = [
             Revision {
                 previous: "release_3.2.0_1".into(),

@@ -50,7 +50,7 @@ pub async fn command_handler(
         Command::BetaDiff(args) => {
             crate::beta::command(
                 &bot,
-                chat_id,
+                (&msg).into(),
                 crate::agent_access::sender(&msg),
                 &args,
                 &state,
@@ -61,7 +61,7 @@ pub async fn command_handler(
         Command::Diff(args) => {
             crate::beta::diff_command(
                 &bot,
-                chat_id,
+                (&msg).into(),
                 crate::agent_access::sender(&msg),
                 &args,
                 &state,
@@ -534,7 +534,14 @@ pub async fn callback_handler(
     if let Some(action) = data.strip_prefix("diff:") {
         bot.answer_callback_query(query.id.clone()).await?;
         if let Some(message) = &query.message {
-            crate::beta::picker(&bot, message.chat().id, Some(&query.from), action, &state).await?;
+            let address = message.regular_message().map(Into::into).unwrap_or(
+                crate::prompt::MessageAddress {
+                    chat: message.chat().id,
+                    thread: None,
+                    message_id: message.id(),
+                },
+            );
+            crate::beta::picker(&bot, address, Some(&query.from), action, &state).await?;
         }
         return Ok(());
     }
@@ -1360,6 +1367,7 @@ async fn send_uid_choice(
     BotTemplateSender::new(bot, &state.templates)
         .send_message_with_keyboard(
             chat_id,
+            None,
             "choose_uid",
             &serde_json::json!({ "event": event }),
             uid_choice_keyboard(&users, kind)?,

@@ -50,6 +50,10 @@ pub(crate) struct Index {
 }
 
 impl Index {
+    pub(crate) fn contains(&self, id: u64) -> bool {
+        self.entries.iter().any(|entry| entry.id == id)
+    }
+
     pub async fn load(
         client: &Client,
         category: Category,

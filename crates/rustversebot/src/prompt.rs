@@ -4,7 +4,7 @@ use serde_json::json;
 use std::time::Duration;
 use teloxide::{
     prelude::*,
-    types::{MessageId, ParseMode},
+    types::{MessageId, ParseMode, ThreadId},
 };
 use tokio::{sync::watch, time::Instant};
 
@@ -21,7 +21,7 @@ const GROUP_INTERVAL: Duration = Duration::from_secs(15);
 const DRAFT_REFRESH: Duration = Duration::from_secs(20);
 
 #[derive(Clone, Copy)]
-enum LiveMessage {
+pub(crate) enum LiveMessage {
     Draft,
     Group(MessageId),
 }
@@ -67,6 +67,39 @@ struct PromptOutput {
     model: String,
 }
 
+pub(crate) struct LiveOutput<'a> {
+    pub bot: &'a Bot,
+    pub templates: &'a TemplateEngine,
+    pub address: MessageAddress,
+}
+
+#[derive(Clone, Copy)]
+pub(crate) struct MessageAddress {
+    pub chat: ChatId,
+    pub thread: Option<ThreadId>,
+    pub message_id: MessageId,
+}
+
+impl From<&Message> for MessageAddress {
+    fn from(msg: &Message) -> Self {
+        Self {
+            chat: msg.chat.id,
+            thread: topic(msg),
+            message_id: msg.id,
+        }
+    }
+}
+
+impl PromptOutput {
+    fn live(&self) -> LiveOutput<'_> {
+        LiveOutput {
+            bot: &self.bot,
+            templates: &self.state.templates,
+            address: (&self.msg).into(),
+        }
+    }
+}
+
 // Ordinary supergroup replies may carry a reply-chain ID even outside a forum.
 // Only a Telegram topic identifies a separate conversation within a chat.
 fn topic(msg: &Message) -> Option<teloxide::types::ThreadId> {
@@ -78,6 +111,16 @@ fn footer(
     templates: &TemplateEngine,
     model: &str,
     progress: &PromptProgress,
+) -> Result<RenderedTemplate> {
+    status_footer(templates, model, progress, None, None)
+}
+
+pub(crate) fn status_footer(
+    templates: &TemplateEngine,
+    model: &str,
+    progress: &PromptProgress,
+    diff_stage: Option<&str>,
+    agent: Option<&str>,
 ) -> Result<RenderedTemplate> {
     // Keep even a malformed configured model name within Telegram's message limit.
     let model: String = model.chars().take(128).collect();
@@ -96,7 +139,7 @@ fn footer(
     });
     templates.render(
         "prompt_status",
-        &json!({"model":model,"p":progress,"cost":cost}),
+        &json!({"model":model,"p":progress,"cost":cost,"diff_stage":diff_stage,"agent":agent.map(|s| s.chars().take(100).collect::<String>())}),
     )
 }
 
@@ -144,7 +187,7 @@ enum Update {
     Unavailable,
 }
 
-impl PromptOutput {
+impl LiveOutput<'_> {
     // teloxide 0.13 predates sendMessageDraft. Never expose its tokenized URL in errors.
     async fn draft(&self, text: &str) -> Update {
         let Ok(url) = self
@@ -154,8 +197,8 @@ impl PromptOutput {
         else {
             return Update::Unavailable;
         };
-        let mut body = json!({"chat_id":self.msg.chat.id.0,"draft_id":self.msg.id.0.max(1),"text":text,"parse_mode":"HTML"});
-        if let Some(thread) = topic(&self.msg) {
+        let mut body = json!({"chat_id":self.address.chat.0,"draft_id":self.address.message_id.0.max(1),"text":text,"parse_mode":"HTML"});
+        if let Some(thread) = self.address.thread {
             body["message_thread_id"] = json!(thread);
         }
         let Ok(response) = self
@@ -183,13 +226,17 @@ impl PromptOutput {
         Update::Unavailable
     }
 
-    async fn edit(&self, id: MessageId, text: &str) -> Result<(), teloxide::RequestError> {
-        match self
-            .bot
-            .edit_message_text(self.msg.chat.id, id, text)
-            .parse_mode(ParseMode::Html)
-            .await
-        {
+    async fn edit(
+        &self,
+        id: MessageId,
+        text: &str,
+        mode: Option<ParseMode>,
+    ) -> Result<(), teloxide::RequestError> {
+        let mut request = self.bot.edit_message_text(self.address.chat, id, text);
+        if let Some(mode) = mode {
+            request = request.parse_mode(mode);
+        }
+        match request.await {
             Ok(_) | Err(teloxide::RequestError::Api(teloxide::ApiError::MessageNotModified)) => {
                 Ok(())
             }
@@ -197,19 +244,21 @@ impl PromptOutput {
         }
     }
 
-    async fn start(&self, status: RenderedTemplate) -> Result<LiveMessage> {
-        if self.msg.chat.is_private() && matches!(self.draft(&status.text).await, Update::Sent) {
+    pub(crate) async fn start(&self, status: RenderedTemplate) -> Result<LiveMessage> {
+        if self.address.chat.is_user() && matches!(self.draft(&status.text).await, Update::Sent) {
             return Ok(LiveMessage::Draft);
         }
         let message = self.send(status, None).await?;
         Ok(LiveMessage::Group(message))
     }
 
-    async fn updates(
+    pub(crate) async fn updates(
         &self,
         target: LiveMessage,
         mut progress: watch::Receiver<PromptProgress>,
         mut last: String,
+        retry_at: &mut Option<Instant>,
+        render: impl Fn(&PromptProgress) -> Result<String>,
     ) {
         let spacing = match target {
             LiveMessage::Draft => DRAFT_INTERVAL,
@@ -218,65 +267,75 @@ impl PromptOutput {
         let mut sent = Instant::now();
         let mut next = sent + spacing;
         let mut shown = None;
-        let mut retry_at = None;
-        while let Some(mut p) = next_update(
-            &mut progress,
-            target,
-            shown.as_deref(),
-            next,
-            retry_at.take(),
-        )
-        .await
+        while let Some(mut p) =
+            next_update(&mut progress, target, shown.as_deref(), next, *retry_at).await
         {
+            *retry_at = None;
             next = Instant::now() + spacing;
             // A text delta can arrive in the same watch snapshot as a new stage.
             // Make sure the first edit for that stage actually displays its name.
             if target.new_research_stage(&p, shown.as_deref()) {
                 p.stage = PromptStage::Researching;
             }
-            let Ok(parts) = messages(
-                &self.state.templates,
-                &self.model,
-                &p,
-                &self.question,
-                &p.text,
-                true,
-            ) else {
+            let Ok(text) = render(&p) else {
                 return;
             };
-            let text = &parts[0].text;
             let refresh = matches!(target, LiveMessage::Draft) && sent.elapsed() >= DRAFT_REFRESH;
-            if *text == last && !refresh {
+            if text == last && !refresh {
                 shown = p.research_status;
                 continue;
             }
-            let update = match target {
-                LiveMessage::Draft => self.draft(text).await,
-                LiveMessage::Group(id) => match self.edit(id, text).await {
-                    Ok(()) => Update::Sent,
-                    Err(teloxide::RequestError::RetryAfter(wait)) => Update::Wait(wait.duration()),
-                    Err(teloxide::RequestError::Network(_)) => Update::Wait(spacing),
-                    Err(_) => Update::Unavailable,
-                },
-            };
+            let update = self.update(target, &text, spacing).await;
             match update {
                 Update::Sent => {
-                    last.clone_from(text);
+                    last = text;
                     sent = Instant::now();
                     shown = p.research_status;
                     next = sent + spacing;
                 }
                 Update::Wait(wait) => {
-                    retry_at = Some(Instant::now() + wait.max(Duration::from_secs(1)));
+                    *retry_at = Some(Instant::now() + wait.max(Duration::from_secs(1)));
                 }
                 Update::Unavailable => return,
             }
         }
     }
 
+    async fn update(&self, target: LiveMessage, text: &str, spacing: Duration) -> Update {
+        match target {
+            LiveMessage::Draft => self.draft(text).await,
+            LiveMessage::Group(id) => match self.edit(id, text, Some(ParseMode::Html)).await {
+                Ok(()) => Update::Sent,
+                Err(teloxide::RequestError::RetryAfter(wait)) => Update::Wait(wait.duration()),
+                Err(teloxide::RequestError::Network(_)) => Update::Wait(spacing),
+                Err(_) => Update::Unavailable,
+            },
+        }
+    }
+
+    pub(crate) async fn show_stage(
+        &self,
+        target: LiveMessage,
+        text: &str,
+        retry_at: &mut Option<Instant>,
+    ) {
+        for _ in 0..crate::scheduler::SchedulerSettings::from_env()
+            .retry_attempts
+            .max(1)
+        {
+            if let Some(at) = retry_at.take() {
+                tokio::time::sleep_until(at).await;
+            }
+            match self.update(target, text, GROUP_INTERVAL).await {
+                Update::Wait(wait) => *retry_at = Some(Instant::now() + wait),
+                _ => return,
+            }
+        }
+    }
+
     // Replace the group's status with the first final chunk, and append subsequent
     // chunks. Retry only the chunk Telegram rejected. A deleted status can be replaced.
-    async fn send(
+    pub(crate) async fn send(
         &self,
         rendered: RenderedTemplate,
         mut edit: Option<MessageId>,
@@ -284,10 +343,10 @@ impl PromptOutput {
         let attempts = crate::scheduler::SchedulerSettings::from_env()
             .retry_attempts
             .max(1);
-        let sender = BotTemplateSender::new(&self.bot, &self.state.templates);
+        let sender = BotTemplateSender::new(self.bot, self.templates);
         for attempt in 1..=attempts {
             if let Some(id) = edit {
-                match self.edit(id, &rendered.text).await {
+                match self.edit(id, &rendered.text, rendered.parse_mode()).await {
                     Ok(()) => return Ok(id),
                     Err(teloxide::RequestError::Api(
                         teloxide::ApiError::MessageCantBeEdited
@@ -301,7 +360,7 @@ impl PromptOutput {
                 }
             }
             match sender
-                .send_rendered_to_thread(self.msg.chat.id, topic(&self.msg), rendered.clone())
+                .send_rendered_to_thread(self.address.chat, self.address.thread, rendered.clone())
                 .await
             {
                 Ok(msg) => return Ok(msg.id),
@@ -388,7 +447,7 @@ async fn answer(
     let initial = PromptProgress::default();
     let status = messages(&state.templates, model, &initial, question, "", true)?.remove(0);
     let last = status.text.clone();
-    let target = output.start(status).await?;
+    let target = output.live().start(status).await?;
     slot.send(Box::pin(deliver(output, session, target, last, initial)));
     Ok(())
 }
@@ -412,7 +471,18 @@ async fn deliver(
     };
     // Finish an in-flight Telegram edit before delivering the permanent answer,
     // so a delayed status update cannot overwrite it.
-    let (answer, ()) = tokio::join!(generate, output.updates(target, rx.clone(), last));
+    let live = output.live();
+    let mut retry_at = None;
+    let (answer, ()) = tokio::join!(
+        generate,
+        live.updates(target, rx.clone(), last, &mut retry_at, |p| {
+            Ok(
+                messages(&state.templates, model, p, question, &p.text, true)?
+                    .remove(0)
+                    .text,
+            )
+        })
+    );
     let mut stats = rx.borrow().clone();
     let parts = match &answer {
         Ok(text) => {
@@ -439,8 +509,11 @@ async fn deliver(
         LiveMessage::Draft => None,
     };
     let mut first_saved = None;
+    if let Some(at) = retry_at {
+        tokio::time::sleep_until(at).await;
+    }
     for part in parts {
-        let id = output.send(part, edit.take()).await?.0;
+        let id = live.send(part, edit.take()).await?.0;
         if let Ok(text) = &answer {
             let saved = match first_saved {
                 Some(first) => state.db.save_prompt_part(msg.chat.id.0, first, id).await,

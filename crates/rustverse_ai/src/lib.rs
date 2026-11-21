@@ -170,17 +170,6 @@ pub async fn analyze(url: &str, api_key: &str, model: &str) -> Result<String> {
         .timeout(Duration::from_secs(180))
         .build()?;
     let (en, cn) = tokio::try_join!(page.fetch(&client, "en"), page.fetch(&client, "chs"))?;
-    analyze_snapshots(&client, page, en, cn, api_key, model).await
-}
-
-async fn analyze_snapshots(
-    client: &Client,
-    page: gachabase::Comparison,
-    en: gachabase::Snapshots,
-    cn: gachabase::Snapshots,
-    api_key: &str,
-    model: &str,
-) -> Result<String> {
     let name = en
         .cur
         .pointer("/agent/name/text")
@@ -188,25 +177,32 @@ async fn analyze_snapshots(
         .and_then(Value::as_str)
         .unwrap_or(&page.slug)
         .to_owned();
-    let prev = page.prev.clone();
-    let cur = page.cur.clone();
-    let mut tools = kit::KitTools::new(client.clone());
-    let text = match tools.report_input(&page, en, cn)? {
-        None => "Игровых изменений нет.".to_owned(),
-        Some(input) => {
-            run_agent(
-                &OpenAIConfig::new(api_key.to_owned()),
-                model,
-                tools,
-                None,
-                input,
-                &[],
-                None,
-            )
-            .await?
-        }
+    let mut tools = kit::KitTools::new(client);
+    let input = tools.report_input(&page, en, cn)?;
+    let text = write_report(tools, input, api_key, model, None).await?;
+    Ok(format_report(&name, &page.prev, &page.cur, &text))
+}
+
+async fn write_report(
+    tools: kit::KitTools,
+    input: Option<String>,
+    key: &str,
+    model: &str,
+    progress: Option<tokio::sync::watch::Sender<PromptProgress>>,
+) -> Result<String> {
+    let Some(input) = input else {
+        return Ok("Игровых изменений нет.".into());
     };
-    Ok(format_report(&name, &prev, &cur, &text))
+    run_agent(
+        &OpenAIConfig::new(key.to_owned()),
+        model,
+        tools,
+        None,
+        input,
+        &[],
+        progress.map(Preview::Progress),
+    )
+    .await
 }
 
 struct FinishAtLimit;
