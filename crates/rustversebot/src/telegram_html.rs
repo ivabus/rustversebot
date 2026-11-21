@@ -27,6 +27,21 @@ struct Output {
 }
 
 impl Output {
+    fn with_question(question: &str, limit: usize) -> Self {
+        let mut out = Self {
+            limit,
+            ..Self::default()
+        };
+        out.write(question, &[Entity::new("<blockquote>", "</blockquote>")]);
+        out.break_lines = 2;
+        out
+    }
+
+    fn finish(mut self) -> Vec<String> {
+        self.finish_chunk();
+        self.chunks
+    }
+
     fn style(&mut self, next: &[Entity]) {
         let shared = self
             .active
@@ -100,11 +115,14 @@ fn link(url: &str) -> Option<Entity> {
     })
 }
 
-pub fn chunks(markdown: &str, limit: usize) -> Vec<String> {
-    let mut out = Output {
-        limit,
-        ..Output::default()
-    };
+pub fn plain_chunks(question: &str, text: &str, limit: usize) -> Vec<String> {
+    let mut out = Output::with_question(question, limit);
+    out.write(text, &[]);
+    out.finish()
+}
+
+pub fn chunks(question: &str, markdown: &str, limit: usize) -> Vec<String> {
+    let mut out = Output::with_question(question, limit);
     let mut styles = Vec::<Entity>::new();
     let mut depths = Vec::new();
     let mut lists = Vec::<Option<u64>>::new();
@@ -176,13 +194,12 @@ pub fn chunks(markdown: &str, limit: usize) -> Vec<String> {
             _ => {}
         }
     }
-    out.finish_chunk();
-    out.chunks
+    out.finish()
 }
 
 /// Complete an open inline span for this preview only. CommonMark decides
 /// whether a suffix actually closes a span, so underscores inside IDs survive.
-pub fn preview(markdown: &str, limit: usize) -> String {
+pub fn preview(question: &str, markdown: &str, limit: usize) -> String {
     let mut source = markdown.to_owned();
     if let Some(pos) = source.rfind("](")
         && !source[pos + 2..].contains([')', '\n'])
@@ -214,10 +231,23 @@ pub fn preview(markdown: &str, limit: usize) -> String {
             }
         }
     }
-    chunks(&source, limit)
-        .into_iter()
-        .next()
-        .unwrap_or_default()
+    // Leave room for the live answer. The persistent reply includes the entire question.
+    let mut units = 0;
+    let preview_question = question
+        .char_indices()
+        .find_map(|(i, ch)| {
+            units += ch.len_utf16();
+            (units > limit / 2).then_some(i)
+        })
+        .map(|i| format!("{}…", &question[..i]));
+    chunks(
+        preview_question.as_deref().unwrap_or(question),
+        &source,
+        limit,
+    )
+    .into_iter()
+    .next()
+    .unwrap_or_default()
 }
 
 #[cfg(test)]
@@ -227,6 +257,7 @@ mod tests {
     #[test]
     fn renders_only_telegram_entities_and_reopens_long_spans() {
         let html = chunks(
+            "",
             "## Гайд\n\n**Урон** и *шанс* · [источник](https://example.com/?a=1&b=2) · `<x>` · [ссылка](javascript:foo) <bad>",
             MESSAGE_LIMIT,
         );
@@ -242,7 +273,7 @@ mod tests {
             assert!(s.contains(part), "{s}");
         }
         assert!(!s.contains("javascript:"));
-        let pages = chunks(&format!("**{}**", "🌙".repeat(2050)), MESSAGE_LIMIT);
+        let pages = chunks("", &format!("**{}**", "🌙".repeat(2050)), MESSAGE_LIMIT);
         assert_eq!(pages.len(), 2);
         assert!(
             pages
@@ -252,13 +283,16 @@ mod tests {
     }
     #[test]
     fn partial_markup_is_balanced() {
-        assert_eq!(preview("Урон **вырос", MESSAGE_LIMIT), "Урон <b>вырос</b>");
         assert_eq!(
-            preview("см. [Гайд](https://exam", MESSAGE_LIMIT),
+            preview("", "Урон **вырос", MESSAGE_LIMIT),
+            "Урон <b>вырос</b>"
+        );
+        assert_eq!(
+            preview("", "см. [Гайд](https://exam", MESSAGE_LIMIT),
             "см. Гайд"
         );
         assert_eq!(
-            preview("beta_3.4.5_20699967", MESSAGE_LIMIT),
+            preview("", "beta_3.4.5_20699967", MESSAGE_LIMIT),
             "beta_3.4.5_20699967"
         );
     }

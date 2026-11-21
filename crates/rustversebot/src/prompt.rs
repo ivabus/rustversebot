@@ -29,6 +29,7 @@ struct PromptOutput<'a> {
     bot: &'a Bot,
     msg: &'a Message,
     state: &'a BotState,
+    question: &'a str,
 }
 
 fn footer(
@@ -45,6 +46,7 @@ fn messages(
     templates: &TemplateEngine,
     model: &str,
     progress: &PromptProgress,
+    question: &str,
     text: &str,
     live: bool,
 ) -> Result<Vec<RenderedTemplate>> {
@@ -55,9 +57,11 @@ fn messages(
         .filter(|n| *n >= 2)
         .context("Статус превышает лимит сообщения")?;
     let mut parts = if live {
-        vec![telegram_html::preview(text, limit)]
+        vec![telegram_html::preview(question, text, limit)]
+    } else if progress.stage == PromptStage::Failed {
+        telegram_html::plain_chunks(question, text, limit)
     } else {
-        telegram_html::chunks(text, limit)
+        telegram_html::chunks(question, text, limit)
     };
     parts.retain(|s| !s.trim().is_empty());
     if parts.is_empty() {
@@ -169,6 +173,7 @@ impl PromptOutput<'_> {
                 &self.state.templates,
                 &self.state.beta.model,
                 &p,
+                self.question,
                 &p.text,
                 true,
             ) else {
@@ -261,10 +266,15 @@ pub async fn command(bot: &Bot, msg: &Message, question: &str, state: &BotState)
     {
         return Ok(());
     }
-    let output = PromptOutput { bot, msg, state };
+    let output = PromptOutput {
+        bot,
+        msg,
+        state,
+        question,
+    };
     let model = &state.beta.model;
     let initial = PromptProgress::default();
-    let status = footer(&state.templates, model, &initial)?;
+    let status = messages(&state.templates, model, &initial, question, "", true)?.remove(0);
     let last = status.text.clone();
     let target = output.start(status).await?;
     let (tx, rx) = watch::channel(initial);
@@ -279,17 +289,21 @@ pub async fn command(bot: &Bot, msg: &Message, question: &str, state: &BotState)
     let parts = match answer {
         Ok(text) => {
             stats.stage = PromptStage::Complete;
-            messages(&state.templates, model, &stats, &text, false)?
+            messages(&state.templates, model, &stats, question, &text, false)?
         }
         Err(err) => {
             stats.stage = PromptStage::Failed;
             let error = state
                 .templates
                 .render("error_generic", &json!({"error":err.to_string()}))?;
-            vec![state.templates.render(
-                "prompt_answer",
-                &json!({"error":error.text,"footer":footer(&state.templates,model,&stats)?.text}),
-            )?]
+            messages(
+                &state.templates,
+                model,
+                &stats,
+                question,
+                &error.text,
+                false,
+            )?
         }
     };
     let mut edit = match target {
@@ -310,7 +324,10 @@ mod tests {
     fn status_and_final_footer_fit_and_only_the_last_part_has_counters() {
         let templates = TemplateEngine::new().unwrap();
         let initial = PromptProgress::default();
-        let status = messages(&templates, "model<&>", &initial, "", true).unwrap();
+        let question = "Что значит **урон** <A&B>?\nИ для кого?";
+        let header = "<blockquote>Что значит **урон** &lt;A&amp;B&gt;?\nИ для кого?</blockquote>";
+        let status = messages(&templates, "model<&>", &initial, question, "", true).unwrap();
+        assert!(status[0].text.starts_with(header));
         assert!(status[0].text.contains("Готовлю ответ") && status[0].text.contains("Ходы: 0"));
         let p = PromptProgress {
             stage: PromptStage::Complete,
@@ -323,11 +340,14 @@ mod tests {
             &templates,
             "model<&>",
             &p,
+            question,
             &format!("**{}**", "🌙".repeat(6200)),
             false,
         )
         .unwrap();
         assert!(parts.len() > 1);
+        assert!(parts[0].text.starts_with(header));
+        assert!(parts[1..].iter().all(|part| !part.text.contains(header)));
         for part in &parts[..parts.len() - 1] {
             assert!(!part.text.contains("Токены"));
         }
@@ -346,5 +366,38 @@ mod tests {
         let unknown = PromptProgress { tokens: None, ..p };
         let footer = footer(&templates, "model<&>", &unknown).unwrap().text;
         assert!(footer.contains("Токены: —") && footer.contains("&lt;&amp;&gt;"));
+    }
+
+    #[test]
+    fn long_question_is_abbreviated_in_preview_and_preserved_in_full_in_the_answer() {
+        let templates = TemplateEngine::new().unwrap();
+        let question = "🌙<&>".repeat(1250);
+        let p = PromptProgress::default();
+        let draft = messages(&templates, "model", &p, &question, "Пишу", true).unwrap();
+        assert!(draft[0].text.contains("…</blockquote>") && draft[0].text.contains("Пишу"));
+        let selector = scraper::Selector::parse("blockquote").unwrap();
+        for stage in [PromptStage::Complete, PromptStage::Failed] {
+            let p = PromptProgress {
+                stage,
+                ..PromptProgress::default()
+            };
+            let parts = messages(&templates, "model", &p, &question, "Текст", false).unwrap();
+            let mut quoted = String::new();
+            for part in parts {
+                let html = scraper::Html::parse_fragment(&part.text);
+                assert!(
+                    html.root_element()
+                        .text()
+                        .collect::<String>()
+                        .encode_utf16()
+                        .count()
+                        <= MESSAGE_LIMIT
+                );
+                for block in html.select(&selector) {
+                    quoted.extend(block.text());
+                }
+            }
+            assert_eq!(quoted, question);
+        }
     }
 }

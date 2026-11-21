@@ -85,7 +85,8 @@ The default model is `gpt-6.2-sol` with `high` reasoning effort. Select another 
 ./dev/beta analyze 'https://zzz.gachabase.net/diff/agents/1651/kafka?prev=beta_3.4.4_20541895&cur=beta_3.4.5_20691792&lang=chs' > my-report.md
 ```
 
-`/prompt <вопрос>` asks the same agent a standalone question. In private chats
+`/prompt <вопрос>` asks the same agent a standalone question. Each reply opens
+with the user's original question as a Telegram quote. In private chats
 the bot streams temporary Telegram drafts and sends the completed answer as
 persistent messages. Both use Telegram HTML for emphasis, quotations, code and
 HTTP(S) links. In groups the bot edits a single progress message at most every
