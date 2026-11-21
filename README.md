@@ -19,8 +19,88 @@ The Cargo workspace contains these crates:
 crates/
 ├── nanoka/
 ├── rustverse/
+├── rustverse_ai/
 ├── rustverse_images/
 └── rustversebot/
+```
+
+## GachaBase agent diff analysis
+
+The standalone `rustverse_ai` CLI takes a GachaBase agent diff URL and prints a
+Russian report. It compares the previous and current agent data in English and
+Simplified Chinese and sends the changed fields from both languages to the
+[OpenAI Responses API](https://developers.openai.com/api/reference/resources/responses/methods/create).
+GachaBase serves Simplified Chinese as `chs`; the model receives it under `cn`.
+
+The input includes the current character's numeric `agent_id`. The model can
+call `read_kit` with any GachaBase agent ID and language (`en` or `cn`). The
+revision can be `current`, `previous` (relative to the input diff), or an exact
+name such as `beta_3.4.5_20699967`. The tool searches entries by localized
+name or ID and reads individual fields by JSON pointer, for example
+`/mindscapes/1/description/text` for M2. Long results are paginated.
+`list_recent_revisions` returns the ten latest beta design revision names, newest first.
+
+The model drafts the report, then reviews it against both diffs and the tool
+results. It can read more kit fragments during review. The CLI prints the reviewed
+report with the agent's name and a subtitle showing the exact `prev` → `cur` revisions.
+Both passes compare the Core Passive at its highest available rank and other skills
+at level 12, before Mindscape level bonuses.
+
+The CLI reads the API key from `OPENAI_API_KEY` or, when it is unset or blank,
+from a single line in `~/.openai`. To analyze Sunbringer, run:
+
+```sh
+cargo run --release -p rustverse_ai -- \
+  'https://zzz.gachabase.net/diff/agents/1601/sunbringer?prev=beta_3.4.5_20694646&cur=beta_3.4.5_20699967&lang=en'
+```
+
+The default model is `gpt-6.2-sol` with `high` reasoning effort. Select another Responses API model with
+`--model` or `OPENAI_MODEL`. Rust callers can use
+`rustverse_ai::analyze(url, api_key, model).await`.
+
+### Telegram beta pages
+
+Для локальной правки страниц запустите из корня проекта:
+
+```sh
+./dev/beta
+```
+
+Откройте [предпросмотр](http://127.0.0.1:8765/). При первом запуске скрипт копирует
+пример Кафки в `target/beta-preview/report.md`. Редактируйте этот Markdown или
+`crates/rustverse_images/beta_agent.typ`: после сохранения страница обновляется.
+Готовый PNG лежит в `target/beta-preview/public/page.png`. Ошибки Typst видны
+в терминале; исправьте шаблон и сохраните его, чтобы повторить рендер.
+Для остановки нажмите Ctrl+C.
+
+Нужны Python 3, Cargo, Typst и resvg. На macOS Apple Silicon их также можно
+получить командой `nix develop -c ./dev/beta`. Предпросмотр использует
+сохранённые данные. Ключ OpenAI нужен только для запуска нового анализа.
+
+```sh
+./dev/beta render                     # Однократный рендер рабочего отчёта
+./dev/beta watch --report my-report.md --port 8766
+./dev/beta test                       # Включая рендер PNG и локальную проверку доставки
+./dev/beta analyze 'https://zzz.gachabase.net/diff/agents/1651/kafka?prev=beta_3.4.4_20541895&cur=beta_3.4.5_20691792&lang=chs' > my-report.md
+```
+
+`/betadiff` compares the latest GachaBase beta design revision with its immediate
+predecessor, including hotfixes within the same version. Use
+`/betadiff beta_3.4.4_20541895 beta_3.4.5_20691792` for an explicit range.
+The bot collects the agent changes in every intervening changelog entry and sends
+one PNG per character, including intermediate changes in chronological order.
+
+With an OpenAI key configured for the bot, the scheduler monitors the changelog
+for chats with registered UIDs. The first poll records the current revision for
+each new chat. Later polls deliver missed revisions in order. Reviewed reports
+are cached by revision pair and agent, and each chat's confirmed page deliveries
+survive restarts. Oversized pages are sent as PNG files to preserve the whole image.
+
+`rustverse_images` renders each page at 1280 pixels wide with automatic height,
+using the Deadly Assault palette, cards, font and watermark. To render a saved report:
+
+```sh
+cargo run --release -p rustverse_images -- beta kafka.md kafka.png
 ```
 
 ## Configuration and startup

@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "crates/nanoka",
     "crates/rustverse",
+    "crates/rustverse_ai",
     "crates/rustverse_images",
     "crates/rustversebot",
 ]

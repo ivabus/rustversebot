@@ -47,6 +47,7 @@ pub async fn command_handler(
             cmd_endgame_pair(&bot, chat_id, SeasonPosition::Previous, &state).await
         }
         Command::Endgame(id) => cmd_endgame(&bot, chat_id, &id, &state).await,
+        Command::BetaDiff(args) => crate::beta::command(&bot, chat_id, &args, &state).await,
         Command::TopDeadly => cmd_top(&bot, chat_id, "deadly_assault", &state).await,
         Command::TopShiyu => cmd_top(&bot, chat_id, "shiyu_defense", &state).await,
         Command::Cookie(cookie) => cmd_cookie(&bot, msg, &cookie, &state).await,

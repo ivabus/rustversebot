@@ -106,6 +106,7 @@
           pkgs.typst
           pkgs.resvg
           pkgs.clippy
+          pkgs.python3
           pkgs.attic-client
         ];
       };

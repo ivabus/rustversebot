@@ -191,6 +191,7 @@ mod tests {
 
     async fn test_state() -> Arc<BotState> {
         Arc::new(BotState {
+            beta: crate::beta::BetaPages::new().unwrap(),
             db: crate::db::Db::new_test().await.unwrap(),
             templates: crate::templates::TemplateEngine::new().unwrap(),
             admin_id: 1,

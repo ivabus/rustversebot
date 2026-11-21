@@ -3,7 +3,7 @@ use libsql::{Builder, Connection, Database, params};
 use serde::Serialize;
 use std::collections::HashMap;
 
-const SCHEMA_VERSION: i64 = 6;
+const SCHEMA_VERSION: i64 = 7;
 
 /// A compact, normalized copy of a production season from Nanoka's index.
 /// Details and rendered cards deliberately remain outside the cache.
@@ -196,6 +196,19 @@ impl Db {
             .await
             .context("applying migration 6")?;
         }
+        if version < 7 {
+            tx.execute_batch(
+                "CREATE TABLE beta_cursors(chat_id INTEGER PRIMARY KEY, revision TEXT NOT NULL);
+                 CREATE TABLE beta_deliveries(chat_id INTEGER NOT NULL, revision TEXT NOT NULL, agent INTEGER NOT NULL,
+                    PRIMARY KEY(chat_id, revision, agent));
+                 CREATE TABLE beta_reports(previous TEXT NOT NULL, current TEXT NOT NULL, agent INTEGER NOT NULL,
+                    report TEXT NOT NULL, PRIMARY KEY(previous,current,agent));
+                 CREATE TRIGGER reset_beta_cursor AFTER DELETE ON users
+                   WHEN NOT EXISTS (SELECT 1 FROM users WHERE chat_id=OLD.chat_id)
+                   BEGIN DELETE FROM beta_cursors WHERE chat_id=OLD.chat_id; END;
+                 PRAGMA user_version = 7;"
+            ).await.context("applying migration 7")?;
+        }
         tx.commit().await.context("committing migrations")?;
         Ok(())
     }
@@ -219,6 +232,78 @@ impl Db {
             (),
         )
         .await
+    }
+
+    pub async fn beta_cursors(&self, latest: &str) -> anyhow::Result<Vec<(i64, String)>> {
+        let conn = self.connection()?;
+        conn.execute(
+            "INSERT OR IGNORE INTO beta_cursors SELECT DISTINCT chat_id, ?1 FROM users",
+            [latest],
+        )
+        .await?;
+        let mut rows = conn
+            .query(
+                "SELECT chat_id, revision FROM beta_cursors WHERE revision != ?1 ORDER BY chat_id",
+                [latest],
+            )
+            .await?;
+        let mut out = Vec::new();
+        while let Some(r) = rows.next().await? {
+            out.push((r.get(0)?, r.get(1)?));
+        }
+        Ok(out)
+    }
+
+    pub async fn advance_beta(&self, chat: i64, prev: &str, cur: &str) -> anyhow::Result<()> {
+        self.connection()?
+            .execute(
+                "UPDATE beta_cursors SET revision=?3 WHERE chat_id=?1 AND revision=?2",
+                params![chat, prev, cur],
+            )
+            .await?;
+        Ok(())
+    }
+
+    pub async fn beta_delivered(&self, chat: i64, cur: &str, id: u64) -> anyhow::Result<bool> {
+        Ok(self.optional_string("SELECT revision FROM beta_deliveries WHERE chat_id=?1 AND revision=?2 AND agent=?3",params![chat,cur,i64::try_from(id)?]).await?.is_some())
+    }
+
+    pub async fn mark_beta_delivered(&self, chat: i64, cur: &str, id: u64) -> anyhow::Result<()> {
+        self.connection()?
+            .execute(
+                "INSERT OR IGNORE INTO beta_deliveries VALUES(?1,?2,?3)",
+                params![chat, cur, i64::try_from(id)?],
+            )
+            .await?;
+        Ok(())
+    }
+
+    pub async fn beta_report(
+        &self,
+        prev: &str,
+        cur: &str,
+        id: u64,
+    ) -> anyhow::Result<Option<String>> {
+        self.optional_string(
+            "SELECT report FROM beta_reports WHERE previous=?1 AND current=?2 AND agent=?3",
+            params![prev, cur, i64::try_from(id)?],
+        )
+        .await
+    }
+    pub async fn save_beta_report(
+        &self,
+        prev: &str,
+        cur: &str,
+        id: u64,
+        text: &str,
+    ) -> anyhow::Result<()> {
+        self.connection()?
+            .execute(
+                "INSERT OR IGNORE INTO beta_reports VALUES(?1,?2,?3,?4)",
+                params![prev, cur, i64::try_from(id)?, text],
+            )
+            .await?;
+        Ok(())
     }
     pub async fn set_cookie(&self, cookie: &str) -> anyhow::Result<()> {
         self.connection()?
@@ -828,6 +913,37 @@ mod tests {
             db.pending_promo_announcements(&["B"]).await.unwrap()["B"],
             [20]
         );
+    }
+
+    #[tokio::test]
+    async fn beta_hotfix_resumes_at_the_unconfirmed_page_after_restart() {
+        let dir = tempfile::tempdir().unwrap();
+        let url = format!("file:{}", dir.path().join("beta.db").display());
+        let db = Db::connect(&url).await.unwrap();
+        db.add_user(10, 1, "1", None).await.unwrap();
+        db.add_user(20, 2, "2", None).await.unwrap();
+        assert!(db.beta_cursors("r1").await.unwrap().is_empty());
+        db.mark_beta_delivered(10, "r2", 1601).await.unwrap();
+        db.advance_beta(20, "r1", "r2").await.unwrap();
+        db.save_beta_report("r1", "r2", 1601, "reviewed text")
+            .await
+            .unwrap();
+        drop(db);
+        let db = Db::connect(&url).await.unwrap();
+        assert_eq!(
+            db.beta_cursors("r2").await.unwrap(),
+            vec![(10, "r1".into())]
+        );
+        assert!(db.beta_delivered(10, "r2", 1601).await.unwrap());
+        assert!(!db.beta_delivered(10, "r2", 1651).await.unwrap());
+        assert!(!db.beta_delivered(20, "r2", 1601).await.unwrap());
+        assert_eq!(
+            db.beta_report("r1", "r2", 1601).await.unwrap().as_deref(),
+            Some("reviewed text")
+        );
+        db.remove_user(10, "1").await.unwrap();
+        db.add_user(10, 1, "3", None).await.unwrap();
+        assert!(db.beta_cursors("r2").await.unwrap().is_empty());
     }
 
     #[tokio::test]

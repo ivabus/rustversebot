@@ -1,4 +1,7 @@
 //! Typst → SVG → PNG rendering. Each invocation owns its input files and processes.
+mod beta;
+pub use beta::beta_page;
+
 use std::{
     collections::BTreeSet,
     path::{Path, PathBuf},
@@ -15,6 +18,7 @@ use tokio::{fs, process::Command};
 
 #[derive(Debug, Clone, Copy)]
 pub enum Template {
+    BetaAgent,
     TopDa,
     TopShiyu,
     Da,
@@ -26,6 +30,7 @@ pub enum Template {
 impl Template {
     pub fn parse(name: &str) -> anyhow::Result<Self> {
         match name {
+            "beta_agent" | "beta_agent.typ" => Ok(Self::BetaAgent),
             "top_da" | "top_da.typ" => Ok(Self::TopDa),
             "top_sd" | "top_sd.typ" => Ok(Self::TopShiyu),
             "individual_da" | "individual_da.typ" => Ok(Self::Da),
@@ -38,6 +43,7 @@ impl Template {
 
     fn source(self) -> &'static str {
         match self {
+            Self::BetaAgent => include_str!("../beta_agent.typ"),
             Self::TopDa => include_str!("../top_da.typ"),
             Self::TopShiyu => include_str!("../top_sd.typ"),
             Self::Da => include_str!("../individual_da.typ"),
@@ -148,6 +154,7 @@ async fn pipeline(
     directory: &Path,
     typst: &std::ffi::OsStr,
     resvg: &std::ffi::OsStr,
+    sizing: [&str; 2],
 ) -> anyhow::Result<Vec<u8>> {
     let mut compiler = Command::new(typst)
         .current_dir(directory)
@@ -175,7 +182,8 @@ async fn pipeline(
         .try_into()?;
     let rasterizer = Command::new(resvg)
         .current_dir(directory)
-        .args(["-z", "4", "-", "output.png"])
+        .args(sizing)
+        .args(["-", "output.png"])
         .stdin(pipe)
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
@@ -215,6 +223,7 @@ pub async fn render(
         !matches!(template, Template::Shiyu) || season.is_some(),
         "individual Shiyu requires season JSON"
     );
+    let with_images = !matches!(template, Template::BetaAgent);
     let directory = tempfile::tempdir()?;
     let root = directory.path();
     fs::create_dir(root.join("images")).await?;
@@ -225,23 +234,30 @@ pub async fn render(
     if let Some(season) = season {
         fs::write(root.join("season.json"), serde_json::to_vec(season)?).await?;
     }
-    stage_images(input, season, &root.join("images")).await?;
-    for (name, bytes) in [
-        ("da.webp", include_bytes!("../image/da.webp").as_slice()),
-        (
-            "shiyu.webp",
-            include_bytes!("../image/shiyu.webp").as_slice(),
-        ),
-        (
-            "star-icon.png",
-            include_bytes!("../image/star-icon.png").as_slice(),
-        ),
-    ] {
-        fs::write(root.join("images").join(name), bytes).await?;
+    if with_images {
+        stage_images(input, season, &root.join("images")).await?;
+        for (name, bytes) in [
+            ("da.webp", include_bytes!("../image/da.webp").as_slice()),
+            (
+                "shiyu.webp",
+                include_bytes!("../image/shiyu.webp").as_slice(),
+            ),
+            (
+                "star-icon.png",
+                include_bytes!("../image/star-icon.png").as_slice(),
+            ),
+        ] {
+            fs::write(root.join("images").join(name), bytes).await?;
+        }
     }
     let typst = std::env::var_os("TYPST_BIN").unwrap_or_else(|| "typst".into());
     let resvg = std::env::var_os("RESVG_BIN").unwrap_or_else(|| "resvg".into());
-    pipeline(root, &typst, &resvg).await
+    let sizing = if with_images {
+        ["-z", "4"]
+    } else {
+        ["--width", "1280"]
+    };
+    pipeline(root, &typst, &resvg, sizing).await
 }
 
 #[derive(Serialize, Deserialize)]
@@ -451,10 +467,15 @@ mod tests {
                 .await
                 .unwrap();
         }
-        let error = pipeline(dir.path(), compiler.as_os_str(), rasterizer.as_os_str())
-            .await
-            .unwrap_err()
-            .to_string();
+        let error = pipeline(
+            dir.path(),
+            compiler.as_os_str(),
+            rasterizer.as_os_str(),
+            ["-z", "4"],
+        )
+        .await
+        .unwrap_err()
+        .to_string();
         assert!(error.contains("compiler-diagnostic") && error.contains("rasterizer-diagnostic"));
     }
 }

@@ -16,12 +16,12 @@ const CHECKPOINTS: [(&str, ChronoDuration); 3] = [
 ];
 
 #[derive(Debug, Clone)]
-struct SchedulerSettings {
+pub(crate) struct SchedulerSettings {
     tick_interval: Duration,
     checkpoint_window: Duration,
-    request_spacing: Duration,
-    retry_attempts: usize,
-    retry_base_delay: Duration,
+    pub(crate) request_spacing: Duration,
+    pub(crate) retry_attempts: usize,
+    pub(crate) retry_base_delay: Duration,
     retention_interval_ticks: u64,
     retention_days: i64,
     announcement_lead: ChronoDuration,
@@ -43,7 +43,7 @@ impl Default for SchedulerSettings {
 }
 
 impl SchedulerSettings {
-    fn from_env() -> Self {
+    pub(crate) fn from_env() -> Self {
         let mut settings = Self::default();
         if let Ok(value) = std::env::var("BOT_SCHEDULER_INTERVAL_SECS")
             && let Ok(seconds) = value.parse::<u64>()
@@ -141,7 +141,17 @@ pub async fn run(
             }
         }
     };
+    let beta_announcements = async {
+        let mut ticks = interval(settings.tick_interval);
+        loop {
+            ticks.tick().await;
+            if let Err(error) = crate::beta::poll(&bot, &state, &settings).await {
+                log::warn!("Beta changelog poll failed: {error:#}");
+            }
+        }
+    };
     tokio::select! {
+        _ = beta_announcements => {},
         _ = players => {},
         _ = checkpoints => {},
         _ = announcements => {},

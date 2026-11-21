@@ -74,6 +74,9 @@ macro_rules! template {
 
 const TEMPLATES: &[EmbeddedTemplate] = &[
     template!("welcome", "txt"),
+    template!("beta_progress", "txt"),
+    template!("beta_empty", "txt"),
+    template!("beta_usage", "txt"),
     template!("promocodes", "html"),
     template!("register_success", "txt"),
     template!("register_already", "txt"),

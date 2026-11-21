@@ -1,3 +1,4 @@
+mod beta;
 mod bot_templates;
 mod db;
 mod handlers;
@@ -34,6 +35,8 @@ enum Command {
     Previous,
     /// Show an infographic for a current or next endgame season: `/endgame [id]`.
     Endgame(String),
+    /// Изменения агентов за последнюю бету: /betadiff [prev cur].
+    BetaDiff(String),
     /// Show Deadly Assault details: /da [uid].
     #[command(rename = "da")]
     Da(String),
@@ -69,6 +72,7 @@ fn telegram_menu() -> Vec<teloxide::types::BotCommand> {
 
 /// Shared bot state accessible from all handlers and the scheduler.
 pub struct BotState {
+    pub(crate) beta: beta::BetaPages,
     pub db: db::Db,
     pub templates: templates::TemplateEngine,
     /// Telegram user ID of the bot administrator.
@@ -105,6 +109,7 @@ async fn main() -> anyhow::Result<()> {
         .map(|value| value.trim_end_matches('/').to_owned())
         .filter(|value| !value.is_empty());
     let state = Arc::new(BotState {
+        beta: beta::BetaPages::new()?,
         db,
         templates,
         admin_id,
