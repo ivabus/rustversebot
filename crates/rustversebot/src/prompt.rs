@@ -11,6 +11,7 @@ use tokio::{sync::watch, time::Instant};
 use crate::{
     BotState,
     bot_templates::{BotTemplateSender, MESSAGE_LIMIT, RenderedTemplate},
+    db::PromptSession,
     telegram_html,
     templates::TemplateEngine,
 };
@@ -32,6 +33,13 @@ struct PromptOutput<'a> {
     question: &'a str,
 }
 
+// Ordinary supergroup replies may carry a reply-chain ID even outside a forum.
+// Only a Telegram topic identifies a separate conversation within a chat.
+fn topic(msg: &Message) -> Option<teloxide::types::ThreadId> {
+    msg.thread_id
+        .filter(|_| msg.is_topic_message || msg.chat.is_private())
+}
+
 fn footer(
     templates: &TemplateEngine,
     model: &str,
@@ -39,7 +47,23 @@ fn footer(
 ) -> Result<RenderedTemplate> {
     // Keep even a malformed configured model name within Telegram's message limit.
     let model: String = model.chars().take(128).collect();
-    templates.render("prompt_status", &json!({"model":model,"p":progress}))
+    let cost = progress.cost_usd.map(|usd| {
+        if usd > 0.0 && usd < 0.000001 {
+            return "< $0,000001".to_owned();
+        }
+        let amount = format!("{usd:.6}");
+        format!(
+            "≈ ${}",
+            amount
+                .trim_end_matches('0')
+                .trim_end_matches('.')
+                .replace('.', ",")
+        )
+    });
+    templates.render(
+        "prompt_status",
+        &json!({"model":model,"p":progress,"cost":cost}),
+    )
 }
 
 fn messages(
@@ -97,7 +121,7 @@ impl PromptOutput<'_> {
             return Update::Unavailable;
         };
         let mut body = json!({"chat_id":self.msg.chat.id.0,"draft_id":self.msg.id.0.max(1),"text":text,"parse_mode":"HTML"});
-        if let Some(thread) = self.msg.thread_id {
+        if let Some(thread) = topic(self.msg) {
             body["message_thread_id"] = json!(thread);
         }
         let Ok(response) = self
@@ -230,7 +254,7 @@ impl PromptOutput<'_> {
                 }
             }
             match sender
-                .send_rendered_to_thread(self.msg.chat.id, self.msg.thread_id, rendered.clone())
+                .send_rendered_to_thread(self.msg.chat.id, topic(self.msg), rendered.clone())
                 .await
             {
                 Ok(msg) => return Ok(msg.id),
@@ -247,17 +271,51 @@ impl PromptOutput<'_> {
 }
 
 pub async fn command(bot: &Bot, msg: &Message, question: &str, state: &BotState) -> Result<()> {
-    let sender = BotTemplateSender::new(bot, &state.templates);
     if question.trim().is_empty() {
-        sender
-            .send_to_thread(msg.chat.id, msg.thread_id, "prompt_usage", &())
+        BotTemplateSender::new(bot, &state.templates)
+            .send_to_thread(msg.chat.id, topic(msg), "prompt_usage", &())
             .await?;
         return Ok(());
     }
+    let session = replied_session(msg, &state.db).await?.unwrap_or_default();
+    answer(bot, msg, question, state, session).await
+}
+
+pub fn is_follow_up(msg: Message) -> bool {
+    msg.reply_to_message().is_some()
+        && msg
+            .text()
+            .is_some_and(|s| !s.trim().is_empty() && !s.trim_start().starts_with('/'))
+}
+
+async fn replied_session(msg: &Message, db: &crate::db::Db) -> Result<Option<PromptSession>> {
+    let Some(reply) = msg.reply_to_message().filter(|r| r.chat.id == msg.chat.id) else {
+        return Ok(None);
+    };
+    db.prompt_session(msg.chat.id.0, topic(msg).map(|id| id.0.0), reply.id.0)
+        .await
+}
+
+pub async fn follow_up(bot: Bot, msg: Message, state: std::sync::Arc<BotState>) -> Result<()> {
+    if let Some(session) = replied_session(&msg, &state.db).await?
+        && let Some(question) = msg.text()
+    {
+        answer(&bot, &msg, question, &state, session).await?;
+    }
+    Ok(())
+}
+
+async fn answer(
+    bot: &Bot,
+    msg: &Message,
+    question: &str,
+    state: &BotState,
+    session: PromptSession,
+) -> Result<()> {
     if !crate::agent_access::admit(
         bot,
         msg.chat.id,
-        msg.thread_id,
+        topic(msg),
         crate::agent_access::sender(msg),
         "prompt",
         state,
@@ -278,18 +336,19 @@ pub async fn command(bot: &Bot, msg: &Message, question: &str, state: &BotState)
     let last = status.text.clone();
     let target = output.start(status).await?;
     let (tx, rx) = watch::channel(initial);
+    let history = &session.turns;
     let generate = async move {
         let key = rustverse_ai::api_key()?;
-        rustverse_ai::prompt_with_progress(&state.beta.client, &key, model, question, tx).await
+        rustverse_ai::continue_prompt(&state.beta.client, &key, model, question, history, tx).await
     };
     // Finish an in-flight Telegram edit before delivering the permanent answer,
     // so a delayed status update cannot overwrite it.
     let (answer, ()) = tokio::join!(generate, output.updates(target, rx.clone(), last));
     let mut stats = rx.borrow().clone();
-    let parts = match answer {
+    let parts = match &answer {
         Ok(text) => {
             stats.stage = PromptStage::Complete;
-            messages(&state.templates, model, &stats, question, &text, false)?
+            messages(&state.templates, model, &stats, question, text, false)?
         }
         Err(err) => {
             stats.stage = PromptStage::Failed;
@@ -310,8 +369,33 @@ pub async fn command(bot: &Bot, msg: &Message, question: &str, state: &BotState)
         LiveMessage::Group(id) => Some(id),
         LiveMessage::Draft => None,
     };
+    let mut first_saved = None;
     for part in parts {
-        output.send(part, edit.take()).await?;
+        let id = output.send(part, edit.take()).await?.0;
+        if let Ok(text) = &answer {
+            let saved = match first_saved {
+                Some(first) => state.db.save_prompt_part(msg.chat.id.0, first, id).await,
+                None => {
+                    state
+                        .db
+                        .save_prompt_turn(
+                            msg.chat.id.0,
+                            topic(msg).map(|t| t.0.0),
+                            id,
+                            session.last_answer,
+                            question,
+                            text,
+                        )
+                        .await
+                }
+            };
+            match saved {
+                Ok(()) => {
+                    first_saved.get_or_insert(id);
+                }
+                Err(error) => log::error!("Could not cache prompt message {id}: {error}"),
+            }
+        }
     }
     Ok(())
 }
@@ -319,6 +403,34 @@ pub async fn command(bot: &Bot, msg: &Message, question: &str, state: &BotState)
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn ordinary_group_replies_find_the_answer_without_treating_reply_threads_as_topics() {
+        let db = crate::db::Db::new_test().await.unwrap();
+        db.save_prompt_turn(-100123, None, 42, None, "Первый вопрос", "Первый ответ")
+            .await
+            .unwrap();
+        let chat = json!({"id":-100123,"type":"supergroup","title":"ZZZ"});
+        let mut data = json!({"message_id":43,"message_thread_id":42,"chat":chat,"date":1,"text":"А на прошлом патче?",
+            "reply_to_message":{"message_id":42,"chat":chat,"date":1,"text":"Первый ответ"}});
+        let parse = |v: &serde_json::Value| serde_json::from_value::<Message>(v.clone()).unwrap();
+        assert!(is_follow_up(parse(&data)));
+        assert_eq!(
+            replied_session(&parse(&data), &db)
+                .await
+                .unwrap()
+                .unwrap()
+                .last_answer,
+            Some(42)
+        );
+        data["is_topic_message"] = json!(true);
+        assert!(replied_session(&parse(&data), &db).await.unwrap().is_none());
+        data["text"] = json!("/status");
+        assert!(!is_follow_up(parse(&data)));
+        data.as_object_mut().unwrap().remove("reply_to_message");
+        data["text"] = json!("Обычное сообщение");
+        assert!(!is_follow_up(parse(&data)));
+    }
 
     #[test]
     fn status_and_final_footer_fit_and_only_the_last_part_has_counters() {
@@ -331,9 +443,11 @@ mod tests {
         assert!(status[0].text.contains("Готовлю ответ") && status[0].text.contains("Ходы: 0"));
         let p = PromptProgress {
             stage: PromptStage::Complete,
+            research_status: Some("Сверяю <A&B>".into()),
             tools: 4,
             turns: 3,
             tokens: Some(1300),
+            cost_usd: Some(0.00284),
             ..initial
         };
         let parts = messages(
@@ -352,10 +466,18 @@ mod tests {
             assert!(!part.text.contains("Токены"));
         }
         let last = &parts.last().unwrap().text;
+        assert!(!last.contains("Сверяю"));
+        let researching = PromptProgress {
+            stage: PromptStage::Researching,
+            ..p.clone()
+        };
+        let live = messages(&templates, "model", &researching, question, "", true).unwrap();
+        assert!(live[0].text.contains("<i>Сверяю &lt;A&amp;B&gt;</i>"));
         assert!(
             last.contains("Ответ готов")
                 && last.contains("Вызовы инструментов: 4 · Ходы: 3 · Токены: 1300")
         );
+        assert!(last.contains("Токены: 1300 · Стоимость: ≈ $0,00284"));
         for part in parts {
             let visible = scraper::Html::parse_fragment(&part.text)
                 .root_element()
@@ -363,9 +485,13 @@ mod tests {
                 .collect::<String>();
             assert!(visible.encode_utf16().count() <= MESSAGE_LIMIT);
         }
-        let unknown = PromptProgress { tokens: None, ..p };
+        let unknown = PromptProgress {
+            tokens: None,
+            cost_usd: None,
+            ..p
+        };
         let footer = footer(&templates, "model<&>", &unknown).unwrap().text;
-        assert!(footer.contains("Токены: —") && footer.contains("&lt;&amp;&gt;"));
+        assert!(footer.contains("Токены: — · Стоимость: —") && footer.contains("&lt;&amp;&gt;"));
     }
 
     #[test]

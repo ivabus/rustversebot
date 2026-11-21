@@ -139,17 +139,27 @@ impl KitTools {
         Ok(Some(serde_json::to_string(&input)?))
     }
 
-    pub fn into_tools(self) -> Vec<DynamicTool> {
+    pub fn into_tools(self, research_updates: bool) -> Vec<DynamicTool> {
         let shared = Arc::new(Mutex::new(self));
         definitions()
             .into_iter()
-            .map(|spec| {
+            .map(|mut spec| {
                 let shared = Arc::clone(&shared);
+                if research_updates {
+                    spec.parameters["properties"]["research_status"] = json!({
+                        "type":["string","null"],"description":"Announce a new research objective once, in the user's language. Use null while continuing the same objective across lookups, tools and pages."
+                    });
+                    spec.parameters["required"].as_array_mut().expect("static tool schema").push(json!("research_status"));
+                }
                 DynamicTool::new(
                     ToolName::new(spec.name).expect("static tool name"),
                     spec.description,
                     spec.parameters,
-                    move |args| {
+                    move |mut args| {
+                        // The progress hook reads the original dispatch. Only lookup arguments go to GachaBase.
+                        if research_updates && let Some(fields) = args.as_object_mut() {
+                            fields.remove("research_status");
+                        }
                         let shared = Arc::clone(&shared);
                         Box::pin(async move {
                             let result = shared.lock().await.call(spec.name, args).await;

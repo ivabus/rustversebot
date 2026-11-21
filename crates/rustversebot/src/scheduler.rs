@@ -96,6 +96,9 @@ pub async fn run(
         let mut count = 0_u64;
         loop {
             ticks.tick().await;
+            if let Err(error) = state.db.expire_prompt_sessions().await {
+                log::warn!("Prompt session cleanup failed: {error}");
+            }
             if let Err(error) = fetch_all_bg(&state).await {
                 log::error!("Fetch error: {error}");
             }

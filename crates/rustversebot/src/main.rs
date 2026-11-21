@@ -196,6 +196,11 @@ async fn main() -> anyhow::Result<()> {
                 .filter_command::<Command>()
                 .endpoint(handlers::command_handler),
         )
+        .branch(
+            Update::filter_message()
+                .filter(prompt::is_follow_up)
+                .endpoint(prompt::follow_up),
+        )
         .branch(Update::filter_callback_query().endpoint(handlers::callback_handler));
 
     let mut dispatcher = Dispatcher::builder(bot, handler)

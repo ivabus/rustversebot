@@ -92,8 +92,20 @@ persistent messages. Both use Telegram HTML for emphasis, quotations, code and
 HTTP(S) links. In groups the bot edits a single progress message at most every
 15 seconds during generation, then replaces it with the answer. The initial
 status and the final footer show the model, tool calls, model turns and the
-confirmed token usage across completed turns. Missing provider usage appears
-as a dash. The footer appears once when a long answer spans multiple messages.
+confirmed token usage across completed turns. Beside the tokens the bot displays
+an estimated USD total for the current request using Rig's per-turn usage costs.
+Catalog estimates use standard token rates. A dash means pricing is unavailable
+or incomplete. Each follow-up starts a new total. The agent announces a new
+research objective once. Further lookups and pages keep that status until the
+objective changes. Missing token usage also appears as a dash. The footer
+appears once when a long answer spans multiple messages.
+
+Reply to any part of a completed answer with a text question to continue, or
+use `/prompt <question>` as a reply. A standalone command starts a new conversation.
+libSQL caches each delivered question and answer for 24 hours. The agent receives
+the unexpired turns leading to that specific answer in the same chat and topic.
+In groups, participants can continue a visible answer under their own access
+and rate limits. Separate replies to an earlier answer create independent branches.
 
 `/diff` opens a beta/release picker. Choose the starting and ending design
 revisions for a direct comparison. `/diff <prev> <cur>` accepts exact names.

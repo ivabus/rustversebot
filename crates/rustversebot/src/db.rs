@@ -3,7 +3,13 @@ use libsql::{Builder, Connection, Database, params};
 use serde::Serialize;
 use std::collections::HashMap;
 
-const SCHEMA_VERSION: i64 = 10;
+const SCHEMA_VERSION: i64 = 11;
+
+#[derive(Default)]
+pub struct PromptSession {
+    pub last_answer: Option<i32>,
+    pub turns: Vec<rustverse_ai::PromptTurn>,
+}
 
 #[derive(Serialize)]
 pub struct AgentUser {
@@ -264,6 +270,24 @@ impl Db {
             .await
             .context("applying migration 10")?;
         }
+        if version < 11 {
+            tx.execute_batch(
+                "CREATE TABLE prompt_turns (
+                    chat_id INTEGER NOT NULL, message_id INTEGER NOT NULL, topic_id INTEGER,
+                    parent_id INTEGER, question TEXT NOT NULL, answer TEXT NOT NULL,
+                    expires_at INTEGER NOT NULL DEFAULT (unixepoch()+86400),
+                    PRIMARY KEY(chat_id,message_id));
+                 CREATE INDEX prompt_turns_expiry ON prompt_turns(expires_at);
+                 CREATE TABLE prompt_parts (
+                    chat_id INTEGER NOT NULL, message_id INTEGER NOT NULL, first_id INTEGER NOT NULL,
+                    PRIMARY KEY(chat_id,message_id));
+                 CREATE INDEX prompt_parts_first ON prompt_parts(chat_id,first_id);
+                 CREATE TRIGGER expire_prompt_parts AFTER DELETE ON prompt_turns BEGIN
+                    DELETE FROM prompt_parts WHERE chat_id=OLD.chat_id AND first_id=OLD.message_id;
+                 END;
+                 PRAGMA user_version=11;",
+            ).await.context("applying migration 11")?;
+        }
         tx.commit().await.context("committing migrations")?;
         Ok(())
     }
@@ -287,6 +311,78 @@ impl Db {
             (),
         )
         .await
+    }
+
+    /// Follow only the selected answer's live ancestors, in conversational order.
+    pub async fn prompt_session(
+        &self,
+        chat: i64,
+        topic: Option<i32>,
+        reply_to: i32,
+    ) -> anyhow::Result<Option<PromptSession>> {
+        let mut rows=self.connection()?.query(
+            "WITH RECURSIVE history(message_id,parent_id,question,answer,depth) AS (
+                SELECT message_id,parent_id,question,answer,0 FROM prompt_turns
+                WHERE chat_id=?1 AND topic_id IS ?2 AND expires_at>unixepoch()
+                  AND message_id=COALESCE((SELECT first_id FROM prompt_parts WHERE chat_id=?1 AND message_id=?3),?3)
+                UNION ALL
+                SELECT p.message_id,p.parent_id,p.question,p.answer,h.depth+1
+                FROM history h JOIN prompt_turns p ON p.chat_id=?1 AND p.message_id=h.parent_id
+                WHERE p.topic_id IS ?2 AND p.expires_at>unixepoch()
+             ) SELECT message_id,question,answer FROM history ORDER BY depth DESC",
+            params![chat,topic,reply_to]).await?;
+        let mut session = PromptSession::default();
+        while let Some(row) = rows.next().await? {
+            session.last_answer = Some(row.get(0)?);
+            session.turns.push(rustverse_ai::PromptTurn {
+                question: row.get(1)?,
+                answer: row.get(2)?,
+            });
+        }
+        Ok(session.last_answer.map(|_| session))
+    }
+
+    pub async fn save_prompt_turn(
+        &self,
+        chat: i64,
+        topic: Option<i32>,
+        message: i32,
+        parent: Option<i32>,
+        question: &str,
+        answer: &str,
+    ) -> anyhow::Result<()> {
+        self.connection()?
+            .execute(
+                "INSERT INTO prompt_turns(chat_id,topic_id,message_id,parent_id,question,answer)
+             VALUES(?1,?2,?3,?4,?5,?6) ON CONFLICT(chat_id,message_id) DO NOTHING",
+                params![chat, topic, message, parent, question, answer],
+            )
+            .await?;
+        Ok(())
+    }
+
+    pub async fn save_prompt_part(
+        &self,
+        chat: i64,
+        first: i32,
+        message: i32,
+    ) -> anyhow::Result<()> {
+        self.connection()?
+            .execute(
+                "INSERT INTO prompt_parts(chat_id,message_id,first_id)
+             SELECT chat_id,?3,message_id FROM prompt_turns WHERE chat_id=?1 AND message_id=?2
+             ON CONFLICT(chat_id,message_id) DO NOTHING",
+                params![chat, first, message],
+            )
+            .await?;
+        Ok(())
+    }
+
+    pub async fn expire_prompt_sessions(&self) -> anyhow::Result<()> {
+        self.connection()?
+            .execute("DELETE FROM prompt_turns WHERE expires_at<=unixepoch()", ())
+            .await?;
+        Ok(())
     }
 
     pub async fn admit_ai(
@@ -1154,6 +1250,88 @@ mod tests {
         assert_eq!(
             (user.requests, user.decision.as_str(), user.banned),
             (4, "allowed", false)
+        );
+    }
+
+    #[tokio::test]
+    async fn prompt_replies_recover_the_selected_branch_across_restart_and_expire_each_turn() {
+        let dir = tempfile::tempdir().unwrap();
+        let url = format!("file:{}", dir.path().join("prompts.db").display());
+        let topic = Some(7);
+        let db = Db::connect(&url).await.unwrap();
+        db.save_prompt_turn(-1, topic, 100, None, "Q1", "A1")
+            .await
+            .unwrap();
+        db.save_prompt_part(-1, 100, 101).await.unwrap();
+        db.save_prompt_turn(-1, topic, 105, Some(100), "Q2", "A2")
+            .await
+            .unwrap();
+        db.save_prompt_turn(-1, topic, 106, Some(100), "Q3", "A3")
+            .await
+            .unwrap();
+        db.save_prompt_part(-1, 106, 107).await.unwrap();
+        drop(db);
+        let db = Db::connect(&url).await.unwrap();
+        for (id, expected) in [
+            (101, vec![("Q1", "A1")]),
+            (105, vec![("Q1", "A1"), ("Q2", "A2")]),
+            (107, vec![("Q1", "A1"), ("Q3", "A3")]),
+        ] {
+            let session = db.prompt_session(-1, topic, id).await.unwrap().unwrap();
+            assert_eq!(
+                session
+                    .turns
+                    .iter()
+                    .map(|t| (t.question.as_str(), t.answer.as_str()))
+                    .collect::<Vec<_>>(),
+                expected
+            );
+        }
+        assert_eq!(
+            db.prompt_session(-1, topic, 107)
+                .await
+                .unwrap()
+                .unwrap()
+                .last_answer,
+            Some(106)
+        );
+        assert!(db.prompt_session(-2, topic, 101).await.unwrap().is_none());
+        assert!(db.prompt_session(-1, None, 101).await.unwrap().is_none());
+        assert!(db.prompt_session(-1, Some(8), 101).await.unwrap().is_none());
+        assert!(db.prompt_session(-1, topic, 999).await.unwrap().is_none());
+        db.connection()
+            .unwrap()
+            .execute(
+                "UPDATE prompt_turns SET expires_at=unixepoch() WHERE message_id=100",
+                (),
+            )
+            .await
+            .unwrap();
+        assert!(db.prompt_session(-1, topic, 101).await.unwrap().is_none());
+        assert_eq!(
+            db.prompt_session(-1, topic, 105)
+                .await
+                .unwrap()
+                .unwrap()
+                .turns
+                .len(),
+            1
+        );
+        db.expire_prompt_sessions().await.unwrap();
+        assert!(
+            db.optional_string("SELECT question FROM prompt_turns WHERE message_id=100", ())
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            db.optional_string(
+                "SELECT CAST(first_id AS TEXT) FROM prompt_parts WHERE message_id=101",
+                ()
+            )
+            .await
+            .unwrap()
+            .is_none()
         );
     }
 

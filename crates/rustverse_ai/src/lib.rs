@@ -55,6 +55,11 @@ pub fn api_key() -> Result<String> {
 }
 
 const MAX_TURNS: usize = 12;
+const RESEARCH_UPDATES: &str = "Обозначай начало исследования и каждый переход к новой цели одной короткой фразой на языке вопроса в research_status.
+Например, «Уточняю правила Refringe» — один этап: поиск руководства, чтение его страниц и сверка перевода относятся к нему же.
+Когда переходишь к другой задаче, например «Сравниваю урон Кафки до и после патча», передай новый статус с первым вызовом этого этапа.
+Для всех остальных вызовов передавай null, в том числе при смене инструмента или следующей странице. При нескольких вызовах за ход передавай статус этапа один раз.
+Указывай действие и его предмет без рассуждений и разметки. Не вызывай инструмент только ради статуса и не дублируй статус в ответе.";
 const OUTPUT_FORMAT: &str = "Не выводи таблицы ни в Markdown, ни в HTML. Для сравнений используй короткие абзацы или списки.";
 
 const TUTORIAL_GUIDANCE: &str = "Если встретился незнакомый игровой термин, статус или название механики,
@@ -171,6 +176,7 @@ async fn analyze_snapshots(
                 tools,
                 format!("{INSTRUCTIONS}\n{REVIEW}"),
                 input,
+                &[],
                 None,
             )
             .await?
@@ -203,7 +209,22 @@ pub async fn prompt(
     question: &str,
     preview: Option<tokio::sync::watch::Sender<String>>,
 ) -> Result<String> {
-    question_run(client, key, model, question, preview.map(Preview::Text)).await
+    question_run(
+        client,
+        key,
+        model,
+        question,
+        &[],
+        preview.map(Preview::Text),
+    )
+    .await
+}
+
+/// A user-visible exchange. Status updates and tool output are excluded from reply history.
+#[derive(Debug, PartialEq, Eq)]
+pub struct PromptTurn {
+    pub question: String,
+    pub answer: String,
 }
 
 /// Stream partial text, model turns, tool invocations and confirmed token usage.
@@ -214,11 +235,24 @@ pub async fn prompt_with_progress(
     question: &str,
     progress: tokio::sync::watch::Sender<PromptProgress>,
 ) -> Result<String> {
+    continue_prompt(client, key, model, question, &[], progress).await
+}
+
+/// Answer a follow-up in the context of the selected Telegram reply chain, oldest turn first.
+pub async fn continue_prompt(
+    client: &Client,
+    key: &str,
+    model: &str,
+    question: &str,
+    history: &[PromptTurn],
+    progress: tokio::sync::watch::Sender<PromptProgress>,
+) -> Result<String> {
     question_run(
         client,
         key,
         model,
         question,
+        history,
         Some(Preview::Progress(progress)),
     )
     .await
@@ -229,6 +263,7 @@ async fn question_run(
     key: &str,
     model: &str,
     question: &str,
+    history: &[PromptTurn],
     preview: Option<Preview>,
 ) -> Result<String> {
     ensure!(!question.trim().is_empty(), "Пустой запрос");
@@ -243,6 +278,7 @@ async fn question_run(
         kit::KitTools::new(client.clone()),
         instructions.to_owned(),
         question.to_owned(),
+        history,
         preview,
     )
     .await
@@ -254,34 +290,46 @@ async fn run_agent(
     tools: kit::KitTools,
     instructions: String,
     input: String,
+    history: &[PromptTurn],
     preview: Option<Preview>,
 ) -> Result<String> {
     let http = DynHttpClient::new(transport::ReportHttp::new()?);
     let wire =
         rig_core::providers::openai::responses_api::wire::Responses::new(config.clone(), model)
             .with_strict_tools();
+    let research_updates = matches!(&preview, Some(Preview::Progress(_)));
     let mut builder = AgentBuilder::new(rig_core::Model::new(wire, http))
         .preamble(instructions)
         .append_preamble(TUTORIAL_GUIDANCE)
         .append_preamble(OUTPUT_FORMAT)
-        .dynamic_tools(tools.into_tools())
+        .dynamic_tools(tools.into_tools(research_updates))
         .additional_params(json!({"store":false,"include":["reasoning.encrypted_content"]}))
         .default_max_turns(MAX_TURNS)
         .add_hook(FinishAtLimit);
+    if research_updates {
+        builder = builder.append_preamble(RESEARCH_UPDATES);
+    }
     if model == DEFAULT_MODEL {
         builder = builder.reasoning(Effort::High);
     }
+    let streaming = preview.is_some();
+    if let Some(preview) = preview {
+        builder = builder.add_hook(preview);
+    }
+    let history = history.iter().flat_map(|turn| {
+        [
+            rig_core::message::Message::user(&turn.question),
+            rig_core::message::Message::assistant(&turn.answer),
+        ]
+    });
+    let runner = builder.build().prompt(input).history(history);
     let run = async move {
-        if let Some(preview) = preview {
-            let (result, events) = builder
-                .add_hook(preview)
-                .build()
-                .prompt(input)
-                .run_channel();
+        if streaming {
+            let (result, events) = runner.run_channel();
             drop(events);
             result.await
         } else {
-            builder.build().prompt(input).run().await
+            runner.run().await
         }
     };
     let result = tokio::time::timeout(Duration::from_secs(12 * 60), run)
@@ -406,6 +454,7 @@ mod tests {
             tools,
             INSTRUCTIONS.into(),
             input,
+            &[],
             None,
         )
         .await
@@ -415,6 +464,11 @@ mod tests {
         assert_eq!(calls.len(), 3);
         assert_eq!(calls[1], calls[2]);
         assert_eq!(calls[0]["tools"].as_array().unwrap().len(), 3);
+        assert!(calls[0]["tools"].as_array().unwrap().iter().all(|t| {
+            t["parameters"]["properties"]
+                .get("research_status")
+                .is_none()
+        }));
         assert_eq!(calls[0]["store"], false);
         assert_eq!(calls[0]["reasoning"]["effort"], "high");
         let history = calls[1]["input"].as_array().unwrap();
@@ -435,17 +489,28 @@ mod tests {
         let server=mock_openai(Router::new().route("/v1/responses",post(|Json(body):Json<Value>| async move {
             assert_eq!(body["stream"],true);
             assert!(body["instructions"].as_str().unwrap().contains(OUTPUT_FORMAT));
+            assert!(body["instructions"].as_str().unwrap().contains(RESEARCH_UPDATES));
+            let dialogue:Vec<_>=body["input"].as_array().unwrap().iter().filter(|item|item.get("role").is_some()).collect();
+            for (item,(role,text)) in dialogue.iter().take(3).zip([("user","Первый вопрос"),("assistant","Предыдущий ответ"),("user","question")]) {
+                assert_eq!(item["role"],role);
+                assert!(item["content"].to_string().contains(text));
+            }
+            assert!(dialogue.len()>=3);
+            assert!(body["tools"].as_array().unwrap().iter().all(|t|t["parameters"]["required"].as_array().unwrap().contains(&json!("research_status"))));
+            assert!(body["tools"].as_array().unwrap().iter().all(|t|t["parameters"]["properties"]["research_status"]["type"]==json!(["string","null"])));
             if !body["input"].as_array().unwrap().iter().any(|item|item["type"]=="function_call_output") {
-                // A search with invalid arguments exercises local tool dispatch without using the network.
-                let call=json!({"type":"function_call","id":"fc_1","call_id":"call_1","name":"search_gachabase","arguments":"{}","status":"completed"});
+                let args=json!({"category":"agents","id":1601,"language":"en","version":"r2","selector":"/skills/0/text","offset":0,
+                    "research_status":"Сверяю\n  множитель урона."}).to_string();
+                let call=json!({"type":"function_call","id":"fc_1","call_id":"call_1","name":"get_gachabase_entry","arguments":args,"status":"completed"});
                 let events=[
-                    json!({"type":"response.output_item.added","output_index":0,"item":{"type":"function_call","id":"fc_1","call_id":"call_1","name":"search_gachabase","arguments":""}}),
-                    json!({"type":"response.function_call_arguments.delta","output_index":0,"item_id":"fc_1","delta":"{}"}),
+                    json!({"type":"response.output_item.added","output_index":0,"item":{"type":"function_call","id":"fc_1","call_id":"call_1","name":"get_gachabase_entry","arguments":""}}),
+                    json!({"type":"response.function_call_arguments.delta","output_index":0,"item_id":"fc_1","delta":args}),
                     json!({"type":"response.output_item.done","output_index":0,"item":call}),
                     json!({"type":"response.completed","response":{"id":"resp_tool","object":"response","status":"completed","model":DEFAULT_MODEL,"usage":{"input_tokens":8,"output_tokens":2,"total_tokens":10},"output":[call]}}),
                 ];
                 return ([("content-type","text/event-stream")],events.into_iter().map(|e|format!("data: {e}\n\n")).collect::<String>());
             }
+            assert!(body["input"].as_array().unwrap().iter().any(|i|i["type"]=="function_call_output" && i["output"].to_string().contains("30%")));
             let message=json!({"type":"message","role":"assistant","id":"msg_a","phase":"final_answer","status":"completed","content":[{"type":"output_text","text":"Ответ","annotations":[]}]});
             let events=[
                 json!({"type":"response.output_item.added","output_index":0,"item":{"id":"msg_a","type":"message","role":"assistant","content":[]}}),
@@ -456,12 +521,26 @@ mod tests {
             ([("content-type","text/event-stream")],events.into_iter().map(|e|format!("data: {e}\n\n")).collect::<String>())
         }))).await;
         let (tx, rx) = tokio::sync::watch::channel(PromptProgress::default());
+        let page = gachabase::Comparison::parse(
+            "https://zzz.gachabase.net/diff/agents/1601/test?prev=r1&cur=r2",
+        )
+        .unwrap();
+        let snapshots = || gachabase::Snapshots {
+            prev: json!({"agent":{"skills":[{"text":"20%"}]}}),
+            cur: json!({"agent":{"skills":[{"text":"30%"}]}}),
+        };
+        let mut tools = kit::KitTools::new(Client::new());
+        tools.report_input(&page, snapshots(), snapshots()).unwrap();
         let answer = run_agent(
             &server,
             DEFAULT_MODEL,
-            kit::KitTools::new(Client::new()),
+            tools,
             "Answer".into(),
             "question".into(),
+            &[PromptTurn {
+                question: "Первый вопрос".into(),
+                answer: "Предыдущий ответ".into(),
+            }],
             Some(Preview::Progress(tx)),
         )
         .await
@@ -474,9 +553,14 @@ mod tests {
         let progress = rx.borrow();
         assert_eq!(progress.text, "Ответ");
         assert_eq!(
+            progress.research_status.as_deref(),
+            Some("Сверяю множитель урона.")
+        );
+        assert_eq!(
             (progress.turns, progress.tools, progress.tokens),
             (2, 1, Some(30))
         );
+        assert!(progress.cost_usd.is_some_and(|usd| usd > 0.0));
     }
 
     #[test]
