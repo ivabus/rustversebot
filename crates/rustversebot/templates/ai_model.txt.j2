@@ -1,0 +1,5 @@
+{% if updated %}Для новых запросов и отчётов выбрана модель {{ updated }}.{% else %}{% if current %}Текущая модель: {{ current }}.
+{% elif error %}{{ error }}.
+{% endif %}/model <model_slug>@<reasoning>
+Пример: /model gpt-6.2-sol@medium
+Уровни: default, none, minimal, low, medium, high, xhigh, max. Доступные уровни зависят от модели.{% endif %}

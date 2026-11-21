@@ -88,6 +88,7 @@ const TEMPLATES: &[EmbeddedTemplate] = &[
     template!("ai_identity", "txt"),
     template!("ai_users_private", "txt"),
     template!("ai_admin_usage", "txt"),
+    template!("ai_model", "txt"),
     template!("ai_admin_protected", "txt"),
     template!("ai_ban_done", "txt"),
     template!("ai_unban_done", "txt"),

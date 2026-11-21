@@ -18,7 +18,7 @@ use crate::{
     gachabase::{Comparison, Snapshots, recent_revisions},
 };
 
-const PAGE_CHARS: usize = 4096;
+pub(crate) const PAGE_CHARS: usize = 4096;
 
 #[derive(Serialize)]
 pub(crate) struct ToolSpec {
@@ -47,7 +47,7 @@ pub(crate) fn definitions() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "get_gachabase_entry",
-            description: "Read a GachaBase record by category and ID. Null version reads the latest beta; pass an exact revision for history. Null selector reads the whole paginated entry. An empty string lists fields; JSON pointer reads a field, name or sub-record ID finds paths, text:<phrase> finds descriptions. Agent values are normalized at report levels.",
+            description: "Read by ID at an exact version (null: latest beta). Null selector returns compact tutorial pages, skills or effects, with next_offset in records. Follow read pointers for oversized records. Empty selector lists fields; JSON pointer reads the original field; @raw pages the full entry. Name/ID or text:<phrase> finds paths. Agent values use report levels.",
             parameters: json!({"type":"object","additionalProperties":false,"properties":{
                 "category":category,"id":{"type":"integer","minimum":1},"language":language,
                 "version":{"type":["string","null"]},"selector":{"type":["string","null"]},"offset":offset
@@ -260,7 +260,7 @@ impl KitTools {
                 let offset = q.offset.unwrap_or_default();
                 let result = match q.selector {
                     Some(selector) => fragment(entry, &selector, offset)?,
-                    None => json_page(&serde_json::to_string(entry)?, offset)?,
+                    None => crate::entry_view::page(q.category, entry, offset)?,
                 };
                 Ok(
                     json!({"category":q.category,"id":q.id,"version":version,"language":match q.language {Language::En=>"en",Language::Cn=>"cn"},"result":result}),
@@ -288,6 +288,9 @@ fn pointer_key(key: &str) -> String {
 fn fragment(snapshot: &Value, selector: &str, offset: usize) -> Result<Value> {
     const PAGE_MATCHES: usize = 12;
     ensure!(!snapshot.is_null(), "Character absent in this revision");
+    if selector == "@raw" {
+        return json_page(&serde_json::to_string(snapshot)?, offset);
+    }
     if selector.is_empty() {
         let sections: Vec<_> = snapshot
             .as_object()
@@ -417,6 +420,27 @@ mod tests {
         assert_eq!(
             tools.call("get_gachabase_entry", args).await.unwrap()["result"]["value"],
             "new effect"
+        );
+        let mut args = json!({"category":"tutorials","id":301124,"language":"en","version":page.cur,"selector":null});
+        let entry = json!({"name":{"key":"title","text":"Refringe"},"pages":[{"page":1,"text":{"text":"<color=#FFA9DD>Refringe</color>"}}]});
+        tools.entries.insert(
+            (Category::Tutorials, 301124, Language::En, page.cur.clone()),
+            entry.clone(),
+        );
+        let compact = tools
+            .call("get_gachabase_entry", args.clone())
+            .await
+            .unwrap();
+        assert_eq!(
+            compact["result"],
+            json!({"name":"Refringe","pages":[{"page":1,"text":"Refringe"}]})
+        );
+        args["selector"] = json!("@raw");
+        let full = tools.call("get_gachabase_entry", args).await.unwrap();
+        assert_eq!(
+            serde_json::from_str::<Value>(full["result"]["json_fragment"].as_str().unwrap())
+                .unwrap(),
+            entry
         );
     }
 }

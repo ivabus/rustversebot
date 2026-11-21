@@ -103,6 +103,16 @@ pub async fn command_handler(
             .await
         }
         Command::Prompt(question) => crate::prompt::command(&bot, &msg, &question, &state).await,
+        Command::Model(args) => {
+            crate::agent_access::manage(
+                &bot,
+                &msg,
+                crate::agent_access::Action::Model,
+                &args,
+                &state,
+            )
+            .await
+        }
         Command::TopDeadly => cmd_top(&bot, chat_id, "deadly_assault", &state).await,
         Command::TopShiyu => cmd_top(&bot, chat_id, "shiyu_defense", &state).await,
         Command::Cookie(cookie) => cmd_cookie(&bot, msg, &cookie, &state).await,

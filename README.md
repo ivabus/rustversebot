@@ -43,9 +43,11 @@ the Core Passive at its highest available rank and other skills at level 12.
   Bangboo and tutorials.
 - `get_gachabase_entry` reads a category and ID in English or Simplified Chinese.
   An optional exact version pins the result to a revision, including release
-  revisions. The default is the latest beta. A selector can read a JSON pointer,
-  search a record by ID or name, or find descriptions with `text:<phrase>`.
-  Long results include a continuation offset.
+  revisions. The default is the latest beta. A null selector returns compact
+  pages, skills or effects, with presentation colors removed. Copy `next_offset`
+  to continue at the next record. A `read` pointer identifies an oversized record.
+  Use a JSON pointer for original fields, `@raw` for the complete paginated DTO,
+  or `text:<phrase>` to locate mentions in descriptions.
 
 The CLI reads the API key from `OPENAI_API_KEY` or, when it is unset or blank,
 from a single line in `~/.openai`. To analyze Sunbringer, run:
@@ -55,7 +57,13 @@ cargo run --release -p rustverse_ai -- \
   'https://zzz.gachabase.net/diff/agents/1601/sunbringer?prev=beta_3.4.5_20694646&cur=beta_3.4.5_20699967&lang=en'
 ```
 
-The default model is `gpt-6.2-sol` with `high` reasoning effort. Select another Responses API model with
+The default model is `gpt-6.2-sol` with `high` reasoning effort. In Telegram the
+administrator can use `/model` to inspect the current setting or
+`/model gpt-6.2-sol@medium` to change it. The setting is stored in libSQL
+and applies to new prompts and changelog reports across all chats. Use
+`@default` for the provider's default reasoning setting. Before the first
+override the bot uses `OPENAI_MODEL` or its built-in default.
+For the CLI, select another Responses API model with
 `--model` or `OPENAI_MODEL`. Rust callers can use
 `rustverse_ai::analyze(url, api_key, model).await`.
 
@@ -89,8 +97,9 @@ The default model is `gpt-6.2-sol` with `high` reasoning effort. Select another 
 with the user's original question as a Telegram quote. In private chats
 the bot streams temporary Telegram drafts and sends the completed answer as
 persistent messages. Both use Telegram HTML for emphasis, quotations, code and
-HTTP(S) links. In groups the bot edits a single progress message at most every
-15 seconds during generation, then replaces it with the answer. The initial
+HTTP(S) links. In groups a newly announced research stage immediately updates
+the same progress message. Text and counter updates are throttled to once per
+15 seconds, and Telegram's retry delays apply to all progress edits. The initial
 status and the final footer show the model, tool calls, model turns and the
 confirmed token usage across completed turns. Beside the tokens the bot displays
 an estimated USD total for the current request using Rig's per-turn usage costs.

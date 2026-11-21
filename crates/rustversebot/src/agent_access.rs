@@ -55,6 +55,7 @@ pub async fn admit(
 }
 
 pub enum Action {
+    Model,
     Users,
     Reset,
     Ban,
@@ -75,6 +76,21 @@ pub async fn manage(
         "not_admin"
     } else {
         match (action, id) {
+            (Action::Model, _) => {
+                let setting = args.trim();
+                if setting.is_empty() {
+                    data = json!({"current":state.ai_model().await?.to_string()});
+                } else if setting.contains('@') {
+                    match setting.parse::<rustverse_ai::ModelSelection>() {
+                        Ok(model) => {
+                            state.db.set_ai_model(&model).await?;
+                            data = json!({"updated":model.to_string()});
+                        }
+                        Err(error) => data = json!({"error":error.to_string()}),
+                    }
+                }
+                "ai_model"
+            }
             (Action::Users, _) if !msg.chat.is_private() => "ai_users_private",
             (Action::Users, _) => {
                 let page = if args.trim().is_empty() {

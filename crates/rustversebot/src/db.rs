@@ -3,7 +3,7 @@ use libsql::{Builder, Connection, Database, params};
 use serde::Serialize;
 use std::collections::HashMap;
 
-const SCHEMA_VERSION: i64 = 11;
+const SCHEMA_VERSION: i64 = 12;
 
 #[derive(Default)]
 pub struct PromptSession {
@@ -288,6 +288,15 @@ impl Db {
                  PRAGMA user_version=11;",
             ).await.context("applying migration 11")?;
         }
+        if version < 12 {
+            tx.execute_batch(
+                "CREATE TABLE ai_model (
+                id INTEGER PRIMARY KEY CHECK(id=1), setting TEXT NOT NULL);
+                PRAGMA user_version=12;",
+            )
+            .await
+            .context("applying migration 12")?;
+        }
         tx.commit().await.context("committing migrations")?;
         Ok(())
     }
@@ -311,6 +320,22 @@ impl Db {
             (),
         )
         .await
+    }
+
+    pub async fn model_override(&self) -> anyhow::Result<Option<String>> {
+        self.optional_string("SELECT setting FROM ai_model WHERE id=1", ())
+            .await
+    }
+
+    pub async fn set_ai_model(&self, model: &rustverse_ai::ModelSelection) -> anyhow::Result<()> {
+        self.connection()?
+            .execute(
+                "INSERT INTO ai_model(id,setting) VALUES(1,?1)
+            ON CONFLICT(id) DO UPDATE SET setting=excluded.setting",
+                [model.to_string()],
+            )
+            .await?;
+        Ok(())
     }
 
     /// Follow only the selected answer's live ancestors, in conversational order.
@@ -1210,6 +1235,30 @@ mod tests {
                 .await
                 .unwrap()
                 .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn model_override_survives_restart_and_can_be_replaced() {
+        let dir = tempfile::tempdir().unwrap();
+        let url = format!("file:{}", dir.path().join("model.db").display());
+        let db = Db::connect(&url).await.unwrap();
+        assert_eq!(db.model_override().await.unwrap(), None);
+        db.set_ai_model(&"gpt-6.2-sol@medium".parse().unwrap())
+            .await
+            .unwrap();
+        drop(db);
+        let db = Db::connect(&url).await.unwrap();
+        assert_eq!(
+            db.model_override().await.unwrap().as_deref(),
+            Some("gpt-6.2-sol@medium")
+        );
+        db.set_ai_model(&"gpt-6.2-sol@default".parse().unwrap())
+            .await
+            .unwrap();
+        assert_eq!(
+            db.model_override().await.unwrap().as_deref(),
+            Some("gpt-6.2-sol@default")
         );
     }
 

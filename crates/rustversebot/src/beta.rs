@@ -15,7 +15,6 @@ use teloxide::{
 pub(crate) struct BetaPages {
     pub(crate) client: reqwest::Client,
     generation: tokio::sync::Mutex<()>,
-    pub(crate) model: String,
     manual_limit: usize,
 }
 
@@ -27,8 +26,6 @@ impl BetaPages {
                 .timeout(Duration::from_secs(180))
                 .build()?,
             generation: Default::default(),
-            model: std::env::var("OPENAI_MODEL")
-                .unwrap_or_else(|_| rustverse_ai::DEFAULT_MODEL.to_owned()),
             manual_limit: match std::env::var("BETA_MAX_NEW_REPORTS") {
                 Ok(value) => value.parse().context("invalid BETA_MAX_NEW_REPORTS")?,
                 Err(std::env::VarError::NotPresent) => 10,
@@ -42,6 +39,7 @@ async fn cached_report(
     state: &BotState,
     rev: &Revision,
     agent: &AgentChange,
+    model: &str,
 ) -> Result<Option<String>> {
     state
         .db
@@ -49,31 +47,35 @@ async fn cached_report(
             &rev.previous,
             &rev.current,
             agent.id,
-            &state.beta.model,
+            model,
             rustverse_ai::prompt_version(),
         )
         .await
 }
 
-async fn report(state: &BotState, rev: &Revision, agent: &AgentChange) -> Result<String> {
-    if let Some(text) = cached_report(state, rev, agent).await? {
+async fn report(
+    state: &BotState,
+    rev: &Revision,
+    agent: &AgentChange,
+    model: &str,
+) -> Result<String> {
+    if let Some(text) = cached_report(state, rev, agent, model).await? {
         return Ok(text);
     }
     let _guard = state.beta.generation.lock().await;
-    if let Some(text) = cached_report(state, rev, agent).await? {
+    if let Some(text) = cached_report(state, rev, agent, model).await? {
         return Ok(text);
     }
     let key = rustverse_ai::api_key()?;
     let text =
-        rustverse_ai::beta::agent_report(&state.beta.client, rev, agent, &key, &state.beta.model)
-            .await?;
+        rustverse_ai::beta::agent_report(&state.beta.client, rev, agent, &key, model).await?;
     state
         .db
         .save_beta_report(
             &rev.previous,
             &rev.current,
             agent.id,
-            &state.beta.model,
+            model,
             rustverse_ai::prompt_version(),
             &text,
         )
@@ -199,14 +201,16 @@ async fn send_album(
 struct RevisionAlbums<'a> {
     revision: &'a Revision,
     state: &'a BotState,
+    model: &'a str,
     rendered: BTreeMap<u64, Page>,
 }
 
 impl<'a> RevisionAlbums<'a> {
-    fn new(state: &'a BotState, revision: &'a Revision) -> Self {
+    fn new(state: &'a BotState, revision: &'a Revision, model: &'a str) -> Self {
         Self {
             state,
             revision,
+            model,
             rendered: BTreeMap::new(),
         }
     }
@@ -239,7 +243,7 @@ impl<'a> RevisionAlbums<'a> {
                 let page = match self.rendered.entry(agent.id) {
                     std::collections::btree_map::Entry::Occupied(entry) => entry.into_mut(),
                     std::collections::btree_map::Entry::Vacant(entry) => {
-                        let text = report(self.state, row, agent).await?;
+                        let text = report(self.state, row, agent, self.model).await?;
                         entry.insert(Page::new(
                             agent.id,
                             rustverse_images::beta_page(&text).await?,
@@ -419,6 +423,7 @@ pub async fn command(
         {
             return Ok(());
         }
+        let model = state.ai_model().await?.cache_key();
         let mut rows = revisions(&state.beta.client, prev, cur).await?;
         if compare && rows.len() > 1 {
             rows = vec![rustverse_ai::beta::comparison_range(&rows)?];
@@ -439,7 +444,7 @@ pub async fn command(
             let mut missing = 0;
             for row in &rows {
                 for agent in &row.agents {
-                    if cached_report(state, row, agent).await?.is_none() {
+                    if cached_report(state, row, agent, &model).await?.is_none() {
                         missing += 1;
                         if missing > state.beta.manual_limit {
                             sender
@@ -456,7 +461,7 @@ pub async fn command(
             }
         }
         for row in &rows {
-            RevisionAlbums::new(state, row)
+            RevisionAlbums::new(state, row, &model)
                 .send(bot, chat, &settings, false)
                 .await?;
         }
@@ -475,8 +480,9 @@ pub async fn poll(bot: &Bot, state: &BotState, settings: &SchedulerSettings) -> 
     if state.db.get_distinct_chats().await?.is_empty() || rustverse_ai::api_key().is_err() {
         return Ok(());
     }
+    let model = state.ai_model().await?.cache_key();
     for branch in [Branch::Beta, Branch::Release] {
-        if let Err(err) = poll_branch(bot, state, settings, branch).await {
+        if let Err(err) = poll_branch(bot, state, settings, branch, &model).await {
             log::warn!("Cannot poll {} changelog: {err:#}", branch.name());
         }
     }
@@ -488,6 +494,7 @@ async fn poll_branch(
     state: &BotState,
     settings: &SchedulerSettings,
     branch: Branch,
+    model: &str,
 ) -> Result<()> {
     let latest = branch_revisions(&state.beta.client, branch, None, None)
         .await?
@@ -518,7 +525,7 @@ async fn poll_branch(
             if active.is_empty() {
                 break;
             }
-            deliver_revision(bot, state, branch, &row, &mut active, settings).await;
+            deliver_revision(bot, state, branch, &row, &mut active, settings, model).await;
         }
     }
     Ok(())
@@ -531,8 +538,9 @@ async fn deliver_revision(
     row: &Revision,
     active: &mut Vec<i64>,
     settings: &SchedulerSettings,
+    model: &str,
 ) {
-    let mut albums = RevisionAlbums::new(state, row);
+    let mut albums = RevisionAlbums::new(state, row, model);
     let mut successful = Vec::new();
     for &chat in active.iter() {
         let delivery = async {

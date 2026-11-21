@@ -307,6 +307,19 @@ mod tests {
                 .await
                 .unwrap();
             assert_eq!(entry["id"], id);
+            let compact = crate::entry_view::page(category, &entry, 0).unwrap();
+            let section = match category {
+                Category::Agents | Category::Bangboo => "skills",
+                Category::WEngines => "effects",
+                Category::DriveDiscs => "set_effects",
+                Category::Tutorials => "pages",
+            };
+            assert!(
+                compact[section]
+                    .as_array()
+                    .is_some_and(|items| !items.is_empty())
+            );
+            assert!(compact.to_string().len() < entry.to_string().len());
         }
     }
 }

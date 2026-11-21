@@ -3,8 +3,11 @@
 pub mod beta;
 mod catalog;
 mod diff;
+mod entry_view;
 mod gachabase;
 mod kit;
+mod model;
+pub use model::ModelSelection;
 mod progress;
 mod transport;
 use progress::Preview;
@@ -17,10 +20,7 @@ use reqwest::Client;
 use rig_agent::agent::{
     AgentBuilder, AgentHook, CompletionCallAction, CompletionCallEvent, HookContext, RequestPatch,
 };
-use rig_core::{
-    completion::Effort, http_client::DynHttpClient, message::ToolChoice,
-    providers::openai::OpenAIConfig,
-};
+use rig_core::{http_client::DynHttpClient, message::ToolChoice, providers::openai::OpenAIConfig};
 use serde_json::{Value, json};
 
 pub const DEFAULT_MODEL: &str = "gpt-6.2-sol";
@@ -65,7 +65,8 @@ const OUTPUT_FORMAT: &str = "Не выводи таблицы ни в Markdown, 
 const TUTORIAL_GUIDANCE: &str = "Если встретился незнакомый игровой термин, статус или название механики,
 сначала ищи его через search_gachabase в категории tutorials по исходному английскому или китайскому
 названию. По примеру Lumiflux — Refringe попробуй также отдельные слова Refringe и Lumiflux.
-Открой найденный ID через get_gachabase_entry и прочитай /pages в нужной версии. Отличай общее
+Открой найденный ID через get_gachabase_entry в нужной версии с selector=null: это вернёт очищенные тексты страниц.
+Если есть next_offset, продолжи чтение при необходимости. Отличай общее
 правило из руководства от конкретного изменения персонажа. Если руководство не даёт определения,
 поищи связанную запись по синониму или на другом языке, затем явно обозначь, что удалось подтвердить.";
 
@@ -293,10 +294,13 @@ async fn run_agent(
     history: &[PromptTurn],
     preview: Option<Preview>,
 ) -> Result<String> {
+    let selection: ModelSelection = model.parse()?;
     let http = DynHttpClient::new(transport::ReportHttp::new()?);
-    let wire =
-        rig_core::providers::openai::responses_api::wire::Responses::new(config.clone(), model)
-            .with_strict_tools();
+    let wire = rig_core::providers::openai::responses_api::wire::Responses::new(
+        config.clone(),
+        selection.slug,
+    )
+    .with_strict_tools();
     let research_updates = matches!(&preview, Some(Preview::Progress(_)));
     let mut builder = AgentBuilder::new(rig_core::Model::new(wire, http))
         .preamble(instructions)
@@ -309,8 +313,8 @@ async fn run_agent(
     if research_updates {
         builder = builder.append_preamble(RESEARCH_UPDATES);
     }
-    if model == DEFAULT_MODEL {
-        builder = builder.reasoning(Effort::High);
+    if let Some(reasoning) = selection.reasoning {
+        builder = builder.reasoning(reasoning);
     }
     let streaming = preview.is_some();
     if let Some(preview) = preview {
@@ -488,6 +492,8 @@ mod tests {
         use axum::{Json, Router, routing::post};
         let server=mock_openai(Router::new().route("/v1/responses",post(|Json(body):Json<Value>| async move {
             assert_eq!(body["stream"],true);
+            assert_eq!(body["model"],DEFAULT_MODEL);
+            assert_eq!(body["reasoning"]["effort"],"medium");
             assert!(body["instructions"].as_str().unwrap().contains(OUTPUT_FORMAT));
             assert!(body["instructions"].as_str().unwrap().contains(RESEARCH_UPDATES));
             let dialogue:Vec<_>=body["input"].as_array().unwrap().iter().filter(|item|item.get("role").is_some()).collect();
@@ -533,7 +539,7 @@ mod tests {
         tools.report_input(&page, snapshots(), snapshots()).unwrap();
         let answer = run_agent(
             &server,
-            DEFAULT_MODEL,
+            "gpt-6.2-sol@medium",
             tools,
             "Answer".into(),
             "question".into(),

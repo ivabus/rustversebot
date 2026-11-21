@@ -44,6 +44,8 @@ enum Command {
     BetaDiff(String),
     /// Спросить о Zenless Zone Zero по данным GachaBase: /prompt <вопрос>.
     Prompt(String),
+    /// Выбрать модель ИИ и уровень reasoning (для администратора).
+    Model(String),
     /// Сравнить версии беты или релиза по данным GachaBase.
     Diff(String),
     /// Сбросить минутный лимит пользователя (для администратора).
@@ -102,6 +104,18 @@ pub struct BotState {
     pub public_web_url: Option<String>,
     pub nanoka: nanoka::NanokaClient,
     pub http: reqwest::Client,
+}
+
+impl BotState {
+    pub(crate) async fn ai_model(&self) -> anyhow::Result<rustverse_ai::ModelSelection> {
+        self.db
+            .model_override()
+            .await?
+            .unwrap_or_else(|| {
+                std::env::var("OPENAI_MODEL").unwrap_or_else(|_| rustverse_ai::DEFAULT_MODEL.into())
+            })
+            .parse()
+    }
 }
 
 #[tokio::main]
@@ -250,6 +264,16 @@ async fn shutdown_signal() -> std::io::Result<()> {
 #[cfg(test)]
 mod command_tests {
     use super::*;
+
+    #[test]
+    fn model_command_keeps_the_reasoning_suffix_in_group_chats() {
+        assert!(
+            matches!(Command::parse("/model", "bot"), Ok(Command::Model(args)) if args.is_empty())
+        );
+        assert!(
+            matches!(Command::parse("/model@bot gpt-6.2-sol@medium", "bot"), Ok(Command::Model(args)) if args=="gpt-6.2-sol@medium")
+        );
+    }
 
     #[test]
     fn promocode_aliases_resolve_in_private_and_group_chats() {

@@ -26,11 +26,45 @@ enum LiveMessage {
     Group(MessageId),
 }
 
+impl LiveMessage {
+    fn new_research_stage(self, progress: &PromptProgress, shown: Option<&str>) -> bool {
+        matches!(self, Self::Group(_))
+            && progress.research_status.is_some()
+            && progress.research_status.as_deref() != shown
+    }
+}
+
+async fn next_update(
+    progress: &mut watch::Receiver<PromptProgress>,
+    target: LiveMessage,
+    shown: Option<&str>,
+    next: Instant,
+    retry_at: Option<Instant>,
+) -> Option<PromptProgress> {
+    if let Some(resume) = retry_at {
+        tokio::select! {
+            _ = progress.wait_for(|_| false) => return None, // generation finished
+            _ = tokio::time::sleep_until(resume) => {}
+        }
+    }
+    tokio::select! {
+        changed = progress.wait_for(|p| target.new_research_stage(p, shown)) => {
+            changed.ok()?;
+        }
+        _ = tokio::time::sleep_until(next) => {}
+    }
+    if progress.has_changed().is_err() {
+        return None;
+    }
+    Some(progress.borrow_and_update().clone())
+}
+
 struct PromptOutput<'a> {
     bot: &'a Bot,
     msg: &'a Message,
     state: &'a BotState,
     question: &'a str,
+    model: &'a str,
 }
 
 // Ordinary supergroup replies may carry a reply-chain ID even outside a forum.
@@ -181,21 +215,28 @@ impl PromptOutput<'_> {
             LiveMessage::Draft => DRAFT_INTERVAL,
             LiveMessage::Group(_) => GROUP_INTERVAL,
         };
-        let mut timer = tokio::time::interval_at(Instant::now() + spacing, spacing);
-        timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         let mut sent = Instant::now();
-        loop {
-            tokio::select! {
-                changed = progress.changed() => {
-                    if changed.is_err() {return}
-                    continue;
-                }
-                _ = timer.tick() => {}
+        let mut next = sent + spacing;
+        let mut shown = None;
+        let mut retry_at = None;
+        while let Some(mut p) = next_update(
+            &mut progress,
+            target,
+            shown.as_deref(),
+            next,
+            retry_at.take(),
+        )
+        .await
+        {
+            next = Instant::now() + spacing;
+            // A text delta can arrive in the same watch snapshot as a new stage.
+            // Make sure the first edit for that stage actually displays its name.
+            if target.new_research_stage(&p, shown.as_deref()) {
+                p.stage = PromptStage::Researching;
             }
-            let p = progress.borrow().clone();
             let Ok(parts) = messages(
                 &self.state.templates,
-                &self.state.beta.model,
+                self.model,
                 &p,
                 self.question,
                 &p.text,
@@ -206,6 +247,7 @@ impl PromptOutput<'_> {
             let text = &parts[0].text;
             let refresh = matches!(target, LiveMessage::Draft) && sent.elapsed() >= DRAFT_REFRESH;
             if *text == last && !refresh {
+                shown = p.research_status;
                 continue;
             }
             let update = match target {
@@ -213,6 +255,7 @@ impl PromptOutput<'_> {
                 LiveMessage::Group(id) => match self.edit(id, text).await {
                     Ok(()) => Update::Sent,
                     Err(teloxide::RequestError::RetryAfter(wait)) => Update::Wait(wait.duration()),
+                    Err(teloxide::RequestError::Network(_)) => Update::Wait(spacing),
                     Err(_) => Update::Unavailable,
                 },
             };
@@ -220,8 +263,12 @@ impl PromptOutput<'_> {
                 Update::Sent => {
                     last.clone_from(text);
                     sent = Instant::now();
+                    shown = p.research_status;
+                    next = sent + spacing;
                 }
-                Update::Wait(wait) => timer.reset_after(wait.max(spacing)),
+                Update::Wait(wait) => {
+                    retry_at = Some(Instant::now() + wait.max(Duration::from_secs(1)));
+                }
                 Update::Unavailable => return,
             }
         }
@@ -324,13 +371,15 @@ async fn answer(
     {
         return Ok(());
     }
+    let selection = state.ai_model().await?.to_string();
+    let model = selection.as_str();
     let output = PromptOutput {
         bot,
         msg,
         state,
         question,
+        model,
     };
-    let model = &state.beta.model;
     let initial = PromptProgress::default();
     let status = messages(&state.templates, model, &initial, question, "", true)?.remove(0);
     let last = status.text.clone();
@@ -403,6 +452,45 @@ async fn answer(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn only_a_new_group_stage_bypasses_the_update_interval() {
+        let (tx, mut rx) = watch::channel(PromptProgress::default());
+        let group = LiveMessage::Group(MessageId(1));
+        let later = Instant::now() + GROUP_INTERVAL;
+        tx.send_modify(|p| {
+            p.research_status = Some("Ищу правило".into());
+            p.tools += 1;
+        });
+        let update = tokio::time::timeout(
+            Duration::from_secs(1),
+            next_update(&mut rx, group, None, later, None),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        let shown = update.research_status.as_deref();
+        tx.send_modify(|p| p.tools += 1);
+        for (target, previous, limited) in [
+            (group, shown, None),
+            (LiveMessage::Draft, None, None),
+            (group, None, Some(later)),
+        ] {
+            assert!(
+                tokio::time::timeout(
+                    Duration::ZERO,
+                    next_update(&mut rx, target, previous, later, limited)
+                )
+                .await
+                .is_err()
+            );
+        }
+        tx.send_modify(|p| p.research_status = Some("Сравниваю версии".into()));
+        let update = next_update(&mut rx, group, shown, later, Some(Instant::now()))
+            .await
+            .unwrap();
+        assert_eq!(update.research_status.as_deref(), Some("Сравниваю версии"));
+    }
 
     #[tokio::test]
     async fn ordinary_group_replies_find_the_answer_without_treating_reply_threads_as_topics() {
