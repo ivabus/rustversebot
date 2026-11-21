@@ -27,7 +27,7 @@ pub(crate) fn definitions() -> [ToolSpec; 2] {
         },
         ToolSpec {
             name: "get_endgame_season",
-            description: "Read rooms, monsters, weaknesses, stats and buffs in a Nanoka season. Use current or next for a fresh relative question, and the exact ID for a follow-up about a previously selected season. Pages cover all modes and zones. A selector can read a JSON pointer on the same page, e.g. a room. Use source and paths under /zones for compute.",
+            description: "Read season rooms, monster IDs, stats and buffs. Deadly Assault has separate normal and hard floors: agents used in normal rooms are available again on hard. For boss mechanics read the monster ID in GachaBase category=enemies. Use current or next for a fresh relative question, or an exact ID for a follow-up. Pages cover all floors and zones. Use /zones pointers on the same page for a focused read or compute.",
             parameters: json!({"type":"object","additionalProperties":false,"properties":{"mode":mode,"season":{"type":"string","description":"current, next, or a five/six-digit season ID"},"offset":offset,"selector":{"type":["string","null"],"description":"Null for the full page, or an exact /zones/... JSON pointer."}},"required":["mode","season","offset","selector"]}),
         },
     ]
@@ -94,7 +94,13 @@ fn zones(mode_id: u64, zone_type: Option<u64>, zones: &HashMap<String, Zone>) ->
                     }
                 }
             }
-            json!({"mode_id":mode_id,"zone_type":zone_type,"zone_id":id,"zone":data})
+            let mut row = json!({"mode_id":mode_id,"zone_type":zone_type,"zone_id":id,"zone":data});
+            match zone_type {
+                Some(1001) => row["floor"] = json!("normal"),
+                Some(1002) => row["floor"] = json!("hard"),
+                _ => {}
+            }
+            row
         })
         .collect()
 }
@@ -254,6 +260,18 @@ impl SeasonTools {
             entry.insert(rows);
         }
         let rows = &self.details[&id];
+        if mode == EndgameType::DeadlyAssault {
+            result["floors"] = json!(
+                ["normal", "hard"]
+                    .into_iter()
+                    .filter(|floor| rows.iter().any(|row| row["floor"] == *floor))
+                    .collect::<Vec<_>>()
+            );
+            result["team_rules"] = json!({"reuse_between_normal_rooms":false});
+            if rows.iter().any(|row| row["floor"] == "hard") {
+                result["team_rules"]["reuse_from_normal_on_hard"] = json!(true);
+            }
+        }
         ensure!(offset <= rows.len(), "Invalid zone offset");
         // Keep small zones together and always return at least one complete zone.
         let mut end = offset;
@@ -289,10 +307,17 @@ mod tests {
             "690431":{"en":"Preview","sort":9,"begin":"2026-01-01 00:00:00"}
         })).unwrap();
         tools.indexes.insert(ty, index);
+        let zone = serde_json::from_value(json!({
+            "1":{"name":"Test boss","stage_num":1,"monster_level":70}
+        }))
+        .unwrap();
         for id in [69041, 690421, 690431] {
             tools.details.insert(
                 id,
-                vec![json!({"zone_type":1001}), json!({"zone_type":1002})],
+                zones(id + 1, Some(1002), &zone)
+                    .into_iter()
+                    .chain(zones(id, Some(1001), &zone))
+                    .collect(),
             );
         }
         let time = |date: &str| DateTime::parse_from_rfc3339(date).unwrap().to_utc();
@@ -310,6 +335,13 @@ mod tests {
         assert_eq!(preview["status"], "preview");
         assert!(preview["starts_at"].is_null() && preview["ends_at"].is_null());
         assert_eq!(preview["zones"].as_array().unwrap().len(), 2);
+        assert_eq!(preview["floors"], json!(["normal", "hard"]));
+        assert_eq!(preview["zones"][0]["floor"], "hard");
+        assert_eq!(preview["zones"][1]["floor"], "normal");
+        assert_eq!(preview["team_rules"]["reuse_between_normal_rooms"], false);
+        assert_eq!(preview["team_rules"]["reuse_from_normal_on_hard"], true);
+        let later_page = tools.detail(ty, "690431", 1, after).await.unwrap();
+        assert_eq!(later_page["team_rules"], preview["team_rules"]);
         let listed = tools.list(Some(ty), 0, after).await.unwrap();
         let rows = listed["seasons"].as_array().unwrap();
         assert!(rows.iter().all(|row| row["mode"] == "deadly_assault"));

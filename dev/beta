@@ -1,0 +1,122 @@
+#!/usr/bin/env python3
+"""Local beta report preview, using the bot's release-mode renderer."""
+import argparse
+import functools
+import os
+from pathlib import Path
+import shutil
+import subprocess
+import sys
+import tempfile
+import threading
+import time
+from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
+
+ROOT = Path(__file__).resolve().parents[1]
+WORK = ROOT / "target/beta-preview"
+PUBLIC = WORK / "public"
+IMAGES = ROOT / "crates/rustverse_images"
+FIXTURE = IMAGES / "examples/kafka.md"
+
+
+def cargo(*args):
+    subprocess.run(["cargo", *args], cwd=ROOT, check=True)
+
+
+def render(report, output):
+    with tempfile.TemporaryDirectory(dir=WORK) as staging:
+        png = Path(staging) / "page.png"
+        cargo("run", "--quiet", "--release", "--locked", "-p", "rustverse_images",
+              "--", "beta", report, png)
+        png.replace(output)
+    print(f"PNG: {output}", flush=True)
+
+
+class PreviewHandler(SimpleHTTPRequestHandler):
+    def end_headers(self):
+        self.send_header("Cache-Control", "no-store")
+        page = Path(self.directory) / "page.png"
+        if page.exists():
+            self.send_header("X-Preview-Revision", str(page.stat().st_mtime_ns))
+        super().end_headers()
+
+    def log_message(self, *args):
+        pass
+
+
+def watch(report, port):
+    public = PUBLIC if port == 8765 else WORK / f"public-{port}"
+    public.mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(ROOT / "dev/preview.html", public / "index.html")
+    handler = functools.partial(PreviewHandler, directory=str(public))
+    with ThreadingHTTPServer(("127.0.0.1", port), handler) as server:
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        print(f"Предпросмотр: http://127.0.0.1:{server.server_port}/\nОтчёт: {report}\n"
+              "Для остановки нажмите Ctrl+C.", flush=True)
+        sources = [report, IMAGES / "beta_agent.typ", IMAGES / "prelude.typ",
+                   *sorted((IMAGES / "src").glob("*.rs"))]
+        last = None
+        try:
+            while True:
+                state = tuple(p.stat().st_mtime_ns if p.is_file() else None for p in sources)
+                if state != last:
+                    last = state
+                    try:
+                        render(report, public / "page.png")
+                    except subprocess.CalledProcessError:
+                        print("Исправьте ошибку и сохраните файл для повторного рендера.", flush=True)
+                time.sleep(0.5)
+        finally:
+            server.shutdown()
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    commands = parser.add_subparsers(dest="command")
+    for name in ("watch", "render"):
+        cmd = commands.add_parser(name)
+        cmd.add_argument("--report", type=Path, help="Markdown-отчёт для рендера")
+        if name == "watch":
+            cmd.add_argument("--port", type=int, default=8765)
+    commands.add_parser("test", help="Release-тесты всего workspace")
+    live = commands.add_parser("analyze", help="Новый отчёт через GachaBase и OpenAI в stdout")
+    live.add_argument("url")
+    args = parser.parse_args()
+
+    # Cargo-installed CLI tools are not always on PATH on macOS.
+    os.environ["PATH"] += os.pathsep + str(Path.home() / ".cargo/bin")
+    cache = Path("/tmp/rustversebot-svg-release")
+    if cache.is_dir() and cache.stat().st_uid == os.getuid():
+        os.environ.setdefault("CARGO_TARGET_DIR", str(cache))
+    if args.command == "analyze":
+        cargo("run", "--quiet", "--release", "--locked", "-p", "rustverse_ai", "--", args.url)
+        return
+    for var, tool in (("TYPST_BIN", "typst"), ("RESVG_BIN", "resvg")):
+        if not shutil.which(os.environ.get(var) or tool):
+            parser.exit(1, f"Не найден {tool}. Запустите через nix develop или задайте {var}.\n")
+    if args.command == "test":
+        cargo("test", "--release", "--workspace", "--locked")
+        return
+    PUBLIC.mkdir(parents=True, exist_ok=True)
+    report = getattr(args, "report", None)
+    if report is None:
+        report = WORK / "report.md"
+        if not report.exists():
+            shutil.copyfile(FIXTURE, report)
+    elif not report.is_file():
+        parser.error(f"Отчёт не найден: {report}")
+    if args.command == "render":
+        render(report.resolve(), PUBLIC / "page.png")
+    else:
+        watch(report.resolve(), getattr(args, "port", 8765))
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except KeyboardInterrupt:
+        pass
+    except subprocess.CalledProcessError as error:
+        sys.exit(error.returncode)
+    except OSError as error:
+        sys.exit(str(error))

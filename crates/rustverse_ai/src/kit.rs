@@ -30,11 +30,10 @@ pub(crate) struct ToolSpec {
 }
 
 pub(crate) fn definitions() -> Vec<ToolSpec> {
-    let category =
-        json!({"type":"string","enum":["agents","w-engines","drive-discs","bangboo","tutorials"]});
+    let category = json!({"type":"string","enum":["agents","w-engines","drive-discs","bangboo","enemies","tutorials"]});
     let language = json!({"type":"string","enum":["en","cn"]});
     let offset = json!({"type":["integer","null"],"minimum":0,"description":"Start at 0 or null. Copy next_offset to continue."});
-    let version = json!({"type":["string","null"],"description":"Exact design revision, beta or release. Null reuses the pinned revision. An unversioned question starts at the newest design revision across beta and release; a report starts at cur."});
+    let version = json!({"type":["string","null"],"description":"Exact revision or branch ('release' or 'beta'). For current live endgame use 'release', then its returned revision. Null reuses the pinned revision or defaults to the newest across both branches for questions. Reports start at cur."});
     vec![
         ToolSpec {
             name: "list_recent_revisions",
@@ -43,7 +42,7 @@ pub(crate) fn definitions() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "search_gachabase",
-            description: "Search by name, alias, slug or ID. For a roster use category=agents, query='', offset=null: returns all matching agents at the pinned revision. Filter by specialty, element or both (AND), using catalog names in the selected language, e.g. Anomaly and Fire in en. Null filters list all. Prefer entries with core skills when names collide.",
+            description: "Search by name, alias, slug or ID. For a season boss use category=enemies and the monster ID from Nanoka (or its localized name). For a roster use category=agents, query='', offset=null: returns all matching agents at the pinned revision. Filter agents by specialty, element or both (AND), using catalog names in the selected language. Prefer entries with core skills when names collide.",
             parameters: json!({"type":"object","additionalProperties":false,"properties":{
                 "category":category,"query":{"type":"string"},"language":language,"offset":offset,"version":version,
                 "specialty":{"type":["string","null"]},"element":{"type":["string","null"]}
@@ -51,7 +50,7 @@ pub(crate) fn definitions() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "get_gachabase_entry",
-            description: "Read by ID. For team selection use @team for short Core Passive and Additional Ability descriptions, then follow a specific path for exact conditions. Null selector returns compact pages; empty lists fields; JSON pointer reads a field. @raw returns all levels and growth coefficients; name/ID or text:<phrase> finds paths. Agent skill_level and core_level default to 12 and maximum. Use source and JSON pointers for compute. @changes lists change groups.",
+            description: "Read by ID. For enemies, null selector gives combat and codex descriptions. /enemy_variants contains variant affinities. For agents, @team summarizes Core Passive and Additional Ability; follow a path for exact conditions. Null returns compact pages, empty lists fields, a JSON pointer reads a field, @raw reads the full record. Name/ID or text:<phrase> finds paths. Agent levels default to skill 12 and max core. Use source and JSON pointers for compute. @changes lists diff groups.",
             parameters: json!({"type":"object","additionalProperties":false,"properties":{
                 "category":category,"id":{"type":"integer","minimum":1},"language":language,
                 "version":version,"selector":{"type":["string","null"]},"offset":offset,
@@ -577,6 +576,47 @@ mod tests {
     use super::*;
 
     const PAGE: &str = "https://zzz.gachabase.net/diff/agents/1601/sunbringer?prev=beta_3.4.5_20694646&cur=beta_3.4.5_20699967";
+
+    #[tokio::test]
+    async fn enemy_search_and_combat_description_use_the_requested_release() {
+        let version = "release_3.4.0_42";
+        let layout = json!({"type":"data","nodes":[{"data":[{"language":1,"revisions":2},"en",
+            {"current":3},{"branch":4,"version":5,"design_revision":6},"release","3.4.0",42]}]});
+        let rows = json!({"type":"chunk","data":[{"data":1},{"entries":2},[3],
+            {"id":4,"slug":5,"name":6,"search_data":7},40009,"integrated-girtablullu",{"text":7},"Integrated - Girtablullu"]});
+        let index = Index::decode(&format!("{layout}\n{rows}"), "en", version).unwrap();
+        let mut kit = KitTools::for_question(Client::new(), "Текущий штурм");
+        kit.recent = Some(vec!["beta_3.5.0_99".into(), version.into()]);
+        kit.indexes
+            .insert((Category::Enemies, Language::En, version.into()), index);
+        let source = format!("enemies/40009/en/{version}/raw");
+        kit.sources.insert(source.clone(),json!({"id":40009,"name":{"text":"Integrated - Girtablullu"},
+            "skill_description":{"text":"Dodge the attack after the teleport."},"description":{"text":"Codex entry."}}));
+        for query in ["40009", "integrated girtablullu"] {
+            let matches = kit
+                .call(
+                    "search_gachabase",
+                    json!({"category":"enemies","query":query,
+                "language":"en","version":"release"}),
+                )
+                .await
+                .unwrap();
+            assert_eq!(matches["matches"][0]["id"], 40009);
+            let entry = kit
+                .call(
+                    "get_gachabase_entry",
+                    json!({"category":"enemies","id":matches["matches"][0]["id"],
+                "language":"en","version":matches["version"]}),
+                )
+                .await
+                .unwrap();
+            assert_eq!(entry["source"], source);
+            assert_eq!(
+                entry["result"]["details"][0]["skill_description"],
+                "Dodge the attack after the teleport."
+            );
+        }
+    }
 
     #[tokio::test]
     async fn questions_pin_the_newest_or_the_requested_revision() {

@@ -47,13 +47,17 @@ compaction. Summary generation contributes to the request's token and cost total
 - `list_recent_revisions` lists recent design revisions from beta and release.
 - `search_gachabase` searches a revision's catalog by category, localized name,
   alias, slug or ID. The categories are agents, W-Engines, drive discs,
-  Bangboo and tutorials. For agents an empty query lists the entire matching
+  Bangboo, enemies and tutorials. A season monster ID can be used directly to
+  read the matching enemy's combat description, including its specific variant.
+  For agents an empty query lists the entire matching
   roster in one response. Set `specialty`, `element`, or both using names from
   the selected language. For example, setting `Anomaly` and `Fire` in English selects
   agents matching both. Named searches can use the same filters.
 - `get_gachabase_entry` reads a category and ID in English or Simplified Chinese.
   An optional exact version pins the result to a revision, including release
-  revisions. Both lookup tools reuse a pinned revision. Questions default to the
+  revisions. Both lookup tools reuse a pinned revision. For current live endgame
+  the assistant requests the release branch and uses that revision for roster and
+  enemy lookups. Unversioned lookups otherwise default to the
   newest design revision across beta and release by GachaBase design timestamp.
   Reports default to their target revision. A null selector returns compact
   pages, skills or effects, with presentation colors removed. Copy `next_offset`
@@ -144,6 +148,8 @@ by mode, and `get_endgame_season` to read rooms, enemies and buffs by exact ID,
 `current` or `next`. Relative selectors use the same European rotation as Telegram's
 season commands. Previews have a separate status and no official dates. Following
 up about a room uses the selected season ID even after a rotation changes.
+Deadly Assault labels its normal and hard floors. Each normal room needs its own
+agents. The hard floor can reuse agents from any normal room.
 
 In groups, participants can continue a visible answer under their own access
 and rate limits. Separate replies to an earlier answer create independent branches.

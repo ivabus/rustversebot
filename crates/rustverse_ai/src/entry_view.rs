@@ -162,10 +162,26 @@ pub(super) fn page(category: Category, entry: &Value, offset: usize) -> Result<V
             &[],
         ),
         Category::Bangboo => (&["name", "rarity_id"], "skills", &[]),
+        Category::Enemies => (
+            &["name", "id", "base_variant_id", "variant_ids"],
+            "details",
+            &[],
+        ),
     };
     let records = match category {
         Category::Agents => agent_records(entry),
         Category::Bangboo => bangboo_records(entry),
+        Category::Enemies => ["skill_description", "description"]
+            .into_iter()
+            .filter_map(|key| {
+                let data = fields(entry, &[key]);
+                data.get(key)?;
+                Some(Record {
+                    path: format!("/{key}"),
+                    data,
+                })
+            })
+            .collect(),
         _ => rows(entry, section)
             .map(|(i, row)| Record {
                 path: format!("/{section}/{i}"),

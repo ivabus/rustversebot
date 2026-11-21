@@ -14,6 +14,7 @@ pub(crate) enum Category {
     WEngines,
     DriveDiscs,
     Bangboo,
+    Enemies,
     Tutorials,
 }
 
@@ -24,6 +25,7 @@ impl Category {
             Self::WEngines => "w-engines",
             Self::DriveDiscs => "drive-discs",
             Self::Bangboo => "bangboo",
+            Self::Enemies => "enemies",
             Self::Tutorials => "tutorials",
         }
     }
@@ -61,10 +63,10 @@ impl Index {
         revision: &str,
     ) -> Result<Self> {
         crate::beta::revision_group(revision)?;
-        let path = if category == Category::Tutorials {
-            "tutorials/all"
-        } else {
-            category.path()
+        let path = match category {
+            Category::Tutorials => "tutorials/all",
+            Category::Enemies => "enemies/all",
+            other => other.path(),
         };
         let body = client
             .get(format!(
@@ -80,7 +82,7 @@ impl Index {
         Self::decode(&body, lang, revision)
     }
 
-    fn decode(body: &str, lang: &str, expected: &str) -> Result<Self> {
+    pub(super) fn decode(body: &str, lang: &str, expected: &str) -> Result<Self> {
         let mut revision = None;
         for frame in serde_json::Deserializer::from_str(body).into_iter::<Value>() {
             let frame = frame?;
@@ -353,6 +355,13 @@ pub(crate) async fn detail(
             let mut dto = dto;
             if !tips.is_null() {
                 dto["tooltips"] = tips;
+            }
+            if category == Category::Enemies {
+                for key in ["enemy_variants", "elements"] {
+                    if refs.get(key).is_some() {
+                        dto[key] = resolve(field(t, refs, key)?, t, 0)?;
+                    }
+                }
             }
             return Ok(dto);
         }
