@@ -1,258 +1,75 @@
 # AGENTS.md
 
-## Project overview
+Руководство для работы в Cargo workspace `rustversebot`. Пользовательские сценарии, команды Telegram и запуск описаны в [README.md](README.md). При изменении команды сверяйте документацию с маршрутом обработки сообщения, клавиатурой и фактическим ответом.
 
-`rustversebot` is a Rust Telegram bot for tracking Zenless Zone Zero endgame
-results. It stores data in async libSQL/Turso, renders Telegram messages from
-MiniJinja templates, generates PNG cards through `rustverse_svg`, and exposes
-an optional lightweight Axum dashboard.
+## Где вносить изменения
 
-The project is a single Cargo workspace:
+| Область | Точка входа |
+| --- | --- |
+| Команды Telegram | [main.rs](crates/rustversebot/src/main.rs) задаёт имена, псевдонимы, меню и порядок диспетчеризации. [handlers.rs](crates/rustversebot/src/handlers.rs) обрабатывает команды, нажатия кнопок, личные карточки и рейтинги. Команды без аргументов для выбора игрока и сезона имеют отдельные обработчики. |
+| Фоновые процессы и хранение | [scheduler.rs](crates/rustversebot/src/scheduler.rs) собирает результаты и отправляет сводки и анонсы. [promocodes.rs](crates/rustversebot/src/promocodes.rs) читает источники кодов. [db.rs](crates/rustversebot/src/db.rs) владеет соединениями libSQL, миграциями и запросами. |
+| Данные игры | [rustverse](crates/rustverse) — клиент HoYoLAB и модели прохождений игроков. [nanoka](crates/nanoka) — каталог сезонов, расписание и характеристики противников. Переиспользуйте модели крейта, которому принадлежат данные. |
+| Изображения | [rustverse_images](crates/rustverse_images) содержит шаблоны Typst, шрифт, статические изображения и конвейер Typst → SVG → PNG. Индивидуальные результаты, рейтинги, сезонные карточки и страницы отчётов используют разные шаблоны. |
+| Ассистент и сравнение версий | [rustverse_ai](crates/rustverse_ai) читает ревизии и каталог GachaBase, обращается к Nanoka, выполняет вычисления и формирует ответы через OpenAI. В боте [prompt.rs](crates/rustversebot/src/prompt.rs) ведёт цепочки ответов, [beta.rs](crates/rustversebot/src/beta.rs) готовит сравнения и рассылки. |
+| Веб-панель | [web.rs](crates/rustversebot/src/web.rs) задаёт маршруты и публичные DTO. [HTML, CSS и JavaScript](crates/rustversebot/web) встроены в бинарник. |
 
-- `crates/rustverse` — HoYoLAB client and player result models.
-- `crates/rustverse_svg` — SVG templates and PNG rendering.
-- `crates/nanoka` — public Nanoka season catalog, boss stats, and image URLs.
-- `crates/rustversebot` — the Telegram bot.
+## Данные игроков и доставка сообщений
 
-Changes to a shared contract may therefore require coordinated edits in another
-workspace crate. Do not copy their models or implementations between crates.
+- Бот открывает базу асинхронно через `libsql` по адресу `file:…`. При изменении схемы повышайте `SCHEMA_VERSION` и добавляйте прямую миграцию. Проверяйте как создание пустой базы, так и переход с предыдущей версии.
+- Регистрация и поиск ника привязаны к `chat_id`. Снимки прохождений хранятся по игровому UID и режиму. Явный числовой UID в `/da` или `/shiyu` разрешает разовый просмотр. Список кнопок, обработка кнопки и выбор участников рейтинга должны учитывать регистрации текущего чата.
+- Для личной карточки берите последний пригодный снимок, при его отсутствии используйте HoYoLAB. Для сравнения нужны последние результаты двух разных сезонов. Ручной рейтинг строится за последний сезон с данными у игроков чата. В рейтинге Deadly Assault учитывайте сумму обычного и сложного счёта.
+- Сохраняйте ключ сезона HoYoLAB в исходном серверном времени. Для сводок через 6 часов, 24 часа и 14 дней считайте момент старта по европейскому серверу (UTC+1), показывайте даты в МСК (UTC+3). Стройте сводку за сезон, который вызвал отправку, даже при совпадении с началом следующего. Перед повторной отправкой проверяйте, что окно ещё открыто.
+- Планировщик должен реагировать на остановку. Сохраняйте интервалы запросов и задержки при повторах. Записывайте факт доставки только после подтверждения Telegram. Ошибка отправки в один чат не должна останавливать рассылку в другие.
+- Список получателей рассылок определяется по чатам с зарегистрированными UID. При первой проверке кодов сохраняйте исходный набор без рассылки. Для GachaBase ведите отдельную позицию по чату и ветке, чтобы возобновить доставку последующих ревизий по порядку.
 
-## Fast orientation
+## Календарь Nanoka и карточки сезонов
 
-Start here when taking over work:
+Общая логика выбора сезона находится в [calendar.rs](crates/nanoka/src/calendar.rs). Её используют и команды Telegram, и инструменты ассистента. Правила автоматического анонса проверяются отдельно в планировщике.
 
-- `crates/rustversebot/src/main.rs` assembles `BotState`, starts the Telegram
-  dispatcher, scheduler, and optional web server. The `Command` enum is the
-  definitive list of bot commands.
-- `handlers.rs` owns command and callback behavior, plus media-group construction.
-  `scheduler.rs` owns periodic fetching, checkpoint delivery, and season
-  announcements. `db.rs` owns schema migrations and all persistence. `web.rs`
-  owns the optional Axum dashboard.
-- `crates/rustversebot/templates/` contains Telegram-facing text. Its files
-  are loaded explicitly by `src/templates.rs`. Use `bot_templates.rs` to send
-  them.
-- `crates/nanoka/src/lib.rs` is the async public season-data client and
-  `types.rs` is the shared data contract. Use the `*_resolved` methods when
-  rendering: they resolve Nanoka image paths and apply Deadly Assault stats.
-- `crates/rustverse_svg/src/lib.rs` converts game/API models into template
-  views and rasterizes the SVG. Templates and static art sit beside that crate.
-  `examples/render_season.rs` is the quickest visual-development entry point.
-- `crates/rustverse` is the HoYoLAB player-data client. It is for tracked
-  player results. Nanoka is the source of seasonal rotations and future
-  announcement data.
+- Для шестизначного ID порядковый номер равен `id / 10`. После выхода сезона Deadly Assault может сохранить шестизначный ID. Официальное начало определяет `live_begin`. Тестовые `begin` и `end` не делают превью текущим сезоном.
+- Для `/previous` и `/current` выбирайте опубликованные ротации по времени европейского сервера. В `/next` приоритет у следующей официальной ротации с соседним номером. Кандидат из превью должен иметь номер ровно `current + 1`. Отправляйте пару одним альбомом только при наличии обоих режимов. Обе строки подписи должны быть у первой фотографии.
+- Для анонса требуется опубликованный `live_begin`. Планировщик принимает Deadly Assault с пяти- и шестизначными ID на `69` и `sort = 9`, Shiyu — с пятизначным ID на `62` и `sort = 1`. Доставка разрешена до момента старта. Ключ повторной проверки — чат, тип события и ID сезона.
+- Перед рендерингом получайте детали через `get_boss_detail_resolved` или `get_detail_resolved`. Для Shiyu проверяйте вариант `AnySeasonDetail::Shiyu`. Для сложного режима Deadly Assault с `zone_type = 1002` используйте таблицу масштабирования `1301..=1324`, когда она присутствует. Сохраните подбор по `zone_type` для старых данных.
+- [Рендерер](crates/rustverse_images/src/lib.rs) упорядочивает режимы Deadly Assault и передаёт их все в `endgame_da.typ`, начиная с основного. Для `endgame_shiyu.typ` он оставляет дочерние зоны пятого этапа Critical Node. Личная карточка Shiyu требует одновременно JSON результата игрока и JSON соответствующего сезона.
+- Для каждого рендеринга используются временный каталог и внешние процессы `typst` и `resvg`. Сохраняйте отмену процессов и тайм-аут. Шаблоны, шрифт и статические ресурсы встроены в крейт, файлы удалённых изображений кэшируются в `IMAGE_CACHE_DIR`.
 
-Useful focused commands from the workspace root:
+## Текст Telegram и веб
 
-```sh
-# Inspect season data. --scaled exposes the Deadly Assault scaling result.
-cargo run --package nanoka -- show 690431 --scaled
+- Обычный текст бота размещайте в [templates](crates/rustversebot/templates), регистрируйте файл в [templates.rs](crates/rustversebot/src/templates.rs) и отправляйте через `BotTemplateSender`. Суффикс `.txt.j2` означает простой текст, `.html.j2` — Telegram HTML с автоэкранированием. Передавайте исходные значения. Для двухстрочной HTML-подписи сезонного альбома, собранной в обработчике, экранируйте динамический текст. Учитывайте 4096 символов для сообщения и 1024 для подписи.
+- Веб-панель включается через `BOT_WEB_BIND`. Сохраняйте интерфейс только для чтения, проверяйте параметры запросов и возвращайте явные публичные DTO. Cookie, Telegram ID пользователей, ID администратора и исходный приватный ответ HoYoLAB не должны попадать в API. Для внешнего доступа нужны HTTPS и контроль доступа на прокси.
 
-# Render the current Deadly Assault beta fixture for visual review.
-CARGO_TARGET_DIR=/tmp/rustversebot-svg-release \
-  cargo run --release --package rustverse_svg --example render_season -- \
-  690431 /tmp/rustversebot-da-690431.png
+## Ассистент и отчёты GachaBase
 
-# Run handler-only tests while iterating on Telegram commands.
-CARGO_TARGET_DIR=/tmp/rustversebot-svg-release \
-  cargo test --release --package rustversebot handlers::tests
-```
+- `/prompt` получает только текст. При персональном подборе просите перечислить доступных агентов текстом. На общий вопрос о командах отвечайте по известным условиям. Сравнивайте составы по механикам босса, синергии и ролям. Расчёт командного DPS и процентов преимущества в такие ответы не входит. `compute` доступен для отдельных числовых вопросов, например о множителе удара. [Инструкции модели](crates/rustverse_ai/src/lib.rs)
+- Для «текущего штурма» и «Шиюй сейчас» запрашивайте `version=release`. Используйте точную ревизию из ответа GachaBase и для ростера, и для чтения навыков и врагов. К бете для действующего эндгейма обращайтесь по явной просьбе пользователя. [Поиск и чтение GachaBase](crates/rustverse_ai/src/kit.rs)
+- `list_endgame_seasons` возвращает календарь с типами режимов. `get_endgame_season` принимает режим и `current`, `next` или точный ID. Для уточнения про ту же комнату используйте сохранённый ID, а при новом вопросе о текущей ротации разрешайте `current` заново. Механики врага проверяйте в категории `enemies` по ID монстра из Nanoka. На каждой странице Deadly Assault сохраняйте сведения об этажах и правилах команд: в обычных комнатах агенты не повторяются, на отдельном сложном этаже их можно использовать снова. [Сезонные инструменты](crates/rustverse_ai/src/seasons.rs)
+- Для ИИ-запросов используйте существующие [проверки доступа](crates/rustversebot/src/agent_access.rs), [очередь](crates/rustversebot/src/ai_jobs.rs) и [отправку статуса и результата](crates/rustversebot/src/agent.rs). Ручные запросы делят минутный лимит по Telegram ID между чатами. Переполненная очередь не расходует лимит. Задачи в очереди и активные запросы завершаются при остановке бота.
+- Продолжение `/prompt` привязано к доставленному сообщению в том же чате и теме. Храните ветку диалога и ссылки на использованные сезоны и ревизии в течение 24 часов. Ответ на любую часть длинного сообщения продолжает ту же ветку. В группе учитывайте, кто из участников указал ограничение на состав.
+- Агент сам завершает исследование. Перед каждым ходом считайте полный вход запроса, включая инструкции, схемы и результаты инструментов. При достижении 384 000 токенов сжимайте завершённую историю и повторяйте подсчёт. Для модели с меньшим окном учитывайте её предел и место для ответа. Оставляйте текущий вопрос целиком. При сжатии обрабатывайте завершённый вызов вместе с его результатом и сохраняйте точные ссылки на источники для `compute`. Во время сжатия показывайте «Сжимаю контекст…». Пик входа и число сжатий пишите в лог. [Управление контекстом](crates/rustverse_ai/src/context.rs)
+- В `/diff` сравнивайте конечные точки, в `/betadiff` с диапазоном обрабатывайте каждую ревизию. Объединяйте связанные формы агента при подготовке страницы. Кэш отчётов учитывает пару ревизий, агента, модель и версию инструкций и инструментов. Сохраняйте резервную отправку PNG как документов и атомарную отметку подтверждённых страниц альбома.
 
-Current data-model details worth preserving:
+## Проверка изменений
 
-- A six-digit ID has nominal sequence `id / 10`. Deadly Assault keeps these
-  IDs when a preview goes live. Nanoka publishes the official start in
-  `live_begin` (for example, the November 2026 rotations `690491 → 690501`).
-- Deadly Assault beta details may contain several modes. Render every mode.
-  The normal mode is first. The complex-boss mode follows it.
-- The complex mode reports `zone_type = 1002`, but if the `1301` adjustment
-  table is present, its 24-level HP/ATK/points scaling is `1301..=1324`, not
-  `1002..`. Keep the fallback for older payloads without that table.
-
-## Build and verification
-
-Run from the workspace root:
+Запускайте команды из корня workspace. Release-тесты используют настоящие Typst и resvg. Путь к готовому каталогу сборки при необходимости задайте через `CARGO_TARGET_DIR`.
 
 ```sh
-cargo fmt --all
-CARGO_TARGET_DIR=/tmp/rustversebot-svg-release cargo test --release --workspace
+cargo fmt --all --check
+cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+cargo test --release --workspace --locked
 ```
 
-When `rustverse_svg` is changed, also run:
+Автотесты должны работать без сети и открытия локальных портов. Для ответов внешних сервисов используйте фикстуры и транспорт в памяти. Если зависимости Cargo уже загружены, к командам Clippy и тестов можно добавить `--offline`. В Nix собирайте зависимости и бинарник бота с `doCheck = false`. Тесты запускает отдельный [Rust CI](.github/workflows/ci.yml). [Конфигурация Nix](flake.nix)
+
+Для быстрой проверки обработчиков подойдёт `cargo test --release -p rustversebot handlers::tests`. При изменении промптов, сезонных инструментов или сжатия запускайте `cargo test --release -p rustverse_ai --locked --offline`. [Тест длинного диалога](crates/rustverse_ai/src/kit/run_tests.rs) проверяет повторное сжатие и доступ к ранее прочитанным числам. При работе над рендерером используйте `cargo test --release -p rustverse_images --lib`. После визуальных изменений соберите обе карточки по данным Nanoka вручную и откройте полученные PNG.
 
 ```sh
-rustfmt --edition 2024 crates/rustverse_svg/src/lib.rs
-CARGO_TARGET_DIR=/tmp/rustversebot-svg-release \
-  cargo test --release --package rustverse_svg --lib
+cargo run --release -p nanoka -- show 690431 --scaled
+cargo run --release -p rustverse_images --features render-season \
+  --example render_season -- 69041 /tmp/rustversebot-deadly.png
+cargo run --release -p rustverse_images --features render-season \
+  --example render_season -- 62053 /tmp/rustversebot-shiyu.png
 ```
 
-Use release-mode tests by default: the season PNG fixtures are rasterized and
-debug builds waste substantial time. Run `cargo clippy` when a change merits a
-lint pass, but do not substitute it for the release test suites above.
+Для отчётов GachaBase используйте `./dev/beta` из корня проекта (Python 3, Cargo, Typst, resvg). При первом запуске скрипт копирует [пример отчёта](crates/rustverse_images/examples/kafka.md) в `target/beta-preview/report.md`. Предпросмотр открывается по адресу `http://127.0.0.1:8765/` и обновляет карточку при правке отчёта или шаблона. Команда `./dev/beta render` создаёт один PNG, а `./dev/beta analyze '<URL сравнения GachaBase>'` выводит новый отчёт в терминал.
 
-For visual changes to season infographics, render real data after the tests:
-
-```sh
-CARGO_TARGET_DIR=/tmp/rustversebot-svg-release \
-  cargo run --release --package rustverse_svg --example render_season -- \
-  69041 /tmp/rustversebot-deadly.png
-CARGO_TARGET_DIR=/tmp/rustversebot-svg-release \
-  cargo run --release --package rustverse_svg --example render_season -- \
-  62053 /tmp/rustversebot-shiyu.png
-```
-
-Inspect the generated PNGs rather than relying only on successful rasterization.
-
-## Runtime configuration
-
-Copy `.env.example` to `.env` and export it before starting the bot:
-
-```sh
-set -a
-source .env
-set +a
-cargo run
-```
-
-Important variables:
-
-- `TELOXIDE_TOKEN` and `BOT_ADMIN_ID` are required.
-- `TURSO_DATABASE_URL=file:local.db` uses an ordinary local database file.
-- Remote Turso additionally requires `TURSO_AUTH_TOKEN`.
-- `BOT_CONFIG_PATH` defaults to `config.toml`.
-- The web dashboard is disabled unless `BOT_WEB_BIND` is set.
-- `IMAGE_CACHE_DIR` must be writable when SVG cards contain remote images.
-
-Never commit `.env`, database files, cookies, tokens, or generated caches.
-
-## Database rules
-
-- All database access must remain asynchronous through `libsql`.
-- Do not introduce `rusqlite`, blocking mutexes, or synchronous DB access.
-- Update `SCHEMA_VERSION` and add a forward migration for every schema change.
-- The project may start with a new empty database. Compatibility with the old
-  pre-Turso database is not required.
-- User registration, nickname lookup, leaderboards, checkpoints, and
-  announcements must remain isolated by Telegram `chat_id`.
-- Persist a delivery marker only after Telegram confirms successful delivery.
-- A failure for one chat must not prevent processing other chats.
-
-## Telegram templates
-
-All ordinary user-facing Telegram text belongs in `templates/` and must be
-registered in `src/templates.rs`.
-
-The filename determines the Telegram mode:
-
-- `*.txt.j2` — plain text, no parse mode.
-- `*.html.j2` — Telegram HTML.
-
-Do not add MarkdownV2 templates. Send ordinary rendered templates through
-`BotTemplateSender`. The deliberate exception is the static two-line caption
-for a `/previous`, `/current`, or `/next` media group: it is built alongside
-the `InputMedia` and explicitly uses Telegram HTML to bold the mode name and
-date. Escape every dynamic value before using this exception.
-
-HTML templates are autoescaped. Do not pre-escape template arguments.
-Respect Telegram limits: 4096 characters for messages and 1024 for captions.
-The template registry tests must continue to validate every template file.
-
-## Season-pair commands
-
-`/previous`, `/current`, and `/next` render the Deadly Assault and Shiyu
-Defense pair together. Determine `/current` and `/previous` from the live
-rotation, including six-digit IDs with an official schedule. Sort them by
-the Europe game-server (UTC+1) start time.
-`/next` normally uses the direct production neighbor. During a test window, use
-the earliest six-digit preview only when its nominal sequence is exactly the
-next one (for example `69041 → 690421`). Never skip a missing immediate
-preview to a later one. Test-season `begin`/`end` dates must not make it the
-current season.
-
-Both modes must be available before rendering. Otherwise, return the existing
-“full pair is unavailable” message. Send both PNGs as one media group.
-Telegram displays only one visible caption for an album. Put both mode lines
-in the first image caption. Do not add a caption to the second image.
-
-## Scheduler invariants
-
-- Scheduler work must be async and shutdown-aware.
-- Slow synchronous SVG rasterization must run in `tokio::task::spawn_blocking`.
-- Rate-limit Telegram and HoYoLAB requests and preserve retry backoff.
-- Checkpoint messages are valid only inside their short delivery window.
-  Count 6 hours, 24 hours and 14 days from the European release in UTC.
-  HoYoLAB's stored season keys are wall times. Preserve them for lookup and
-  deduplication. Render the season that triggered the checkpoint, including
-  when the 14-day checkpoint coincides with the next rotation.
-- Show bot dates in Moscow time (UTC+3). A European server reset at 04:00
-  is 03:00 UTC and 06:00 MSK in both summer and winter.
-- Deadly Assault announcements are valid only before the season starts.
-  Never send an overdue announcement after `live_begin`.
-
-### Nanoka season selection
-
-For automatic Deadly Assault announcements:
-
-- Use `nanoka::NanokaClient`.
-- Accept five- and six-digit Deadly Assault IDs starting with `69`, sort 9.
-- Use `SeasonMeta.live_begin` as the season start.
-- A preview with only `begin`/`end` stays outside the announcement schedule.
-- Fetch details with `get_boss_detail_resolved`.
-- Render with `rustverse_images::deadly_info` and the live calendar dates in MSK.
-- Deduplicate by `(chat_id, event_kind, season_id)`.
-
-Do not use HoYoLAB player results to describe a future rotation.
-
-Shiyu announcements use `get_seasons`, `get_detail_resolved`, and
-`rustverse_images::shiyu_info`. Reject a non-Shiyu resolved detail before
-rendering.
-
-## Season SVG infographics
-
-The season renderers live in the workspace `rustverse_svg` crate:
-
-- `deadly_info.j2` renders Deadly Assault. Its title is `Deadly Assault ·
-  yyyy-mm-dd` when a start date is present.
-- `shiyu_info.j2` renders only Critical Node stage 5. Its rooms are derived
-  from the stage's child zones, in deterministic order. The highest-HP monster
-  is the featured boss.
-- `prepare_*_info` builds the template view and owns every dynamic vertical
-  measurement. When adding a line, update both the template position and the
-  Rust height calculation so cards never overlap or clip.
-- `wrap_game_text_lines` is the source of truth for Deadly text wrapping and
-  card height. It must preserve `<color=...>` spans across line boundaries by
-  closing and reopening them. Otherwise SVG sibling `<tspan>` elements lose
-  their color.
-- `SHIYU_MECHANICS_WRAP_WIDTH` is the sole width for Shiyu mechanics: use it
-  for both template wrapping and height calculations.
-- Deadly and Shiyu cards show weaknesses and resistance on a dedicated row.
-  Shiyu resistance belongs to the featured boss.
-- Deadly rooms with no elements use the compact mechanics offset. Do not leave
-  a blank weaknesses/resistance row. Boss art is clipped to the inner card
-  contour so it never covers any room border.
-- The complex Deadly boss is identified in the view as `is_complex`. Retain
-  its subtle burgundy gradient border while keeping the standard border style
-  and image clipping for every boss.
-- Boss art occupies its configured fixed fraction of the card width (25% for
-  Deadly, 30% for Shiyu), full height, centered crop, rounded clipping, and a
-  horizontal fade at both edges.
-- Every SVG template uses the shared `.watermark` class from `defs.j2`. Keep
-  its gradient fill and gray outline consistent across detail, top, and season
-  images.
-
-## Web dashboard and security
-
-- Keep the dashboard lightweight: no Node.js or frontend build toolchain.
-- Public API DTOs must never expose cookies, Telegram user IDs, admin IDs, or
-  raw private result payloads.
-- Treat the dashboard as unauthenticated unless a trusted reverse proxy adds
-  TLS and access control.
-- Validate path and query parameters using allowlists and strict parsing.
-
-## Repository hygiene
-
-- Preserve unrelated user changes. The worktree may be dirty or uncommitted.
-- Use `rg` and `rg --files` for searches.
-- Use `apply_patch` for manual file edits.
-- Do not run destructive Git or filesystem commands without explicit approval.
-- Do not commit generated PNGs, SVG output, local databases, `.env`, or
-  dependency build directories.
+При работе с репозиторием используйте `rg` для поиска и `apply_patch` для ручных правок. Сохраняйте чужие изменения. Для разрушительных операций с файлами или Git требуется явное разрешение. В коммит не должны попадать `.env`, ключи, cookie, базы, кэши, каталоги сборки и сгенерированные карточки.

@@ -1,410 +1,101 @@
-# AI usage disclosure
-
-Almost entire project was written using Deepseek V4 Pro and GPT-5.6 Sol / Terra, except the initial rustverse_svg "renderer" and templates, which were done solely by me.
-
 # rustversebot
 
-`rustversebot` is a Telegram bot that tracks Zenless Zone Zero endgame results.
-It supports Deadly Assault and Shiyu Defense.
-
-## Requirements
-
-- Get a Telegram bot token from [@BotFather](https://t.me/BotFather).
-- Get the Telegram user ID of the administrator.
-- Install the `typst` and `resvg` CLI executables. The Nix package includes both.
-
-The Cargo workspace contains these crates:
-
-```text
-crates/
-├── nanoka/
-├── rustverse/
-├── rustverse_ai/
-├── rustverse_images/
-└── rustversebot/
-```
-
-## GachaBase agent diff analysis
-
-The standalone `rustverse_ai` CLI takes a GachaBase agent diff URL and prints a
-Russian report. It compares the previous and current agent data in English and
-Simplified Chinese and sends the changed fields from both languages to the
-[OpenAI Responses API](https://developers.openai.com/api/reference/resources/responses/methods/create).
-GachaBase serves Simplified Chinese as `chs`; the model receives it under `cn`.
-
-The Rig agent chooses when to look up evidence, revise its interpretation and
-return an answer. Tools stay available until the agent finishes. Individual
-HTTP requests have timeouts. Empty normalized diffs produce a local report. The analysis compares
-the Core Passive at its highest available rank and other skills at level 12.
-
-Before each model turn the agent counts the assembled Responses input, including
-tool definitions and results. At 384,000 tokens it summarizes completed history and
-counts again. Smaller model windows use an earlier threshold with room for the reply.
-The current question and pending tool calls stay intact. Numeric sources remain
-available to `compute` throughout the run. Telegram shows «Сжимаю контекст…» during
-compaction. Summary generation contributes to the request's token and cost totals.
-
-- `list_recent_revisions` lists recent design revisions from beta and release.
-- `search_gachabase` searches a revision's catalog by category, localized name,
-  alias, slug or ID. The categories are agents, W-Engines, drive discs,
-  Bangboo, enemies and tutorials. A season monster ID can be used directly to
-  read the matching enemy's combat description, including its specific variant.
-  For agents an empty query lists the entire matching
-  roster in one response. Set `specialty`, `element`, or both using names from
-  the selected language. For example, setting `Anomaly` and `Fire` in English selects
-  agents matching both. Named searches can use the same filters.
-- `get_gachabase_entry` reads a category and ID in English or Simplified Chinese.
-  An optional exact version pins the result to a revision, including release
-  revisions. Both lookup tools reuse a pinned revision. For current live endgame
-  the assistant requests the release branch and uses that revision for roster and
-  enemy lookups. Unversioned lookups otherwise default to the
-  newest design revision across beta and release by GachaBase design timestamp.
-  Reports default to their target revision. A null selector returns compact
-  pages, skills or effects, with presentation colors removed. Copy `next_offset`
-  to continue at the next record. A `read` pointer identifies an oversized record.
-  Use a JSON pointer for fields, `@raw` for the original paginated DTO with all ranks,
-  or `text:<phrase>` to locate mentions in descriptions.
-  For agents, `@team` reads the Core Passive and Additional Ability summaries
-  with paths to their full conditions.
-  Agent reads accept `skill_level` and `core_level`. Reports use level 12 and maximum
-  Core Passive rank by default. Large diffs list selectors per group. Each group
-  pages whole changes and supplies separate read pointers for oversized values.
-- `compute` evaluates short Rhai scripts on numeric fields from the current run.
-  Bindings reference immutable sources and JSON pointers. For instance,
-  `/skill_data/*/damage_multiplier_percent` selects an array. With two such
-  bindings, `sum(x1) - sum(x0)` computes the difference between their totals.
-  Execution has bounded inputs, operations and output and exposes no I/O.
-
-The CLI reads the API key from `OPENAI_API_KEY` or, when it is unset or blank,
-from a single line in `~/.openai`. To analyze Sunbringer, run:
-
-```sh
-cargo run --release -p rustverse_ai -- \
-  'https://zzz.gachabase.net/diff/agents/1601/sunbringer?prev=beta_3.4.5_20694646&cur=beta_3.4.5_20699967&lang=en'
-```
-
-The default model is `gpt-6.2-sol` with `high` reasoning effort. In Telegram the
-administrator can use `/model` to inspect the current setting or
-`/model gpt-6.2-sol@medium` to change it. The setting is stored in libSQL
-and applies to new prompts and changelog reports across all chats. Use
-`@default` for the provider's default reasoning setting. Before the first
-override the bot uses `OPENAI_MODEL` or its built-in default.
-For the CLI, select another Responses API model with
-`--model` or `OPENAI_MODEL`. Rust callers can use
-`rustverse_ai::analyze(url, api_key, model).await`.
-
-### Telegram beta pages
-
-Для локальной правки страниц запустите из корня проекта:
-
-```sh
-./dev/beta
-```
-
-Откройте [предпросмотр](http://127.0.0.1:8765/). При первом запуске скрипт копирует
-пример Кафки в `target/beta-preview/report.md`. Редактируйте этот Markdown или
-`crates/rustverse_images/beta_agent.typ`: после сохранения страница обновляется.
-Готовый PNG лежит в `target/beta-preview/public/page.png`. Ошибки Typst видны
-в терминале; исправьте шаблон и сохраните его, чтобы повторить рендер.
-Для остановки нажмите Ctrl+C.
-
-Нужны Python 3, Cargo, Typst и resvg. На macOS Apple Silicon их также можно
-получить командой `nix develop -c ./dev/beta`. Предпросмотр использует
-сохранённые данные. Ключ OpenAI нужен только для запуска нового анализа.
-
-```sh
-./dev/beta render                     # Однократный рендер рабочего отчёта
-./dev/beta watch --report my-report.md --port 8766
-./dev/beta test                       # Тесты workspace без сети, включая рендер PNG
-./dev/beta analyze 'https://zzz.gachabase.net/diff/agents/1651/kafka?prev=beta_3.4.4_20541895&cur=beta_3.4.5_20691792&lang=chs' > my-report.md
-```
-
-`/prompt <вопрос>` asks the same agent a standalone question. Each reply opens
-with the user's original question as a Telegram quote. In private chats
-the bot streams temporary Telegram drafts and sends the completed answer as
-persistent messages. Both use Telegram HTML for emphasis, quotations, code and
-HTTP(S) links. In groups a newly announced research stage immediately updates
-the same progress message. Text and counter updates are throttled to once per
-15 seconds, and Telegram's retry delays apply to all progress edits. The initial
-status and the final footer show the model, tool calls, model turns and the
-confirmed token usage across completed turns. Beside the tokens the bot displays
-an estimated USD total for the current request using Rig's per-turn usage costs.
-Catalog estimates use standard token rates. A dash means pricing is unavailable
-or incomplete. Each follow-up starts a new total. The agent announces a new
-research objective once. Further lookups and pages keep that status until the
-objective changes. Missing token usage also appears as a dash. The footer
-appears once when a long answer spans multiple messages.
-
-Reply to any part of a completed answer with a text question to continue, or
-use `/prompt <question>` as a reply. A standalone command starts a new conversation.
-libSQL caches each delivered question and answer for 24 hours. The agent receives
-the unexpired turns leading to that specific answer in the same chat and topic.
-Delivered turns also keep the Nanoka season IDs and GachaBase revisions and entries
-consulted for that answer. The agent receives these references with the original
-questions and answers, with participant labels for group follow-ups.
-
-Interactive questions can use `list_endgame_seasons` to browse both modes or filter
-by mode, and `get_endgame_season` to read rooms, enemies and buffs by exact ID,
-`current` or `next`. Relative selectors use the same European rotation as Telegram's
-season commands. Previews have a separate status and no official dates. Following
-up about a room uses the selected season ID even after a rotation changes.
-Deadly Assault labels its normal and hard floors. Each normal room needs its own
-agents. The hard floor can reuse agents from any normal room.
-
-In groups, participants can continue a visible answer under their own access
-and rate limits. Separate replies to an earlier answer create independent branches.
-
-`/diff` opens a beta/release picker. Choose the starting and ending design
-revisions for a direct comparison. `/diff <prev> <cur>` accepts exact names.
-`/betadiff` compares the latest GachaBase beta design revision with its immediate
-predecessor, including hotfixes within the same version. Use
-`/betadiff beta_3.4.4_20541895 beta_3.4.5_20691792` for an explicit range.
-The bot sends one album per revision in chronological order, with a separate PNG
-for each changed character. A single page is sent on its own. For more than ten
-pages it sends numbered albums. Captions link each character to the exact GachaBase diff.
-During generation, a status message shows the revision pair, current step and
-model usage. The bot removes it after Telegram confirms the last album. If Telegram
-rejects photo processing, the bot sends that batch as original PNG documents.
-
-Manual AI commands share one request per Telegram user per 60 seconds across
-chats. Opening the picker is free. The administrator bypasses the cooldown and
-the manual range budget, and can use `/resetlimit <telegram_id>` to reset a
-user's cooldown. `BETA_MAX_NEW_REPORTS` defaults to 10 uncached reports per
-manual comparison. The scheduler tracks its own delivery progress.
-Manual generation runs separately from Telegram update handling with four active
-jobs and eight queue slots. A full queue replies immediately and consumes no
-cooldown. In-flight and queued jobs stop when the bot shuts down.
-
-The administrator can open `/aiusers [page]` in a private chat to look up
-Telegram IDs, names, last AI command, admission decision, Moscow time and
-request count. The access journal stores each attempt, including denials.
-Question text, model answers and credentials are excluded from its schema.
-`/aiban <telegram_id>` and `/aiunban <telegram_id>` revoke and restore access
-to manual AI commands across all chats. A cooldown reset preserves the ban.
-
-With an OpenAI key configured for the bot, the scheduler monitors the changelog
-for chats with registered UIDs. The first poll records independent beta and release
-baselines per chat. Later polls deliver missed revisions in order within each branch. Reports
-are cached in libSQL by revision pair, agent, OpenAI model and a fingerprint of
-the system instructions, review prompt and tools. Commands and hotfix polls
-reuse this cache across chats and restarts. Earlier unversioned reports are
-recomputed on demand. A confirmed album records all its page deliveries atomically.
-An album containing an oversized page is sent as a group of PNG documents.
-
-`rustverse_images` renders each page at 1280 pixels wide with automatic height,
-using the Deadly Assault palette, cards, font and watermark. To render a saved report:
-
-```sh
-cargo run --release -p rustverse_images -- beta kafka.md kafka.png
-```
-
-## Configuration and startup
-
-The application does not load `.env` automatically.
-Export the variables from `.env.example`.
-You can also configure them in a process manager.
-
-```sh
-export TELOXIDE_TOKEN="..."
-export BOT_ADMIN_ID="123456789"
-export TURSO_DATABASE_URL="file:local.db"
-export RUST_LOG="rustversebot=info"
-cargo run --package rustversebot
-```
-
-`TURSO_DATABASE_URL=file:local.db` stores the database in a local file.
-This configuration does not require a separate server or token.
-The application creates tables and runs migrations automatically.
-
-The scheduler uses these variables:
-
-- `BOT_SCHEDULER_INTERVAL_SECS` sets the polling interval. The default is `300`.
-- `BOT_CHECKPOINT_WINDOW_SECS` sets the checkpoint delivery window. The default is `300`.
-- `BOT_REQUEST_SPACING_MS` sets the delay between HoYoLAB requests. The default is `500`.
-- `BOT_RETRY_ATTEMPTS` sets the retry count. The default is `3`.
-- `BOT_RETENTION_DAYS` sets the result retention period. The default is `90`.
-- `BOT_ANNOUNCEMENT_LEAD_HOURS` sets the season announcement lead time. The default is `24`.
-
-The shared leaderboard follows the Europe game server (fixed UTC+1). A 04:00
-server release is 06:00 Moscow time. The 24-hour checkpoint opens at 06:00
-Moscow time the following day. The 14-day report uses the ending season's
-results even when the next season has already opened. Telegram and the
-dashboard show dates in Moscow time.
-
-The `nanoka` crate supplies future seasons, enemy data, and image URLs.
-The bot stores production season indexes by mode and season ID.
-It refreshes the indexes hourly and checks the announcement window on each
-scheduler poll. Deadly Assault uses both five- and six-digit IDs with a
-published `live_begin`. A season can be announced while the current one is
-still running. Delivery stops when the new season starts.
-The bot does not cache season details or cards.
-It renders each card once and sends it once to each eligible chat.
-
-Chats with a registered UID automatically receive new ZZZ promo codes with
-redemption links and rewards. On the first successful poll for a chat, the bot
-saves the current list silently. It checks for new codes on every scheduler tick
-and records confirmed deliveries per chat across restarts. Use `/promocodes`,
-`/codes` or `/promo` to see the current list at any time.
-
-## Image rendering
-
-`rustverse_images` runs `typst compile --format svg` and pipes its stdout directly
-into `resvg -z 4 - output.png`. Each render uses a private temporary directory.
-Templates, static images, and the font are bundled into the Rust binary.
-
-Before compilation, remote PNG and WebP URLs are collected recursively from the
-input JSON and downloaded into `IMAGE_CACHE_DIR` (default: `images`). Filenames
-are preserved and URLs in JSON are unchanged. Only complete downloads enter the
-cache. HTTP 404 is reported and leaves the image absent; Typst fails if the
-template needs that image. Other download errors and CLI failures stop the render.
-
-`TYPST_BIN` and `RESVG_BIN` can override the executable paths. Compilation and
-rasterization have a combined 120-second timeout and are cancelled with the task.
-
-```sh
-cargo run --release --package rustverse_images -- \
-  individual_shiyu.typ player.json /tmp/player.png season.json
-cargo run --release --package rustverse_images --features render-season \
-  --example render_season -- 69041 /tmp/deadly.png
-```
-
-The generic CLI takes a template name, input JSON, output PNG, and optionally a
-second JSON file. Individual Shiyu needs the matching Nanoka season as that
-second file. Deadly season JSON must include `begin_time` and `end_time`; the
-season example and bot supply them from the season index.
-
-## Web dashboard
-
-The read-only dashboard and JSON API are disabled by default.
-Set a bind address to start them:
-
-```sh
-export BOT_WEB_BIND="127.0.0.1:8080"
-```
-
-Set the public URL when users access the dashboard through HTTPS:
-
-```sh
-export BOT_PUBLIC_WEB_URL="https://zzz.example.com"
-```
-
-This URL adds a history button to `/da` and `/shiyu` results.
-The bot does not substitute a local URL.
-
-The server provides these routes:
-
-- `/`
-- `/healthz`
-- `/api/chats`
-- `/api/chats/{chat_id}/leaderboard/{kind}`
-- `/api/users/{uid}/history`
-
-The `kind` value is `deadly_assault` or `shiyu_defense`.
-The dashboard has no authentication.
-Do not expose it directly to the internet.
-Use a loopback address or a trusted reverse proxy with TLS and authentication.
-
-If the configuration file is invalid or unavailable, the bot uses its built-in
-configuration.
-It also writes a warning to the log.
-
-## HoYoLAB cookie
-
-The administrator sets the cookie with `/cookie <cookie_string>`.
-The bot stores the cookie as plain text in the local database.
-
-1. Use a private chat with the bot.
-2. Delete the command message after configuration.
-3. Restrict access to the database file.
-4. Do not commit `.env`, tokens, logs, or database exports.
-
-## Verification
-
-```sh
-cargo fmt --all --check
-cargo test --release --workspace
-cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
-```
-
-## Nix and Attic
-
-The flake publishes the package only for `aarch64-darwin`.
-
-```sh
-nix build .#rustversebot
-nix run .#rustversebot
-```
-
-GitHub Actions configures Attic as a substituter before the build.
-The workflow first builds and uploads the `cargoArtifacts` dependencies.
-It then builds the bot and uploads its runtime closure.
-The separate Rust CI workflow runs the workspace tests.
-Unchanged build inputs let later builds reuse the dependency artifacts.
-The workflow runs on a native ARM64 macOS runner.
-
-Create these secrets in the `Actions` GitHub Environment:
-
-- `ATTIC_SERVER` contains the server URL.
-- `ATTIC_TOKEN` contains a token with cache push access.
-
-The optional `ATTIC_CACHE` variable changes the cache name.
-The default cache name is `rustversebot`.
-
-Get the public cache endpoint and key from the Attic administrator:
-
-```sh
-attic cache info rustversebot
-```
-
-Add them to `~/.config/nix/nix.conf`:
-
-```ini
-extra-substituters = https://attic.example.org/rustversebot
-extra-trusted-public-keys = rustversebot:BASE64_PUBLIC_KEY
-```
-
-Restart the Nix daemon.
-Then install or run the package:
-
-```sh
-nix profile install github:OWNER/rustversebot#rustversebot
-rustversebot
-
-# Run without installation.
-nix run github:OWNER/rustversebot#rustversebot
-```
-
-Before startup, export `TELOXIDE_TOKEN`, `BOT_ADMIN_ID`, and
-`TURSO_DATABASE_URL`.
-
-## Telegram templates
-
-The `templates/` directory contains Telegram message templates.
-The file suffix selects the send mode:
-
-- `*.txt.j2` sends plain text without a parse mode.
-- `*.html.j2` uses `ParseMode::Html`.
-
-MiniJinja automatically escapes template values for HTML.
-The registry test rejects an unsupported suffix or an unregistered file.
-
-## Season details and comparisons
-
-The `/previous`, `/current`, and `/next` commands send one two-image album.
-The album contains Deadly Assault and Shiyu Defense season cards.
-The Shiyu Defense card shows stage five.
-
-The next season must directly follow the current season.
-If Nanoka lacks either mode, the bot reports that the full pair is unavailable.
-
-The `/da` and `/shiyu` commands accept a UID or nickname.
-The chat leaderboards are `/top_da` and `/top_shiyu`.
-Without an argument, the bot shows buttons for UIDs in the current chat.
-Each callback checks chat membership again.
-This check prevents an old or modified button from exposing another chat's data.
-
-The result caption compares the two most recent seasons.
-It shows the score change.
-For Deadly Assault, it also shows the star change.
-For Shiyu Defense, it shows the change in cleared floors.
-The bot omits the comparison until a previous season exists.
+Telegram-бот для Zenless Zone Zero. В чате можно посмотреть свой заход в Смертельный штурм (Deadly Assault) или Оборону Шиюй (Shiyu Defense), сравнить очки с другими игроками, узнать состав следующей ротации и забрать промокоды. С подключённым OpenAI бот также отвечает на вопросы об игре и разбирает изменения агентов между версиями GachaBase.
+
+## Результаты игроков
+
+Для разовой проверки отправьте `/da <uid>` или `/shiyu <uid>` с числовым игровым UID. Регистрироваться для этого не требуется. Бот сначала ищет последний сохранённый результат, а при его отсутствии запрашивает HoYoLAB. Для обращения к HoYoLAB администратор должен настроить cookie, а игрок — открыть игровую статистику в [настройках HoYoLAB](https://www.hoyolab.com/setting/gameRecord).
+
+| Команда | Что придёт в Telegram |
+| --- | --- |
+| `/da <uid>` | Карточка Deadly Assault. Видны общий счёт, место в процентах, босс, очки, агенты и выбранное усиление каждой комнаты. При наличии прохождения сложного режима на карточке появится и этот бой. |
+| `/shiyu <uid>` | Карточка Shiyu Defense. Вверху — счёт, оценка и место в процентах. Ниже — боссы, очки и составы команд по комнатам пятого этапа. |
+| `/top_da` | Рейтинг зарегистрированных в чате игроков за последний сезон, для которого у них есть результаты. Место определяется суммой очков обычного и сложного режимов. Карточка также показывает звёзды. |
+| `/top_shiyu` или `/top_sd` | Рейтинг чата по очкам Shiyu за последний сохранённый сезон этого режима. Рядом с игроком указана его оценка, например S или S+. |
+
+Если в базе есть два сезона игрока, в подписи к личной карточке бот показывает разницу в очках. В Deadly Assault он также сравнивает звёзды, в Shiyu — число пройденных этажей, если оно известно для обоих сезонов.
+
+**Как участвовать в рейтинге.** Отправьте `/register <uid>` в нужном чате. Бот проверит доступность данных и добавит игрока в список для регулярного обновления. Теперь можно ввести сохранённый ник вместо UID или вызвать `/da` и `/shiyu` без аргумента и нажать кнопку с именем игрока. Команда `/uids` показывает список этого чата, `/unregister <uid>` удаляет игрока из него. Короткая справка по боту доступна через `/start`.
+
+## Сезоны и противники
+
+Для календаря и карточек сезонов бот использует Nanoka. Эти команды доступны без игрового UID.
+
+- `/status` показывает начало и конец активного сезона каждого режима по московскому времени. Счётчик отслеживания берётся по всем регистрациям бота.
+- `/current`, `/previous` и `/next` присылают альбом из двух карточек за текущую, предыдущую или следующую ротацию. В подписи указана дата старта каждого режима. Если Nanoka опубликовала данные только по одному режиму, бот сообщит, что полная пара недоступна. В следующую пару может попасть бета-превью ближайшей ротации.
+- `/endgame` открывает выбор режима, затем список текущего и будущих сезонов с ID и пометками `live`, `upcoming` или `test`. Команда `/endgame <id>` сразу открывает одну карточку из этого списка. Ею можно воспользоваться и тогда, когда второй половины альбома ещё нет.
+
+На карточке **Deadly Assault** собраны комнаты всех опубликованных режимов, характеристики противников (HP, ATK, DEF), уязвимости, сопротивления, эффекты комнат и усиления на выбор. На карточке **Shiyu Defense** показан пятый этап Critical Node. В каждой комнате перечислены противники с характеристиками и уязвимостями, сначала — противники с наибольшим HP.
+
+## Промокоды
+
+`/codes`, `/promo` и `/promocodes` возвращают один и тот же список. Нажатие на код открывает официальную страницу HoYoverse с уже подставленным кодом. Под ним перечислены награды, если источник их указал. Бот читает Prydwen, а при ошибке обращается к HoYo Codes.
+
+## Вопросы об игре и сравнение версий
+
+Для генерации ответов и отчётов нужен ключ OpenAI. Регистрация игрового UID для ручных запросов не требуется.
+
+**Вопрос по игре.** Например, `/prompt Какие уязвимости у боссов следующего Смертельного штурма?` Ассистент может прочитать состав комнат в Nanoka и проверить механики врагов в GachaBase. Ему также доступны описания агентов, амплификаторов, драйв-дисков и банбу. Пока готовится ответ, бот показывает ход поиска. В течение 24 часов можно ответить на сообщение бота обычным текстом и продолжить ту же тему. В группе это может сделать другой участник. Отдельная команда `/prompt` начинает новый разговор.
+
+**Что поменялось у агентов.** Бот сопоставляет английские и китайские данные GachaBase и присылает разбор на русском. На каждого изменённого персонажа приходится отдельная PNG-страница. Несколько страниц приходят альбомом, а ссылки в подписи ведут к исходным изменениям. [Пример отчёта о Кафке](crates/rustverse_images/examples/kafka.md)
+
+| Что хочется узнать | Команда |
+| --- | --- |
+| Что изменилось в последней бета-ревизии, включая хотфикс | `/betadiff` |
+| Что менялось в каждом обновлении между двумя ревизиями | `/betadiff <prev> <cur>` — бот разбирает промежуточные ревизии по порядку |
+| Чем отличаются две версии одной ветки | `/diff` — выбрать бету или релиз, затем начальную и конечную версии. Если известны полные имена ревизий, подойдёт `/diff <prev> <cur>` |
+
+Для обычного пользователя вопросы и сравнения делят один лимит — один запуск в минуту во всех чатах. Открытие меню `/diff` лимит не расходует. По умолчанию одно ручное сравнение может потребовать до 10 новых отчётов. Уже сохранённые отчёты используются повторно.
+
+## Что бот присылает сам
+
+Регистрация хотя бы одного UID включает рассылки для этого чата. Сбор результатов HoYoLAB по умолчанию идёт каждые пять минут. Календарь привязан к европейскому серверу (UTC+1 круглый год), поэтому его сброс в 04:00 приходится на 06:00 МСК.
+
+| Событие | Что получит чат |
+| --- | --- |
+| До начала сезона | Карточку конкретного режима с ID сезона и временем старта. По умолчанию анонс приходит в последние 24 часа перед официальным стартом. Тестовые даты сами по себе рассылку не запускают. |
+| Через 6 часов, 24 часа и 14 дней после старта | Рейтинг чата, если уже есть результаты за этот сезон. Окно отправки по умолчанию — пять минут. Пропущенная сводка не приходит задним числом. Итог за 14 дней относится к завершившемуся сезону, даже если начался следующий. |
+| Новый промокод | Сообщение с кодом и ссылкой для активации. При первой проверке бот запоминает текущий список молча. |
+| Новая ревизия GachaBase | При настроенном OpenAI — карточки изменённых агентов. Бот начинает с текущих версий беты и релиза и затем догоняет пропущенные обновления по порядку внутри каждой ветки. |
+
+## Запуск своего экземпляра
+
+Для сборки нужен стабильный Rust с Cargo, для создания PNG — `typst` и `resvg` в `PATH`. На macOS их можно установить через `brew install typst resvg`.
+
+1. Получите токен в [@BotFather](https://t.me/BotFather). Из корня проекта выполните `cp -n .env.example .env`.
+2. В `.env` задайте `TELOXIDE_TOKEN`, числовой Telegram ID администратора в `BOT_ADMIN_ID` и `TURSO_DATABASE_URL=file:local.db`. Бот открывает локальный файл libSQL и сам применяет миграции. Для ИИ-функций добавьте `OPENAI_API_KEY` или сохраните ключ одной строкой в `~/.openai`.
+3. Экспортируйте настройки и запустите процесс.
+
+   ```sh
+   set -a
+   . ./.env
+   set +a
+   cargo run --release --locked -p rustversebot
+   ```
+
+4. В личном чате с ботом отправьте `/cookie <строка cookie HoYoLAB>` с аккаунта администратора. Бот проверит cookie через HoYoLAB и сохранит его в базе в открытом виде. Удалите исходное сообщение и ограничьте доступ к базе и её копиям. Для проверки отправьте `/da` со своим числовым UID.
+
+Интервалы рассылок и срок хранения результатов (по умолчанию 90 дней) настраиваются через переменные окружения. Кэшу изображений нужен доступ на запись. [Пример настроек](.env.example)
+
+Для Mac с Apple Silicon доступен `nix run .#rustversebot` с включёнными Typst и resvg. Для Linux с systemd в репозитории есть файлы службы. Служба запускает `/usr/local/bin/rustversebot` от пользователя `rustversebot`, читает `/etc/rustversebot/rustversebot.env` и хранит данные в `/var/lib/rustversebot`. [Файл службы](deploy/rustversebot.service) · [Пример окружения systemd](deploy/rustversebot.env.example)
+
+### Команды администратора
+
+| Команда | Действие |
+| --- | --- |
+| `/refetch <uid>`, `/refetch_all` | Сразу запросить и сохранить результаты обоих режимов для одного UID или всех зарегистрированных игроков. Одиночный запрос принимает также незарегистрированный UID. |
+| `/model`, `/model gpt-6.2-sol@medium` | Посмотреть или сменить модель и уровень рассуждения для новых вопросов и отчётов во всех чатах. |
+| `/aiusers [страница]` | В личном чате с ботом открыть журнал обращений к ИИ с именами, Telegram ID и решениями о доступе. |
+| `/resetlimit <telegram_id>` | Сбросить минутный лимит пользователя. |
+| `/aiban <telegram_id>`, `/aiunban <telegram_id>` | Закрыть или вернуть пользователю доступ к ручным ИИ-командам во всех чатах. |
+
+### История в браузере
+
+Чтобы включить веб-панель, задайте `BOT_WEB_BIND=127.0.0.1:8080` перед запуском и откройте `http://127.0.0.1:8080/`. Выберите чат и режим для таблицы результатов. Щелчок по игроку или ввод UID откроет график сохранённых очков. Панель и JSON API работают только на чтение и не требуют авторизации. Для внешнего доступа поставьте перед ними прокси с HTTPS и контролем доступа. Если указать его адрес в `BOT_PUBLIC_WEB_URL`, в личных карточках появится кнопка «История и график».
+
+## Разработка
+
+Карта крейтов, правила выбора сезонов, команды тестирования и предпросмотра карточек собраны в [AGENTS.md](AGENTS.md).
+
+Почти весь проект написан с помощью DeepSeek V4 Pro и GPT-5.6 / 6 / 6.2 Astra / Sol / Terra. Первоначальный SVG и Typst рендереры и их шаблоны я написал самостоятельно.
+

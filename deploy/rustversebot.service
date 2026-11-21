@@ -1,6 +1,5 @@
 [Unit]
 Description=Rustverse Telegram bot
-Documentation=file:/usr/share/doc/rustversebot/operations.md
 Wants=network-online.target
 After=network-online.target
 
