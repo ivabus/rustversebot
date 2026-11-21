@@ -268,7 +268,7 @@ mod tests {
                 assert_eq!(
                     block,
                     format!(
-                        "<a href=\"https://zenless.hoyoverse.com/redemption?code=CODE{i}\">CODE{i}</a>\n- A &amp; B x 60\n- Denny x 2,222"
+                        "<a href=\"https://zenless.hoyoverse.com/redemption?code=CODE{i}\">CODE{i}</a>\n• A &amp; B x 60\n• Denny x 2,222"
                     )
                 );
                 i += 1;

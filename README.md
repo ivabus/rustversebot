@@ -65,6 +65,12 @@ still running. Delivery stops when the new season starts.
 The bot does not cache season details or cards.
 It renders each card once and sends it once to each eligible chat.
 
+Chats with a registered UID automatically receive new ZZZ promo codes with
+redemption links and rewards. On the first successful poll for a chat, the bot
+saves the current list silently. It checks for new codes on every scheduler tick
+and records confirmed deliveries per chat across restarts. Use `/promocodes`,
+`/codes` or `/promo` to see the current list at any time.
+
 ## Image rendering
 
 `rustverse_images` runs `typst compile --format svg` and pipes its stdout directly

@@ -23,4 +23,5 @@ url = "2"
 rustverse_images = { version = "0.1.0", path = "../rustverse_images" }
 
 [dev-dependencies]
+tempfile = "3"
 tower = "0.5"

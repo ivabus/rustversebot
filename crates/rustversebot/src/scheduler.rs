@@ -132,10 +132,20 @@ pub async fn run(
             check_announcements(&bot, &state, &settings).await;
         }
     };
+    let promo_announcements = async {
+        let mut ticks = interval(settings.tick_interval);
+        loop {
+            ticks.tick().await;
+            if let Err(error) = announce_promocodes(&bot, &state, &settings).await {
+                log::warn!("Promo code poll failed: {error:#}");
+            }
+        }
+    };
     tokio::select! {
         _ = players => {},
         _ = checkpoints => {},
         _ = announcements => {},
+        _ = promo_announcements => {},
         _ = shutdown.wait_for(|stop| *stop) => {},
     }
     Ok(())
@@ -145,6 +155,76 @@ const EVENT_TYPES: [(&str, &str); 2] = [
     ("deadly_assault", "Deadly Assault"),
     ("shiyu_defense", "Shiyu Defense"),
 ];
+
+async fn announce_promocodes(
+    bot: &Bot,
+    state: &BotState,
+    settings: &SchedulerSettings,
+) -> anyhow::Result<()> {
+    if state.db.get_distinct_chats().await?.is_empty() {
+        return Ok(());
+    }
+    let listing = crate::promocodes::fetch(&state.http).await?;
+    deliver_promo_listing(bot, state, settings, &listing).await
+}
+
+async fn deliver_promo_listing(
+    bot: &Bot,
+    state: &BotState,
+    settings: &SchedulerSettings,
+    listing: &crate::promocodes::Listing,
+) -> anyhow::Result<()> {
+    let codes: Vec<_> = listing
+        .codes
+        .iter()
+        .map(|entry| entry.code.as_str())
+        .collect();
+    let mut pending = state.db.pending_promo_announcements(&codes).await?;
+    let sender = BotTemplateSender::new(bot, &state.templates);
+    for entry in &listing.codes {
+        let Some(chats) = pending.remove(&entry.code) else {
+            continue;
+        };
+        let message = state.templates.render(
+            "promocodes",
+            &serde_json::json!({
+                "announcement": true, "codes": [entry], "source": listing.source,
+            }),
+        )?;
+        for chat in chats {
+            for attempt in 0..settings.retry_attempts {
+                match sender
+                    .send_rendered_message(ChatId(chat), message.clone())
+                    .await
+                {
+                    Ok(_) => {
+                        if let Err(error) = state.db.mark_promo_announced(chat, &entry.code).await {
+                            log::error!(
+                                "Could not record promo code {} for chat {chat}: {error:#}",
+                                entry.code
+                            );
+                        }
+                        break;
+                    }
+                    Err(error) => {
+                        log::warn!(
+                            "Could not send promo code {} to chat {chat}: {error:#}",
+                            entry.code
+                        );
+                        if attempt + 1 < settings.retry_attempts {
+                            tokio::time::sleep(
+                                settings.retry_base_delay * (1_u32 << attempt.min(8)),
+                            )
+                            .await;
+                        }
+                    }
+                }
+            }
+            tokio::time::sleep(settings.request_spacing).await;
+        }
+    }
+    Ok(())
+}
 
 /// Fetch the Nanoka indexes and store their production schedule.
 ///
@@ -652,6 +732,90 @@ mod tests {
 
     fn utc(value: &str) -> DateTime<Utc> {
         DateTime::parse_from_rfc3339(value).unwrap().to_utc()
+    }
+
+    #[tokio::test]
+    async fn promo_delivery_retries_only_the_chat_that_failed() {
+        use crate::promocodes::{Listing, PromoCode};
+        use axum::{Json, Router, routing::post};
+        use serde_json::{Value, json};
+
+        let (requests, mut received) = tokio::sync::mpsc::unbounded_channel();
+        let fail_first = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let api = Router::new().fallback(post(move |Json(body): Json<Value>| {
+            let requests = requests.clone();
+            let fail_first = fail_first.clone();
+            async move {
+                let chat = body["chat_id"].as_i64().unwrap();
+                requests.send(body).unwrap();
+                if chat == 10 && fail_first.swap(false, std::sync::atomic::Ordering::Relaxed) {
+                    return Json(
+                        json!({"ok":false,"error_code":503,"description":"temporary failure"}),
+                    );
+                }
+                Json(json!({"ok":true,"result":{"message_id":42,"date":1,
+                    "chat":{"id":chat,"type":"private"},"text":"sent"}}))
+            }
+        }));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move { axum::serve(listener, api).await.unwrap() });
+        let bot = Bot::new("test").set_api_url(url.parse().unwrap());
+        let state = BotState {
+            db: Db::new_test().await.unwrap(),
+            templates: crate::templates::TemplateEngine::new().unwrap(),
+            admin_id: 1,
+            public_web_url: None,
+            nanoka: nanoka::NanokaClient::new(),
+            http: reqwest::Client::new(),
+        };
+        let settings = SchedulerSettings {
+            retry_attempts: 1,
+            request_spacing: Duration::ZERO,
+            ..Default::default()
+        };
+        for chat in [10, 20] {
+            state.db.add_user(chat, 1, "123", None).await.unwrap();
+        }
+        let mut listing = Listing {
+            source: "Prydwen",
+            codes: vec![PromoCode {
+                code: "OLD".into(),
+                rewards: vec![],
+            }],
+        };
+        deliver_promo_listing(&bot, &state, &settings, &listing)
+            .await
+            .unwrap();
+        assert!(received.try_recv().is_err());
+
+        listing.codes.push(PromoCode {
+            code: "NewCode".into(),
+            rewards: vec!["Denny x 2,222".into()],
+        });
+        deliver_promo_listing(&bot, &state, &settings, &listing)
+            .await
+            .unwrap();
+        for chat in [10, 20] {
+            let body = received.try_recv().unwrap();
+            assert_eq!(body["chat_id"], chat);
+            let text = body["text"].as_str().unwrap();
+            assert!(text.contains("Новый промокод ZZZ"));
+            assert!(text.contains("https://zenless.hoyoverse.com/redemption?code=NewCode"));
+            assert!(text.contains("• Denny x 2,222"));
+            assert!(!text.contains("OLD"));
+        }
+        listing.source = "HoYo Codes";
+        listing.codes[1].code = "NEWCODE".into();
+        deliver_promo_listing(&bot, &state, &settings, &listing)
+            .await
+            .unwrap();
+        assert_eq!(received.try_recv().unwrap()["chat_id"], 10);
+        deliver_promo_listing(&bot, &state, &settings, &listing)
+            .await
+            .unwrap();
+        assert!(received.try_recv().is_err());
+        server.abort();
     }
 
     #[test]

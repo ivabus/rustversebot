@@ -1,10 +1,10 @@
 {% if unavailable %}Не удалось загрузить промокоды. Попробуйте позже или откройте <a href="https://www.prydwen.gg/zenless/codes">список на Prydwen</a>.
-{%- elif codes %}<b>Промокоды ZZZ</b> · {{ source }}
+{%- elif codes %}<b>{% if announcement %}Новый промокод ZZZ{% else %}Промокоды ZZZ{% endif %}</b> · {{ source }}
 {%- for entry in codes %}
 
 <a href="https://zenless.hoyoverse.com/redemption?code={{ entry.code }}">{{ entry.code }}</a>
 {%- for reward in entry.rewards %}
-- {{ reward }}
+• {{ reward }}
 {%- endfor %}
 {%- endfor %}
 {%- else %}В списке {{ source }} сейчас нет активных промокодов.

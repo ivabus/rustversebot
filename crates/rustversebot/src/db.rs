@@ -1,8 +1,9 @@
 use anyhow::{Context, bail};
 use libsql::{Builder, Connection, Database, params};
 use serde::Serialize;
+use std::collections::HashMap;
 
-const SCHEMA_VERSION: i64 = 5;
+const SCHEMA_VERSION: i64 = 6;
 
 /// A compact, normalized copy of a production season from Nanoka's index.
 /// Details and rendered cards deliberately remain outside the cache.
@@ -176,6 +177,24 @@ impl Db {
             )
             .await
             .context("applying migration 5")?;
+        }
+        if version < 6 {
+            tx.execute_batch(
+                "CREATE TABLE promo_chat_baselines (
+                    chat_id INTEGER PRIMARY KEY, codes_json TEXT NOT NULL);
+                 CREATE TABLE promo_announcements (
+                    chat_id INTEGER NOT NULL, code TEXT COLLATE NOCASE NOT NULL,
+                    posted_at TEXT NOT NULL DEFAULT (datetime('now')),
+                    PRIMARY KEY(chat_id, code));
+                 CREATE TRIGGER reset_promo_baseline AFTER DELETE ON users
+                 WHEN NOT EXISTS (SELECT 1 FROM users WHERE chat_id = OLD.chat_id)
+                 BEGIN
+                    DELETE FROM promo_chat_baselines WHERE chat_id = OLD.chat_id;
+                 END;
+                 PRAGMA user_version = 6;",
+            )
+            .await
+            .context("applying migration 6")?;
         }
         tx.commit().await.context("committing migrations")?;
         Ok(())
@@ -471,6 +490,50 @@ impl Db {
             .await?;
         Ok(())
     }
+    /// Seed newly registered chats from the first successful poll, including an empty list.
+    /// Only confirmed Telegram deliveries belong in promo_announcements.
+    pub async fn pending_promo_announcements(
+        &self,
+        active_codes: &[&str],
+    ) -> anyhow::Result<HashMap<String, Vec<i64>>> {
+        let codes = serde_json::to_string(active_codes)?;
+        let conn = self.connection()?;
+        conn.execute(
+            "INSERT OR IGNORE INTO promo_chat_baselines(chat_id, codes_json)
+             SELECT DISTINCT chat_id, ?1 FROM users",
+            [codes.as_str()],
+        )
+        .await?;
+        let mut rows = conn
+            .query(
+                "SELECT active.value, b.chat_id
+             FROM promo_chat_baselines b CROSS JOIN json_each(?1) active
+             WHERE EXISTS (SELECT 1 FROM users WHERE chat_id = b.chat_id)
+               AND NOT EXISTS (SELECT 1 FROM json_each(b.codes_json) initial
+                               WHERE initial.value = active.value COLLATE NOCASE)
+               AND NOT EXISTS (SELECT 1 FROM promo_announcements sent
+                               WHERE sent.chat_id = b.chat_id AND sent.code = active.value)
+             ORDER BY b.chat_id",
+                [codes.as_str()],
+            )
+            .await?;
+        let mut pending = HashMap::<String, Vec<i64>>::new();
+        while let Some(row) = rows.next().await? {
+            pending.entry(row.get(0)?).or_default().push(row.get(1)?);
+        }
+        Ok(pending)
+    }
+
+    pub async fn mark_promo_announced(&self, chat: i64, code: &str) -> anyhow::Result<()> {
+        self.connection()?
+            .execute(
+                "INSERT OR IGNORE INTO promo_announcements(chat_id, code) VALUES (?1, ?2)",
+                params![chat, code],
+            )
+            .await?;
+        Ok(())
+    }
+
     pub async fn cache_season_events(&self, events: &[SeasonEvent]) -> anyhow::Result<()> {
         let conn = self.connection()?;
         let tx = conn.transaction().await?;
@@ -723,6 +786,48 @@ mod tests {
             1
         );
         assert_eq!(db.web_history("123456789", 10).await.unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn promo_baseline_follows_chat_registration_and_supports_an_empty_first_poll() {
+        let dir = tempfile::tempdir().unwrap();
+        let url = format!("file:{}", dir.path().join("promos.db").display());
+        let db = Db::connect(&url).await.unwrap();
+        db.add_user(10, 1, "111", None).await.unwrap();
+        assert!(
+            db.pending_promo_announcements(&[])
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        db.add_user(10, 2, "222", None).await.unwrap();
+        db.add_user(20, 3, "333", None).await.unwrap();
+        let pending = db.pending_promo_announcements(&["A"]).await.unwrap();
+        assert_eq!(pending["A"], [10]); // The new chat starts with A in its baseline.
+        db.mark_promo_announced(10, "A").await.unwrap();
+        drop(db);
+        let db = Db::connect(&url).await.unwrap();
+        assert!(
+            db.pending_promo_announcements(&["a"])
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        db.remove_user(10, "111").await.unwrap();
+        assert_eq!(
+            db.pending_promo_announcements(&["B"]).await.unwrap()["B"],
+            [10, 20]
+        );
+        db.remove_user(10, "222").await.unwrap();
+        assert_eq!(
+            db.pending_promo_announcements(&["B"]).await.unwrap()["B"],
+            [20]
+        );
+        db.add_user(10, 2, "222", None).await.unwrap();
+        assert_eq!(
+            db.pending_promo_announcements(&["B"]).await.unwrap()["B"],
+            [20]
+        );
     }
 
     #[tokio::test]
