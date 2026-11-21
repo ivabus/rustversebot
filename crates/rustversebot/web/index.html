@@ -3,38 +3,32 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
-  <meta name="color-scheme" content="dark">
-  <title>Rustverse · ZZZ Tracker</title>
+  <title>Рейтинг игроков · Rustverse</title>
   <style>/*__STYLE__*/</style>
 </head>
 <body>
-  <header>
-    <div><span class="eyebrow">RUSTVERSE</span><h1>ZZZ Endgame Tracker</h1></div>
-    <span class="status"><i></i> read-only</span>
-  </header>
+  <aside>
+    <div class="brand"><b class="mark" aria-hidden="true">R</b>Rustverse</div>
+    <nav aria-label="Разделы"><a href="/admin"><span aria-hidden="true">▦</span>Управление</a><a href="/players" aria-current="page"><span aria-hidden="true">▥</span>Рейтинг игроков</a></nav>
+    <div class="aside-bottom"><span>ZZZ Endgame Tracker</span></div>
+  </aside>
   <main>
-    <section class="card controls" aria-labelledby="board-title">
-      <div><span class="eyebrow">РЕЙТИНГ</span><h2 id="board-title">Результаты чата</h2></div>
-      <div class="fields">
-        <label>Чат<select id="chat" aria-label="Выберите чат"></select></label>
-        <label>Режим<select id="type"><option value="deadly_assault">Deadly Assault</option><option value="shiyu_defense">Shiyu Defense</option></select></label>
+    <header class="top"><span>Rustverse <i>/</i> Статистика</span><span>Telegram-бот</span></header>
+    <header class="section-head"><div><h1>Рейтинг игроков</h1><p>Сохранённые результаты Deadly Assault и Shiyu Defense</p></div></header>
+    <section class="panel" aria-labelledby="board-title">
+      <div class="panel-head"><h2 id="board-title">Результаты чата</h2>
+        <div class="fields"><select id="chat" aria-label="Чат"></select>
+          <select id="type" aria-label="Режим"><option value="deadly_assault">Deadly Assault</option><option value="shiyu_defense">Shiyu Defense</option></select></div>
       </div>
+      <div class="scroll"><table><thead><tr><th>Место</th><th>Игрок</th><th>UID</th><th class="number">Счёт</th></tr></thead><tbody id="rows"></tbody></table></div>
+      <p id="summary" class="board-status" aria-live="polite">Загрузка…</p>
     </section>
-    <section class="card">
-      <div id="summary" class="summary" aria-live="polite">Загрузка…</div>
-      <div class="table-wrap"><table>
-        <thead><tr><th>#</th><th>Игрок</th><th>UID</th><th class="number">Счёт</th></tr></thead>
-        <tbody id="rows"></tbody>
-      </table></div>
-      <p id="empty" class="empty" hidden>Для этого режима пока нет результатов.</p>
-    </section>
-    <section class="card history" aria-labelledby="history-title">
-      <div><span class="eyebrow">ДИНАМИКА</span><h2 id="history-title">История игрока</h2></div>
-      <form id="history-form"><label>UID<input id="uid" inputmode="numeric" pattern="[0-9]{6,12}" placeholder="Введите UID"></label><button>Показать</button></form>
+    <section class="panel history" aria-labelledby="history-title">
+      <div class="panel-head"><h2 id="history-title">История игрока</h2>
+        <form id="history-form"><input id="uid" inputmode="numeric" pattern="[0-9]{6,12}" required placeholder="Игровой UID" aria-label="Игровой UID"><button>Показать</button></form>
+      </div>
       <div id="chart" class="chart" aria-live="polite"><p class="empty">Выберите игрока в таблице или введите UID.</p></div>
     </section>
   </main>
-  <footer>Данные обновляются ботом · секреты и Telegram-профили не публикуются</footer>
   <script>/*__SCRIPT__*/</script>
-</body>
-</html>
+</body></html>

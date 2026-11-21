@@ -278,6 +278,9 @@ pub async fn picker(
     state: &std::sync::Arc<BotState>,
 ) -> Result<()> {
     use teloxide::types::{InlineKeyboardButton, InlineKeyboardMarkup};
+    if !crate::agent_access::check_chat(bot, address, crate::db::AiFeature::Diff, state).await? {
+        return Ok(());
+    }
     let sender = BotTemplateSender::new(bot, &state.templates);
     let run = async {
         let fields: Vec<_> = action.split(':').collect();
@@ -403,6 +406,9 @@ pub async fn command(
     compare: bool,
 ) -> Result<()> {
     let chat = address.chat;
+    if !crate::agent_access::check_chat(bot, address, crate::db::AiFeature::Diff, state).await? {
+        return Ok(());
+    }
     let sender = BotTemplateSender::new(bot, &state.templates);
     let args: Vec<_> = args.split_whitespace().collect();
     let (prev, cur) = match args.as_slice() {
@@ -510,7 +516,7 @@ impl ChatAgent for Diff {
 }
 
 pub async fn poll(bot: &Bot, state: &BotState, settings: &SchedulerSettings) -> Result<()> {
-    if state.db.get_distinct_chats().await?.is_empty() || rustverse_ai::api_key().is_err() {
+    if !state.db.has_diff_subscribers().await? || rustverse_ai::api_key().is_err() {
         return Ok(());
     }
     let model = state.ai_model().await?.cache_key();
@@ -581,15 +587,24 @@ async fn deliver_revision(
     let mut successful = Vec::new();
     for &chat in active.iter() {
         let delivery = async {
+            if !state
+                .db
+                .revision_pending(chat, branch.name(), &row.previous)
+                .await?
+            {
+                return Ok(false);
+            }
             albums.send(bot, ChatId(chat), settings, None).await?;
             state
                 .db
                 .advance_revision(chat, branch.name(), &row.previous, &row.current)
-                .await
+                .await?;
+            anyhow::Ok(true)
         }
         .await;
         match delivery {
-            Ok(()) => successful.push(chat),
+            Ok(true) => successful.push(chat),
+            Ok(false) => {}
             Err(error) => log::warn!("Beta revision {} for chat {chat}: {error:#}", row.current),
         }
     }

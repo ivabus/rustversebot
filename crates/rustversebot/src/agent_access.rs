@@ -14,6 +14,21 @@ pub fn is_admin(user: Option<&User>, state: &BotState) -> bool {
     user.and_then(|u| i64::try_from(u.id.0).ok()) == Some(state.admin_id)
 }
 
+pub(crate) async fn check_chat(
+    bot: &Bot,
+    address: crate::agent::MessageAddress,
+    feature: crate::db::AiFeature,
+    state: &BotState,
+) -> Result<bool> {
+    if state.db.feature_enabled(address.chat.0, feature).await? {
+        return Ok(true);
+    }
+    BotTemplateSender::new(bot, &state.templates)
+        .send_to_thread(address.chat, address.thread, "ai_chat_disabled", &())
+        .await?;
+    Ok(false)
+}
+
 pub async fn admit<'a>(
     bot: &Bot,
     chat: ChatId,

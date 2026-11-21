@@ -2771,6 +2771,7 @@ dependencies = [
  "scraper",
  "serde",
  "serde_json",
+ "subtle",
  "teloxide",
  "tempfile",
  "tokio",

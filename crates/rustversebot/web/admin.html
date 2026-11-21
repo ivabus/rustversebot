@@ -1,0 +1,67 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self'; form-action 'none'; base-uri 'none'">
+  <title>Управление · Rustverse</title>
+  <style>/*__STYLE__*/</style>
+</head>
+<body>
+  <aside>
+    <div class="brand"><b class="mark" aria-hidden="true">R</b>Rustverse</div>
+    <nav aria-label="Разделы">
+      <button type="button" data-view="chats" aria-current="page"><span aria-hidden="true">▦</span>Чаты</button>
+      <button type="button" data-view="sessions"><span aria-hidden="true">◫</span>Нейросессии</button>
+      <a href="/players"><span aria-hidden="true">▥</span>Рейтинг игроков</a>
+    </nav>
+    <div class="aside-bottom"><span>ZZZ Endgame Tracker</span><button id="logout" hidden>Выйти</button></div>
+  </aside>
+  <main>
+    <header class="top"><span>Rustverse <i>/</i> Управление</span><span class="product">Telegram-бот</span></header>
+    <p id="notice" role="status" aria-live="polite"></p>
+    <section id="login" class="login">
+      <h1>Вход в панель</h1>
+      <p>Введите токен администратора, чтобы управлять чатами и читать диалоги ассистента.</p>
+      <form id="login-form">
+        <label for="token">Токен администратора</label>
+        <input id="token" type="password" required autocomplete="current-password" spellcheck="false">
+        <button class="primary">Войти</button>
+      </form>
+    </section>
+    <section id="chats" hidden>
+      <header class="section-head"><div><h1>Чаты</h1><p>Доступ к ИИ-функциям Telegram-бота</p></div><button class="primary" id="add">Добавить чат</button></header>
+      <div class="metrics">
+        <div><span>Всего чатов</span><strong id="chat-count">—</strong></div>
+        <div><span>С доступом к /prompt</span><strong id="prompt-count">—</strong></div>
+        <div><span>С diff-анализом</span><strong id="diff-count">—</strong></div>
+      </div>
+      <section class="panel">
+        <div class="panel-head"><h2>Настройки чатов</h2><input id="search" type="search" placeholder="Название или ID" aria-label="Поиск по названию или ID чата"></div>
+        <div class="scroll"><table><thead><tr><th>Чат</th><th>Игроки</th><th>/prompt</th><th>Diff-анализ</th></tr></thead><tbody id="chat-rows"></tbody></table></div>
+        <p id="chat-empty" class="empty" hidden></p>
+      </section>
+      <p class="note">Diff-анализ включает /diff, /betadiff и рассылку новых ревизий в чаты с зарегистрированными игроками.</p>
+    </section>
+    <section id="sessions" hidden>
+      <header class="section-head"><div><h1>Нейросессии</h1><p>Диалоги /prompt за последние 24 часа</p></div><button id="refresh">Обновить</button></header>
+      <section class="panel">
+        <div class="panel-head"><h2>История диалогов</h2><select id="session-chat" aria-label="Фильтр по чату"><option value="">Все чаты</option></select></div>
+        <div id="session-list" class="session-list"></div>
+        <div class="pager"><button id="prev">Назад</button><span id="page"></span><button id="next">Далее</button></div>
+      </section>
+    </section>
+  </main>
+  <dialog id="add-dialog" aria-labelledby="add-title"><form id="add-form">
+    <h2 id="add-title">Добавить чат</h2><label for="chat-id">Telegram ID чата</label>
+    <input id="chat-id" type="text" pattern="-?[1-9][0-9]*" required placeholder="-100…" autocomplete="off">
+    <label for="first-feature">Включить функцию</label><select id="first-feature"><option value="prompt">/prompt</option><option value="diff">Diff-анализ</option></select>
+    <p id="add-status" role="status"></p>
+    <div class="actions"><button type="button" data-close>Отмена</button><button class="primary">Сохранить</button></div>
+  </form></dialog>
+  <dialog id="transcript" aria-labelledby="transcript-title">
+    <header class="panel-head"><div><h2 id="transcript-title">Диалог</h2><p id="transcript-meta"></p></div><button data-close>Закрыть</button></header>
+    <div id="turns" aria-live="polite"></div>
+  </dialog>
+  <script>/*__SCRIPT__*/</script>
+</body></html>

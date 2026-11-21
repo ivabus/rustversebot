@@ -13,6 +13,11 @@ pub async fn command(
     question: &str,
     state: &std::sync::Arc<BotState>,
 ) -> Result<()> {
+    if !crate::agent_access::check_chat(bot, msg.into(), crate::db::AiFeature::Prompt, state)
+        .await?
+    {
+        return Ok(());
+    }
     if question.trim().is_empty() {
         BotTemplateSender::new(bot, &state.templates)
             .send_to_thread(msg.chat.id, topic(msg), "prompt_usage", &())
@@ -46,6 +51,13 @@ async fn replied_session(msg: &Message, db: &crate::db::Db) -> Result<Option<Pro
 pub async fn follow_up(bot: Bot, msg: Message, state: std::sync::Arc<BotState>) -> Result<()> {
     if let Some(session) = replied_session(&msg, &state.db).await?
         && let Some(question) = msg.text()
+        && crate::agent_access::check_chat(
+            &bot,
+            (&msg).into(),
+            crate::db::AiFeature::Prompt,
+            &state,
+        )
+        .await?
     {
         answer(&bot, &msg, question, &state, session).await?;
     }

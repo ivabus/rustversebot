@@ -1,4 +1,4 @@
-//! A small, read-only HTTP dashboard.
+//! Public player statistics and a token-protected operator console.
 //!
 //! The caller decides whether to start the dashboard.
 //! Bind to a loopback address unless the operator selects a public listener.
@@ -16,9 +16,14 @@ use serde::Serialize;
 use std::{net::SocketAddr, sync::Arc};
 
 const INDEX: &str = include_str!("../web/index.html");
-const STYLE: &str = include_str!("../web/style.css");
+const STYLE: &str = concat!(
+    include_str!("../web/admin.css"),
+    "\n",
+    include_str!("../web/style.css")
+);
 const SCRIPT: &str = include_str!("../web/app.js");
 const MAX_HISTORY_ENTRIES: usize = 200;
+mod admin;
 
 /// Start serving the dashboard until the task is cancelled.
 pub async fn serve(
@@ -28,7 +33,19 @@ pub async fn serve(
 ) -> anyhow::Result<()> {
     let listener = tokio::net::TcpListener::bind(bind).await?;
     log::info!("Web dashboard listening on http://{bind}");
-    axum::serve(listener, router(state))
+    let token = match std::env::var("BOT_WEB_ADMIN_TOKEN") {
+        Ok(value) if value.trim().is_empty() => None,
+        Ok(value) => {
+            anyhow::ensure!(
+                value.len() >= 32 && value.bytes().all(|b| b.is_ascii_graphic()),
+                "BOT_WEB_ADMIN_TOKEN must contain at least 32 printable ASCII characters without spaces"
+            );
+            Some(Arc::from(value))
+        }
+        Err(std::env::VarError::NotPresent) => None,
+        Err(error) => return Err(error.into()),
+    };
+    axum::serve(listener, router(state, token))
         .with_graceful_shutdown(async move {
             while !*shutdown.borrow() {
                 if shutdown.changed().await.is_err() {
@@ -40,9 +57,22 @@ pub async fn serve(
     Ok(())
 }
 
-pub fn router(state: Arc<BotState>) -> Router {
+fn router(state: Arc<BotState>, token: Option<Arc<str>>) -> Router {
+    let admin_enabled = token.is_some();
     Router::new()
-        .route("/", get(index))
+        .route(
+            "/",
+            get(move |uri: axum::http::Uri| async move {
+                if admin_enabled && uri.query().is_none() {
+                    admin::index().await
+                } else {
+                    index().await.into_response()
+                }
+            }),
+        )
+        .route("/players", get(index))
+        .route("/admin", get(admin::index))
+        .nest("/api/admin", admin::routes(token))
         .route("/healthz", get(health))
         .route("/api/chats", get(chats))
         .route("/api/chats/{chat_id}/leaderboard/{kind}", get(leaderboard))
@@ -223,7 +253,7 @@ mod tests {
         assert!(page.contains("<meta name=\"viewport\""));
         assert!(page.contains("aria-live=\"polite\""));
         assert!(page.contains("<style>:root"));
-        assert!(page.contains("<script>const $="));
+        assert!(page.contains("history-form"));
         assert!(!page.contains("/*__STYLE__*/"));
         assert!(!page.contains("/*__SCRIPT__*/"));
         assert!(!page.contains("https://"));
@@ -234,7 +264,7 @@ mod tests {
 
     #[tokio::test]
     async fn routes_return_expected_statuses_and_reject_invalid_paths() {
-        let app = router(test_state().await);
+        let app = router(test_state().await, None);
         for (uri, expected) in [
             (
                 "/?chat=10&uid=123456789&kind=deadly_assault",
@@ -272,7 +302,7 @@ mod tests {
                 .insert_result(uid, "shiyu_defense", "2026-11-06 04:00:00", "", 1, "{}")
                 .await
                 .unwrap();
-            let response = router(state.clone())
+            let response = router(state.clone(), None)
                 .oneshot(
                     Request::builder()
                         .uri(format!("/api/users/{uid}/history"))
@@ -292,7 +322,7 @@ mod tests {
     async fn public_responses_do_not_leak_cookie_or_admin_id() {
         let state = test_state().await;
         state.db.set_cookie("super-secret-cookie").await.unwrap();
-        let app = router(state);
+        let app = router(state, None);
 
         for uri in ["/", "/healthz", "/api/chats", "/missing"] {
             let response = app
@@ -305,5 +335,166 @@ mod tests {
             assert!(!body.contains("super-secret-cookie"));
             assert!(!body.contains("\"admin_id\":1"));
         }
+    }
+
+    async fn admin_request(
+        app: &Router,
+        method: &str,
+        path: &str,
+        token: Option<&str>,
+        body: &str,
+    ) -> Response {
+        let mut request = Request::builder()
+            .uri(path)
+            .method(method)
+            .header("content-type", "application/json");
+        if let Some(token) = token {
+            request = request.header("authorization", format!("Bearer {token}"));
+        }
+        app.clone()
+            .oneshot(request.body(Body::from(body.to_owned())).unwrap())
+            .await
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn admin_routes_require_credentials_and_mutate_only_the_selected_feature() {
+        use crate::db::AiFeature;
+        let state = test_state().await;
+        let app = router(state.clone(), Some("test-key".into()));
+        let path = "/api/admin/chats/-31/features/prompt";
+        let body = r#"{"enabled":true}"#;
+        for (method, path) in [
+            ("PUT", path),
+            ("GET", "/api/admin/chats"),
+            ("GET", "/api/admin/sessions"),
+            ("GET", "/api/admin/sessions/-31/2"),
+        ] {
+            for token in [None, Some("wrong")] {
+                let res = admin_request(&app, method, path, token, body).await;
+                assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
+                assert_eq!(res.headers()[header::CACHE_CONTROL], "no-store");
+            }
+        }
+        assert_eq!(
+            admin_request(
+                &router(state.clone(), None),
+                "PUT",
+                path,
+                Some("test-key"),
+                body
+            )
+            .await
+            .status(),
+            StatusCode::SERVICE_UNAVAILABLE
+        );
+        assert!(
+            !state
+                .db
+                .feature_enabled(-31, AiFeature::Prompt)
+                .await
+                .unwrap()
+        );
+        let token = Some("test-key");
+        for path in [
+            "/api/admin/chats/0/features/prompt",
+            "/api/admin/chats/4503599627370496/features/prompt",
+            "/api/admin/chats/-31/features/unknown",
+        ] {
+            assert_eq!(
+                admin_request(&app, "PUT", path, token, body).await.status(),
+                StatusCode::BAD_REQUEST
+            );
+        }
+        assert_eq!(
+            admin_request(&app, "PUT", path, token, body).await.status(),
+            StatusCode::NO_CONTENT
+        );
+        assert!(
+            state
+                .db
+                .feature_enabled(-31, AiFeature::Prompt)
+                .await
+                .unwrap()
+        );
+        assert!(
+            !state
+                .db
+                .feature_enabled(-32, AiFeature::Prompt)
+                .await
+                .unwrap()
+        );
+        assert!(
+            !state
+                .db
+                .feature_enabled(-31, AiFeature::Diff)
+                .await
+                .unwrap()
+        );
+        let public_chats = admin_request(&app, "GET", "/api/chats", None, "").await;
+        assert_eq!(
+            to_bytes(public_chats.into_body(), 100)
+                .await
+                .unwrap()
+                .as_ref(),
+            b"[]"
+        );
+    }
+
+    #[tokio::test]
+    async fn session_browser_groups_branches_and_scopes_transcripts_to_chat() {
+        let state = test_state().await;
+        for (chat, id, parent, question) in [
+            (-1, 1, None, "root"),
+            (-1, 2, Some(1), "left"),
+            (-1, 3, Some(1), "right"),
+            (-2, 1, None, "private"),
+        ] {
+            state
+                .db
+                .save_prompt_turn(
+                    chat,
+                    Some(7),
+                    id,
+                    parent,
+                    &crate::db::DeliveredTurn {
+                        question,
+                        answer: "answer",
+                        author: Some(987654321),
+                        ..Default::default()
+                    },
+                )
+                .await
+                .unwrap();
+        }
+        let app = router(state, Some("test-key".into()));
+        let json = async |path: &str| {
+            let res = admin_request(&app, "GET", path, Some("test-key"), "").await;
+            assert_eq!(res.status(), StatusCode::OK);
+            let body = to_bytes(res.into_body(), 8192).await.unwrap();
+            let text = std::str::from_utf8(&body).unwrap();
+            assert!(!text.contains("987654321") && !text.contains("private"));
+            serde_json::from_slice::<serde_json::Value>(&body).unwrap()
+        };
+        let list = json("/api/admin/sessions?chat=-1").await;
+        assert_eq!(list["items"].as_array().unwrap().len(), 1);
+        assert_eq!(list["items"][0]["turns"], 3);
+        assert_eq!(list["items"][0]["topic"], 7);
+        let turns = json("/api/admin/sessions/-1/1").await;
+        assert_eq!(turns[2]["question"], "right");
+        assert_eq!(turns[2]["parent"], 1);
+        assert_eq!(turns[1]["parent"], 1);
+        assert_eq!(
+            admin_request(
+                &app,
+                "GET",
+                "/api/admin/sessions/-3/1",
+                Some("test-key"),
+                ""
+            )
+            .await
+            .status(),
+            StatusCode::NOT_FOUND
+        );
     }
 }

@@ -3,7 +3,10 @@ use libsql::{Builder, Connection, Database, params};
 use serde::Serialize;
 use std::collections::HashMap;
 
-const SCHEMA_VERSION: i64 = 13;
+mod admin;
+pub(crate) use admin::AiFeature;
+
+const SCHEMA_VERSION: i64 = 14;
 
 #[derive(Default)]
 pub struct DeliveredTurn<'a> {
@@ -314,6 +317,20 @@ impl Db {
             .await
             .context("applying migration 13")?;
         }
+        if version < 14 {
+            tx.execute_batch(
+                "CREATE TABLE chat_features (
+                    chat_id INTEGER PRIMARY KEY, prompt INTEGER NOT NULL DEFAULT 0,
+                    diff INTEGER NOT NULL DEFAULT 0, title TEXT);
+                 INSERT INTO chat_features(chat_id,prompt,diff) SELECT DISTINCT chat_id,1,1 FROM users;
+                 CREATE INDEX prompt_turns_parent ON prompt_turns(chat_id,parent_id);
+                 CREATE TRIGGER disable_chat_diff AFTER UPDATE OF diff ON chat_features
+                 WHEN OLD.diff=1 AND NEW.diff=0 BEGIN
+                    DELETE FROM revision_cursors WHERE chat_id=NEW.chat_id;
+                 END;
+                 PRAGMA user_version=14;",
+            ).await.context("applying migration 14")?;
+        }
         tx.commit().await.context("committing migrations")?;
         Ok(())
     }
@@ -509,14 +526,16 @@ impl Db {
     ) -> anyhow::Result<Vec<(i64, String)>> {
         let conn = self.connection()?;
         conn.execute(
-            "INSERT OR IGNORE INTO revision_cursors SELECT DISTINCT chat_id, ?1, ?2 FROM users",
+            "INSERT OR IGNORE INTO revision_cursors SELECT DISTINCT chat_id, ?1, ?2
+             FROM users JOIN chat_features USING(chat_id) WHERE diff=1",
             [branch, latest],
         )
         .await?;
         let mut rows = conn
             .query(
-                "SELECT chat_id, revision FROM revision_cursors WHERE branch=?1 AND revision != ?2 ORDER BY chat_id",
-                [branch,latest],
+                "SELECT chat_id, revision FROM revision_cursors JOIN chat_features USING(chat_id)
+                 WHERE diff=1 AND branch=?1 AND revision != ?2 ORDER BY chat_id",
+                [branch, latest],
             )
             .await?;
         let mut out = Vec::new();
@@ -524,6 +543,23 @@ impl Db {
             out.push((r.get(0)?, r.get(1)?));
         }
         Ok(out)
+    }
+
+    pub(crate) async fn revision_pending(
+        &self,
+        chat: i64,
+        branch: &str,
+        previous: &str,
+    ) -> anyhow::Result<bool> {
+        let mut rows = self
+            .connection
+            .query(
+                "SELECT 1 FROM revision_cursors JOIN chat_features USING(chat_id)
+             WHERE chat_id=?1 AND branch=?2 AND revision=?3 AND diff=1",
+                params![chat, branch, previous],
+            )
+            .await?;
+        Ok(rows.next().await?.is_some())
     }
 
     pub async fn advance_revision(
@@ -1231,6 +1267,9 @@ mod tests {
         let db = Db::connect(&url).await.unwrap();
         db.add_user(10, 1, "1", None).await.unwrap();
         db.add_user(20, 2, "2", None).await.unwrap();
+        for chat in [10, 20] {
+            db.set_feature(chat, AiFeature::Diff, true).await.unwrap();
+        }
         assert!(db.revision_cursors("beta", "r1").await.unwrap().is_empty());
         assert!(
             db.revision_cursors("release", "release_1")
@@ -1565,6 +1604,7 @@ mod tests {
             let database = Builder::new_local(&path).build().await.unwrap();
             database.connect().unwrap().execute_batch(
                 "CREATE TABLE users(chat_id INTEGER);
+                 INSERT INTO users VALUES(77);
                  CREATE TABLE beta_cursors(chat_id INTEGER PRIMARY KEY,revision TEXT NOT NULL);
                  INSERT INTO beta_cursors VALUES(77,'old_beta');
                  CREATE TRIGGER reset_beta_cursor AFTER DELETE ON users BEGIN DELETE FROM beta_cursors WHERE chat_id=OLD.chat_id; END;

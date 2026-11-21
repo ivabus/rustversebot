@@ -32,6 +32,9 @@ pub async fn command_handler(
 ) -> anyhow::Result<()> {
     let chat_id = msg.chat.id;
     let message_id = msg.id;
+    if let Err(error) = state.db.observe_chat(chat_id.0, msg.chat.title()).await {
+        log::warn!("Could not update the chat directory: {error:#}");
+    }
 
     match cmd {
         Command::Start => cmd_start(&bot, chat_id, &state).await,
