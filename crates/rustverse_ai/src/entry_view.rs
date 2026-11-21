@@ -173,12 +173,52 @@ pub(super) fn page(category: Category, entry: &Value, offset: usize) -> Result<V
             })
             .collect(),
     };
+    record_page(fields(entry, header), section, records, offset)
+}
+
+/// Use GachaBase's concise passive descriptions to shortlist partners. Keep the
+/// exact skill pointer for checking a trigger or number before drawing a conclusion.
+pub(super) fn team(entry: &Value, offset: usize) -> Result<Value> {
+    let mut records = Vec::new();
+    for (i, core) in rows(entry, "core_skills") {
+        for (j, skill) in rows(core, "skills") {
+            let path = format!("/core_skills/{i}/skills/{j}");
+            let short = skill
+                .pointer("/short_description/text")
+                .or_else(|| skill.get("short_description"))
+                .and_then(Value::as_str);
+            let description = if short.is_some_and(|s| !s.trim().is_empty()) {
+                "short_description"
+            } else {
+                "description"
+            };
+            let mut data = fields(skill, &["name", description]);
+            data["path"] = json!(path);
+            records.push(Record { path, data });
+        }
+    }
+    record_page(
+        fields(
+            entry,
+            &["name", "specialty_id", "element_ids", "faction_id"],
+        ),
+        "passives",
+        records,
+        offset,
+    )
+}
+
+fn record_page(
+    mut result: Value,
+    section: &str,
+    records: Vec<Record>,
+    offset: usize,
+) -> Result<Value> {
     let total = records.len();
     ensure!(
         offset < total || (total == 0 && offset == 0),
         "Offset exceeds record count ({total})"
     );
-    let mut result = fields(entry, header);
     // Leave room for the next offset and the array delimiters. Large unexpected
     // metadata remains accessible through its pointer as well.
     if result.to_string().chars().count() > PAGE_CHARS / 4 {
@@ -221,6 +261,23 @@ pub(super) fn page(category: Category, entry: &Value, offset: usize) -> Result<V
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn team_view_includes_both_passives_and_links_to_the_full_mechanic() {
+        let entry = json!({"core_skills":[{"skills":[
+            {"name":{"text":"Core"},"short_description":{"text":"Grant a mark"},"description":{"text":"Full condition"}},
+            {"name":{"text":"Additional Ability"},"description":{"text":"Requires another Anomaly agent"}}
+        ]}],"skills":[{"name":"Unrelated attack"}]});
+        let view = team(&entry, 0).unwrap();
+        let rows = view["passives"].as_array().unwrap();
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0]["short_description"], "Grant a mark");
+        assert_eq!(
+            entry.pointer(rows[0]["path"].as_str().unwrap()).unwrap()["description"]["text"],
+            "Full condition"
+        );
+        assert_eq!(rows[1]["description"], "Requires another Anomaly agent");
+    }
 
     #[test]
     fn tutorial_pages_keep_meaning_and_resume_at_record_boundaries() {

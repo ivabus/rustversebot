@@ -34,6 +34,12 @@ pub(crate) struct Entry {
     id: u64,
     name: String,
     slug: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    specialty: Option<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    elements: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    has_core_skills: Option<bool>,
     #[serde(skip)]
     search: String,
 }
@@ -114,6 +120,27 @@ impl Index {
             if data.get("entries").is_none() {
                 continue;
             }
+            let filters = data
+                .get("filters")
+                .map(|index| resolve(referenced(t, index)?, t, 0))
+                .transpose()?
+                .unwrap_or_default();
+            let options = |field: &str| {
+                filters
+                    .as_array()?
+                    .iter()
+                    .find(|f| f["id"] == field)?
+                    .get("options")
+            };
+            let specialties = options("specialty_id");
+            let elements = options("element_ids");
+            let label = |options: Option<&Value>, id: &Value| -> Option<String> {
+                options?
+                    .get(id.as_u64()?.to_string())?
+                    .get("name")?
+                    .as_str()
+                    .map(str::to_owned)
+            };
             let mut entries = Vec::new();
             for index in field(t, data, "entries")?
                 .as_array()
@@ -124,11 +151,41 @@ impl Index {
                 let text = field(t, name, "text")?.as_str().unwrap_or_default();
                 let slug = field(t, row, "slug")?.as_str().unwrap_or_default();
                 let search = field(t, row, "search_data")?.as_str().unwrap_or_default();
+                let specialty = row
+                    .get("specialty_id")
+                    .map(|idx| referenced(t, idx))
+                    .transpose()?
+                    .and_then(|id| label(specialties, id));
+                let element_ids = row
+                    .get("element_ids")
+                    .map(|idx| resolve(referenced(t, idx)?, t, 0))
+                    .transpose()?
+                    .unwrap_or_default();
+                let element_names: Vec<_> = element_ids
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|id| label(elements, id))
+                    .collect();
+                let has_core_skills = row
+                    .get("core_skills")
+                    .map(|idx| referenced(t, idx))
+                    .transpose()?
+                    .and_then(Value::as_array)
+                    .map(|skills| !skills.is_empty());
                 entries.push(Entry {
                     id: field(t, row, "id")?.as_u64().context("missing entry ID")?,
                     name: text.into(),
                     slug: slug.into(),
-                    search: format!("{text} {slug} {search}").to_lowercase(),
+                    search: format!(
+                        "{text} {slug} {search} {} {}",
+                        specialty.as_deref().unwrap_or(""),
+                        element_names.join(" ")
+                    )
+                    .to_lowercase(),
+                    specialty,
+                    elements: element_names,
+                    has_core_skills,
                 });
             }
             return Ok(Self {
@@ -139,21 +196,51 @@ impl Index {
         bail!("GachaBase did not return a catalog")
     }
 
-    pub fn search(&self, category: Category, query: &str, offset: usize) -> Result<Value> {
+    pub fn search(
+        &self,
+        category: Category,
+        query: &str,
+        offset: usize,
+        specialty: Option<&str>,
+        element: Option<&str>,
+    ) -> Result<Value> {
+        ensure!(
+            category == Category::Agents || (specialty.is_none() && element.is_none()),
+            "Specialty and element filters apply to agents only"
+        );
         let terms = query.trim().to_lowercase();
         let id = terms.parse::<u64>().ok();
         let mut hits: Vec<_> = self
             .entries
             .iter()
+            .filter(|e| {
+                specialty.is_none_or(|s| {
+                    e.specialty
+                        .as_ref()
+                        .is_some_and(|name| name.eq_ignore_ascii_case(s.trim()))
+                })
+            })
+            .filter(|e| {
+                element.is_none_or(|s| {
+                    e.elements
+                        .iter()
+                        .any(|name| name.eq_ignore_ascii_case(s.trim()))
+                })
+            })
             .filter(|e| Some(e.id) == id || terms.split_whitespace().all(|s| e.search.contains(s)))
             .collect();
         hits.sort_by_key(|e| {
             (
                 Some(e.id) != id && e.name.to_lowercase() != terms && e.slug != terms,
+                e.has_core_skills == Some(false),
                 e.id,
             )
         });
-        let end = offset.saturating_add(16).min(hits.len());
+        let end = if category == Category::Agents && terms.is_empty() {
+            hits.len()
+        } else {
+            offset.saturating_add(16).min(hits.len())
+        };
         ensure!(offset <= end, "Offset exceeds match count");
         Ok(
             json!({"category":category,"version":self.revision,"total":hits.len(),
@@ -284,9 +371,84 @@ mod tests {
         let index = Index::decode(&body, "chs", "beta_3.4.5_42").unwrap();
         for query in ["1011", "安比", "ALIAS", "anby"] {
             assert_eq!(
-                index.search(Category::Agents, query, 0).unwrap()["matches"][0]["id"],
+                index
+                    .search(Category::Agents, query, 0, None, None)
+                    .unwrap()["matches"][0]["id"],
                 1011
             );
         }
+    }
+
+    #[test]
+    fn roster_filters_intersect_and_return_every_matching_agent() {
+        let layout = json!({"type":"data","nodes":[{"data":[{"language":1,"revisions":2},"en",{"current":3},{"branch":4,"version":5,"design_revision":6},"beta","3.4.5",42]}]});
+        // The wire format stores field and array values as indices into one table.
+        let mut table = vec![
+            json!({"data":1}),
+            json!({"entries":2,"filters":3}),
+            json!([]),
+            json!([4, 5]),
+            json!({"id":6,"options":7}),
+            json!({"id":8,"options":9}),
+            json!("specialty_id"),
+            json!({"3":10,"4":11}),
+            json!("element_ids"),
+            json!({"201":12,"202":13}),
+            json!({"name":14}),
+            json!({"name":15}),
+            json!({"name":16}),
+            json!({"name":17}),
+            json!("Anomaly"),
+            json!("Support"),
+            json!("Fire"),
+            json!("Ice"),
+            json!(3),
+            json!(4),
+            json!([22]),
+            json!([22, 23]),
+            json!(201),
+            json!(202),
+        ];
+        let mut indices = Vec::new();
+        for i in 0..20 {
+            let n = table.len();
+            indices.push(n);
+            table.extend([
+                json!({"id":n+1,"slug":n+2,"name":n+3,"search_data":n+2,
+                "specialty_id":if i==19 {19}else{18},"element_ids":if i>=18 {21}else{20}}),
+                json!(1000 + i),
+                json!(format!("agent-{i}")),
+                json!({"text":n+2}),
+            ]);
+        }
+        table[2] = json!(indices);
+        let chunk = json!({"type":"chunk","data":table});
+        let index = Index::decode(&format!("{layout}\n{chunk}"), "en", "beta_3.4.5_42").unwrap();
+        let list = |specialty, element| {
+            index
+                .search(Category::Agents, "", 0, specialty, element)
+                .unwrap()
+        };
+        let all = list(None, None);
+        assert_eq!(all["matches"].as_array().unwrap().len(), 20);
+        assert!(all["next_offset"].is_null());
+        assert_eq!(
+            list(Some("anomaly"), None)["matches"]
+                .as_array()
+                .unwrap()
+                .len(),
+            19
+        );
+        assert_eq!(list(None, Some("ice"))["total"], 2);
+        let both = list(Some("Anomaly"), Some("Ice"));
+        assert_eq!(both["total"], 1);
+        assert_eq!(both["matches"][0]["id"], 1018);
+        assert_eq!(both["matches"][0]["elements"], json!(["Fire", "Ice"]));
+        assert_eq!(
+            index
+                .search(Category::Agents, "1019", 0, Some("Anomaly"), None)
+                .unwrap()["total"],
+            0
+        );
     }
 }

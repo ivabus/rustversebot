@@ -40,7 +40,10 @@ the Core Passive at its highest available rank and other skills at level 12.
 - `list_recent_revisions` lists recent design revisions from beta and release.
 - `search_gachabase` searches a revision's catalog by category, localized name,
   alias, slug or ID. The categories are agents, W-Engines, drive discs,
-  Bangboo and tutorials.
+  Bangboo and tutorials. For agents an empty query lists the entire matching
+  roster in one response. Set `specialty`, `element`, or both using names from
+  the selected language. For example, setting `Anomaly` and `Fire` in English selects
+  agents matching both. Named searches can use the same filters.
 - `get_gachabase_entry` reads a category and ID in English or Simplified Chinese.
   An optional exact version pins the result to a revision, including release
   revisions. Both lookup tools reuse a pinned revision. Questions default to the
@@ -50,6 +53,10 @@ the Core Passive at its highest available rank and other skills at level 12.
   to continue at the next record. A `read` pointer identifies an oversized record.
   Use a JSON pointer for fields, `@raw` for the original paginated DTO with all ranks,
   or `text:<phrase>` to locate mentions in descriptions.
+  For agents, `@team` reads the Core Passive and Additional Ability summaries
+  with paths to their full conditions. In an interactive team comparison using
+  this view, the next turn after 24 catalog lookups switches to calculation
+  or a final answer. The same switch occurs with two tool turns left.
   Agent reads accept `skill_level` and `core_level`. Reports use level 12 and maximum
   Core Passive rank by default. Large diffs list selectors per group. Each group
   pages whole changes and supplies separate read pointers for oversized values.

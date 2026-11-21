@@ -40,14 +40,15 @@ pub(crate) fn definitions() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "search_gachabase",
-            description: "Search a revision's catalog by localized name, alias, slug or ID. Empty query browses a category. Pass a result ID and returned version to get_gachabase_entry.",
+            description: "Search by name, alias, slug or ID. For a roster use category=agents, query='', offset=null: returns all matching agents at the pinned revision. Filter by specialty, element or both (AND), using catalog names in the selected language, e.g. Anomaly and Fire in en. Null filters list all. Prefer entries with core skills when names collide.",
             parameters: json!({"type":"object","additionalProperties":false,"properties":{
-                "category":category,"query":{"type":"string"},"language":language,"offset":offset,"version":version
-            },"required":["category","query","language","offset","version"]}),
+                "category":category,"query":{"type":"string"},"language":language,"offset":offset,"version":version,
+                "specialty":{"type":["string","null"]},"element":{"type":["string","null"]}
+            },"required":["category","query","language","offset","version","specialty","element"]}),
         },
         ToolSpec {
             name: "get_gachabase_entry",
-            description: "Read by ID. Null selector returns compact pages; empty lists fields; JSON pointer reads a field. @raw returns original data with all levels and growth coefficients; name/ID or text:<phrase> finds paths. For agents request skill_level or core_level (defaults: 12 and maximum). Use returned source and JSON pointers for compute. @changes lists groups; use their selectors and record offsets.",
+            description: "Read by ID. For team selection use @team for short Core Passive and Additional Ability descriptions, then follow a specific path for exact conditions. Null selector returns compact pages; empty lists fields; JSON pointer reads a field. @raw returns all levels and growth coefficients; name/ID or text:<phrase> finds paths. Agent skill_level and core_level default to 12 and maximum. Use source and JSON pointers for compute. @changes lists change groups.",
             parameters: json!({"type":"object","additionalProperties":false,"properties":{
                 "category":category,"id":{"type":"integer","minimum":1},"language":language,
                 "version":version,"selector":{"type":["string","null"]},"offset":offset,
@@ -230,6 +231,8 @@ impl KitTools {
                     category: Category,
                     language: Language,
                     query: String,
+                    specialty: Option<String>,
+                    element: Option<String>,
                     offset: Option<usize>,
                     version: Option<String>,
                 }
@@ -245,7 +248,13 @@ impl KitTools {
                             .await?,
                     ),
                 };
-                index.search(q.category, &q.query, q.offset.unwrap_or_default())
+                index.search(
+                    q.category,
+                    &q.query,
+                    q.offset.unwrap_or_default(),
+                    q.specialty.as_deref(),
+                    q.element.as_deref(),
+                )
             }
             "get_gachabase_entry" => {
                 #[derive(Deserialize)]
@@ -332,6 +341,9 @@ impl KitTools {
                 let entry = &self.sources[&source];
                 let offset = q.offset.unwrap_or_default();
                 let result = match q.selector {
+                    Some(selector) if selector == "@team" && q.category == Category::Agents => {
+                        crate::entry_view::team(entry, offset)?
+                    }
                     Some(selector) => fragment(entry, &selector, offset)?,
                     None => crate::entry_view::page(q.category, entry, offset)?,
                 };

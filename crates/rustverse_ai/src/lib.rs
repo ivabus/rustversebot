@@ -15,12 +15,16 @@ mod transport;
 use progress::Preview;
 pub use progress::{PromptProgress, PromptStage};
 
-use std::time::Duration;
+use std::{
+    sync::atomic::{AtomicBool, Ordering},
+    time::Duration,
+};
 
 use anyhow::{Context, Result, bail, ensure};
 use reqwest::Client;
 use rig_agent::agent::{
-    AgentBuilder, AgentHook, CompletionCallAction, CompletionCallEvent, HookContext, RequestPatch,
+    AgentBuilder, AgentHook, CompletionCallAction, CompletionCallEvent, DispatchAction,
+    DispatchEvent, HookContext, RequestPatch,
 };
 use rig_core::{http_client::DynHttpClient, message::ToolChoice, providers::openai::OpenAIConfig};
 use serde_json::{Value, json};
@@ -57,6 +61,19 @@ pub fn api_key() -> Result<String> {
 }
 
 const MAX_TURNS: usize = 12;
+// Append question-specific updates after the established preamble and progress instructions.
+const TEAM_COMPARISON_GUIDANCE: &str = "При подборе команды «сейчас» без уточнения ветки используй version=null
+и ревизию из ответа поиска. Не переключайся с неё на релиз или другую бету без запроса. Для уточнения учитывай предыдущий выбор.
+Пустой query в search_gachabase и фильтр specialty или element дают весь подходящий ростер. Учитывай и партнёров других ролей.
+Отбери сильные составы и ближайшую альтернативу для спорного слота. Прочитай @team ключевых агентов; для спорного условия
+открой точное описание навыка. Уточняй термины, только когда их смысл может изменить выбор. Сравни, кто создаёт нужный эффект,
+кто использует его, с какой частотой и сколько времени занимает на поле. Один бафф или бонус к накоплению не определяет победителя.
+На просьбу «посчитай» проверь через compute фактор, который различает составы, используя одинаковые условия. Числовые поля
+передавай через привязки; коэффициенты из описаний можно подставить из проверенного текста. Когда остался только compute,
+используй уже собранные данные. Если их недостаточно, назови недостающую величину и условие выбора. Полная симуляция нужна
+для оценки полного DPS; на обычный вопрос о составе отвечай по решающим механикам, если арифметика ничего не добавляет.
+Начни с состава и его синергии, коротко объясни роли и порядок ключевых действий. Упоминай расчёт только если успешно проверил
+фактор, на котором основан вывод. На встречный вопрос проверяй конкретное возражение. Меняй рекомендацию, если новый факт меняет сравнение.";
 const RESEARCH_UPDATES: &str = "Обозначай начало исследования и каждый переход к новой цели одной короткой фразой на языке вопроса в research_status.
 Например, «Уточняю правила Refringe» — один этап: поиск руководства, чтение его страниц и сверка перевода относятся к нему же.
 Когда переходишь к другой задаче, например «Сравниваю урон Кафки до и после патча», передай новый статус с первым вызовом этого этапа.
@@ -181,7 +198,7 @@ async fn analyze_snapshots(
                 &OpenAIConfig::new(api_key.to_owned()),
                 model,
                 tools,
-                format!("{INSTRUCTIONS}\n{REVIEW}"),
+                None,
                 input,
                 &[],
                 None,
@@ -193,6 +210,75 @@ async fn analyze_snapshots(
 }
 
 struct FinishAtLimit;
+
+#[derive(Default)]
+struct TeamComparison {
+    calculating: AtomicBool,
+}
+
+impl TeamComparison {
+    fn compute_only() -> RequestPatch {
+        // Keep every definition on the wire. The provider may answer directly or call compute.
+        RequestPatch::new().additional_params(json!({"tool_choice":{"type":"allowed_tools","mode":"auto","tools":[{"type":"function","name":"compute"}]}}))
+    }
+
+    // Count lookups, not turns: one model turn can request many profiles in parallel.
+    const LOOKUP_BUDGET: usize = 24;
+
+    fn ready_to_compare(
+        turn: usize,
+        history: &[std::sync::Arc<rig_core::message::Message>],
+    ) -> bool {
+        let mut lookups = 0;
+        let mut used_team_view = false;
+        for message in history {
+            if let rig_core::message::Message::Assistant(reply) = message.as_ref() {
+                for call in reply.tool_calls() {
+                    match call.function.name.as_str() {
+                        "get_gachabase_entry" => {
+                            lookups += 1;
+                            used_team_view |= call
+                                .function
+                                .arguments
+                                .get("selector")
+                                .and_then(Value::as_str)
+                                == Some("@team");
+                        }
+                        "search_gachabase" => lookups += 1,
+                        _ => {}
+                    }
+                }
+            }
+        }
+        used_team_view && (lookups >= Self::LOOKUP_BUDGET || turn >= MAX_TURNS - 2)
+    }
+}
+
+impl AgentHook for TeamComparison {
+    async fn on_completion_call(
+        &self,
+        _: &HookContext,
+        event: CompletionCallEvent<'_>,
+    ) -> CompletionCallAction {
+        let calculating =
+            event.turn < MAX_TURNS && Self::ready_to_compare(event.turn, event.history);
+        self.calculating.store(calculating, Ordering::Relaxed);
+        if calculating {
+            CompletionCallAction::patch(Self::compute_only())
+        } else {
+            CompletionCallAction::Continue
+        }
+    }
+    async fn on_dispatch(&self, _: &HookContext, event: DispatchEvent<'_>) -> DispatchAction {
+        if self.calculating.load(Ordering::Relaxed)
+            && let rig_core::effect::EffectKind::ToolCall { name, .. } = event.kind
+            && name.as_str() != "compute"
+        {
+            return DispatchAction::skip("Only compute is available for this comparison turn");
+        }
+        DispatchAction::Proceed
+    }
+}
 
 impl AgentHook for FinishAtLimit {
     async fn on_completion_call(
@@ -327,7 +413,7 @@ async fn question_run(
         &OpenAIConfig::new(key.to_owned()),
         model,
         kit::KitTools::for_question(client.clone(), question),
-        instructions.to_owned(),
+        Some(instructions),
         question.to_owned(),
         history,
         preview,
@@ -339,7 +425,7 @@ async fn run_agent(
     config: &OpenAIConfig,
     model: &str,
     tools: kit::KitTools,
-    instructions: String,
+    question_instructions: Option<&str>,
     input: String,
     history: &[PromptTurn],
     preview: Option<Preview>,
@@ -352,8 +438,14 @@ async fn run_agent(
     )
     .with_strict_tools();
     let research_updates = matches!(&preview, Some(Preview::Progress(_)));
-    let mut builder = AgentBuilder::new(rig_core::Model::new(wire, http))
-        .preamble(instructions)
+    let builder = AgentBuilder::new(rig_core::Model::new(wire, http));
+    let builder = match question_instructions {
+        Some(instructions) => builder
+            .preamble(instructions)
+            .add_hook(TeamComparison::default()),
+        None => builder.preamble(INSTRUCTIONS).append_preamble(REVIEW),
+    };
+    let mut builder = builder
         .append_preamble(TUTORIAL_GUIDANCE)
         .append_preamble(OUTPUT_FORMAT)
         .dynamic_tools(tools.into_tools(research_updates))
@@ -362,6 +454,9 @@ async fn run_agent(
         .add_hook(FinishAtLimit);
     if research_updates {
         builder = builder.append_preamble(RESEARCH_UPDATES);
+    }
+    if question_instructions.is_some() {
+        builder = builder.append_preamble(TEAM_COMPARISON_GUIDANCE);
     }
     if let Some(reasoning) = selection.reasoning {
         builder = builder.reasoning(reasoning);
@@ -461,6 +556,68 @@ fn report_text(output: &[Value]) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn compute_phase_preserves_the_responses_tool_definitions() {
+        use rig_core::{
+            completion::CompletionRequest,
+            providers::openai::responses_api::wire::Responses,
+            wire::{Body, Mode, Wire},
+        };
+        let wire = Responses::new(OpenAIConfig::new("test"), DEFAULT_MODEL).with_strict_tools();
+        let encode = |request| {
+            let encoded = wire.encode(request, Mode::Streaming).unwrap();
+            let Body::Bytes(bytes) = encoded.request.body() else {
+                panic!("expected JSON")
+            };
+            serde_json::from_slice::<Value>(bytes).unwrap()
+        };
+        let mut request = CompletionRequest::new("question");
+        request.tools = serde_json::from_value(json!(kit::definitions())).unwrap();
+        let normal = encode(request.clone());
+        let patch = TeamComparison::compute_only();
+        assert!(
+            patch.active_tools.is_none() && patch.preamble.is_none() && patch.history.is_none()
+        );
+        request.tool_choice = patch.tool_choice;
+        request.additional_params = patch.additional_params;
+        let restricted = encode(request);
+        assert_eq!(restricted["tools"], normal["tools"]);
+        assert_eq!(
+            restricted["tools"].as_array().unwrap().len(),
+            kit::definitions().len()
+        );
+        assert_eq!(
+            restricted["tool_choice"],
+            json!({"type":"allowed_tools","mode":"auto","tools":[{"type":"function","name":"compute"}]})
+        );
+    }
+
+    #[test]
+    fn team_lookups_reserve_time_for_calculation_even_when_batched() {
+        use rig_core::message::{AssistantContent, AssistantMessage, Message, ToolName};
+        let calls = |n, selector| {
+            let batch = (0..n)
+                .map(|i| {
+                    AssistantContent::tool_call(
+                        i.to_string(),
+                        ToolName::new("get_gachabase_entry").unwrap(),
+                        json!({"selector":selector}),
+                    )
+                })
+                .collect();
+            std::sync::Arc::new(Message::from(AssistantMessage::new(batch)))
+        };
+        let mut history = vec![calls(TeamComparison::LOOKUP_BUDGET - 1, "@team")];
+        assert!(!TeamComparison::ready_to_compare(3, &history));
+        assert!(TeamComparison::ready_to_compare(MAX_TURNS - 2, &history));
+        history.push(calls(1, "/skills"));
+        assert!(TeamComparison::ready_to_compare(4, &history));
+        assert!(!TeamComparison::ready_to_compare(
+            MAX_TURNS - 1,
+            &[calls(30, "@changes")]
+        ));
+    }
 
     #[test]
     fn extracts_only_completed_text() {
