@@ -276,30 +276,4 @@ mod tests {
         }
         assert_eq!(i, 100);
     }
-
-    #[tokio::test]
-    #[ignore = "contacts the live promo code providers"]
-    async fn live_listing_renders_redemption_links() {
-        let client = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(10))
-            .user_agent(concat!("rustversebot/", env!("CARGO_PKG_VERSION")))
-            .build()
-            .unwrap();
-        let list = fetch(&client).await.unwrap();
-        let rendered = crate::templates::TemplateEngine::new()
-            .unwrap()
-            .render(
-                "promocodes",
-                &serde_json::json!({"source": list.source, "codes": list.codes}),
-            )
-            .unwrap();
-        assert!(rendered.text.contains(list.source));
-        for entry in &list.codes {
-            let code = &entry.code;
-            assert!(rendered.text.contains(&format!(
-                "href=\"https://zenless.hoyoverse.com/redemption?code={code}\""
-            )));
-        }
-        println!("{}", rendered.text);
-    }
 }

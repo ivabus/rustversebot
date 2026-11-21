@@ -284,31 +284,4 @@ mod tests {
         assert_eq!(results[3]["call_id"], "d");
         assert!(results[3]["output"].as_str().unwrap().contains("error"));
     }
-
-    #[tokio::test]
-    #[ignore = "fetches GachaBase timeline and another agent by ID"]
-    async fn recent_revision_can_read_another_agent() {
-        let client = Client::new();
-        let page = Comparison::parse(PAGE).unwrap();
-        let empty = Snapshots {
-            prev: Value::Null,
-            cur: Value::Null,
-        };
-        let mut tools = KitTools::new(&client, &page, &empty, &empty);
-        let recent = tools.call("list_recent_revisions", "{}").await.unwrap();
-        let names = recent["revisions"].as_array().unwrap();
-        assert_eq!(names.len(), 10);
-        for (selector, rev, language) in [
-            ("/mindscapes/0/name/text", names[0].as_str().unwrap(), "en"),
-            ("/mindscapes/0/name/text", "previous", "cn"),
-        ] {
-            let args = json!({"agent_id":1011,"revision":rev,"language":language,"selector":selector,"offset":0});
-            let result = tools.call("read_kit", &args.to_string()).await.unwrap();
-            assert_eq!(result["agent_id"], 1011);
-            assert!(!result["result"]["value"].as_str().unwrap().is_empty());
-            if language == "en" {
-                assert_eq!(result["agent"], "Anby");
-            }
-        }
-    }
 }

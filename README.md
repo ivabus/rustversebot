@@ -80,7 +80,7 @@ The default model is `gpt-6.2-sol` with `high` reasoning effort. Select another 
 ```sh
 ./dev/beta render                     # Однократный рендер рабочего отчёта
 ./dev/beta watch --report my-report.md --port 8766
-./dev/beta test                       # Включая рендер PNG и локальную проверку доставки
+./dev/beta test                       # Тесты workspace без сети, включая рендер PNG
 ./dev/beta analyze 'https://zzz.gachabase.net/diff/agents/1651/kafka?prev=beta_3.4.4_20541895&cur=beta_3.4.5_20691792&lang=chs' > my-report.md
 ```
 

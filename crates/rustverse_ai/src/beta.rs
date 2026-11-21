@@ -264,23 +264,4 @@ mod tests {
         assert_eq!(rows[1].agents[0].status, "new");
         assert!(revision_group("beta_3.x.5_1").is_err());
     }
-
-    #[tokio::test]
-    #[ignore = "reads a historical multi-revision changelog from GachaBase"]
-    async fn kafka_range_includes_every_intermediate_hotfix() {
-        let rows = revisions(
-            &Client::new(),
-            Some("beta_3.4.4_20541895"),
-            Some("beta_3.4.5_20699967"),
-        )
-        .await
-        .unwrap();
-        assert_eq!(rows.len(), 4);
-        assert!(
-            rows.windows(2)
-                .all(|pair| pair[0].current == pair[1].previous)
-        );
-        assert!(rows.iter().flat_map(|r| &r.agents).any(|a| a.id == 1651));
-        assert_eq!(rows.last().unwrap().agents[0].id, 1601);
-    }
 }

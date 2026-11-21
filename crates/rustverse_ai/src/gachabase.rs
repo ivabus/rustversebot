@@ -322,35 +322,4 @@ mod tests {
         );
         assert!(Comparison::parse(&SUNBRINGER.replace("prev=", "cur=")).is_err());
     }
-
-    #[tokio::test]
-    #[ignore = "fetches the public Sunbringer comparison from GachaBase"]
-    async fn live_sunbringer_diff() {
-        let page = Comparison::parse(SUNBRINGER).unwrap();
-        let client = Client::new();
-        let (en, cn) =
-            tokio::try_join!(page.fetch(&client, "en"), page.fetch(&client, "chs")).unwrap();
-        let m2 = |diff: &[Change]| {
-            diff.iter()
-                .find(|c| {
-                    c.path.contains("mindscapes[")
-                        && c.path.contains("level=2 ")
-                        && c.path.ends_with(".description.text")
-                })
-                .unwrap()
-                .after
-                .clone()
-                .unwrap()
-        };
-        let en = m2(&en.changes());
-        let cn = m2(&cn.changes());
-        assert!(en.as_str().unwrap().contains("Embermarks"));
-        assert!(
-            cn.as_str()
-                .unwrap()
-                .chars()
-                .any(|c| ('\u{4e00}'..='\u{9fff}').contains(&c))
-        );
-        assert_ne!(en, cn);
-    }
 }

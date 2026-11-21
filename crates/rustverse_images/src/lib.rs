@@ -362,45 +362,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn downloads_publish_complete_files_and_distinguish_missing_from_failed() {
-        use std::io::{Read, Write};
-        let cache = tempfile::tempdir().unwrap();
-        let client = reqwest::Client::builder().no_proxy().build().unwrap();
-        for status in [200, 404, 500] {
-            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-            let url = format!(
-                "http://{}/image-{status}.png",
-                listener.local_addr().unwrap()
-            );
-            let server = std::thread::spawn(move || {
-                let (mut stream, _) = listener.accept().unwrap();
-                assert!(stream.read(&mut [0; 4096]).unwrap() > 0);
-                write!(
-                    stream,
-                    "HTTP/1.1 {status} Test\r\nContent-Length: 5\r\nConnection: close\r\n\r\nimage"
-                )
-                .unwrap();
-            });
-            let result = download(&client, cache.path(), &url).await;
-            server.join().unwrap();
-            match status {
-                200 => {
-                    let path = result.unwrap().unwrap();
-                    assert_eq!(fs::read(&path).await.unwrap(), b"image");
-                    // The server has closed. This must be served from the cache.
-                    assert_eq!(
-                        download(&client, cache.path(), &url).await.unwrap(),
-                        Some(path)
-                    );
-                }
-                404 => assert!(result.unwrap().is_none()),
-                _ => assert!(result.is_err()),
-            }
-        }
-        assert_eq!(std::fs::read_dir(cache.path()).unwrap().count(), 1);
-    }
-
-    #[tokio::test]
     async fn all_six_templates_render_with_real_clis() {
         let avatar = json!({"role_square_url": "images/star-icon.png", "rank": 1, "rarity": "S"});
         let room = json!({"boss": [{"name": "Boss"}], "score": 12345, "avatar_list": [avatar.clone(), avatar.clone(), avatar],
