@@ -1,6 +1,5 @@
 //! Convert model Markdown to the HTML entities accepted by Telegram. Split on
 //! visible UTF-16 units, closing and reopening active entities at each boundary.
-use crate::bot_templates::MESSAGE_LIMIT;
 use pulldown_cmark::{Event, Options, Parser, Tag, TagEnd};
 
 #[derive(Clone, PartialEq)]
@@ -19,6 +18,7 @@ impl Entity {
 
 #[derive(Default)]
 struct Output {
+    limit: usize,
     chunks: Vec<String>,
     html: String,
     units: usize,
@@ -57,7 +57,7 @@ impl Output {
         self.break_lines = 0;
         if breaks > 0 {
             self.style(&[]);
-            if self.units + breaks >= MESSAGE_LIMIT {
+            if self.units + breaks >= self.limit {
                 self.finish_chunk();
             } else {
                 for _ in 0..breaks {
@@ -68,7 +68,7 @@ impl Output {
         }
         self.style(style);
         for ch in text.chars() {
-            if self.units + ch.len_utf16() > MESSAGE_LIMIT {
+            if self.units + ch.len_utf16() > self.limit {
                 self.finish_chunk();
                 self.style(style);
             }
@@ -100,8 +100,11 @@ fn link(url: &str) -> Option<Entity> {
     })
 }
 
-pub fn chunks(markdown: &str) -> Vec<String> {
-    let mut out = Output::default();
+pub fn chunks(markdown: &str, limit: usize) -> Vec<String> {
+    let mut out = Output {
+        limit,
+        ..Output::default()
+    };
     let mut styles = Vec::<Entity>::new();
     let mut depths = Vec::new();
     let mut lists = Vec::<Option<u64>>::new();
@@ -179,7 +182,7 @@ pub fn chunks(markdown: &str) -> Vec<String> {
 
 /// Complete an open inline span for this preview only. CommonMark decides
 /// whether a suffix actually closes a span, so underscores inside IDs survive.
-pub fn preview(markdown: &str) -> String {
+pub fn preview(markdown: &str, limit: usize) -> String {
     let mut source = markdown.to_owned();
     if let Some(pos) = source.rfind("](")
         && !source[pos + 2..].contains([')', '\n'])
@@ -211,16 +214,21 @@ pub fn preview(markdown: &str) -> String {
             }
         }
     }
-    chunks(&source).into_iter().next().unwrap_or_default()
+    chunks(&source, limit)
+        .into_iter()
+        .next()
+        .unwrap_or_default()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::bot_templates::MESSAGE_LIMIT;
     #[test]
     fn renders_only_telegram_entities_and_reopens_long_spans() {
         let html = chunks(
             "## Гайд\n\n**Урон** и *шанс* · [источник](https://example.com/?a=1&b=2) · `<x>` · [ссылка](javascript:foo) <bad>",
+            MESSAGE_LIMIT,
         );
         let s = &html[0];
         for part in [
@@ -234,7 +242,7 @@ mod tests {
             assert!(s.contains(part), "{s}");
         }
         assert!(!s.contains("javascript:"));
-        let pages = chunks(&format!("**{}**", "🌙".repeat(2050)));
+        let pages = chunks(&format!("**{}**", "🌙".repeat(2050)), MESSAGE_LIMIT);
         assert_eq!(pages.len(), 2);
         assert!(
             pages
@@ -244,8 +252,14 @@ mod tests {
     }
     #[test]
     fn partial_markup_is_balanced() {
-        assert_eq!(preview("Урон **вырос"), "Урон <b>вырос</b>");
-        assert_eq!(preview("см. [Гайд](https://exam"), "см. Гайд");
-        assert_eq!(preview("beta_3.4.5_20699967"), "beta_3.4.5_20699967");
+        assert_eq!(preview("Урон **вырос", MESSAGE_LIMIT), "Урон <b>вырос</b>");
+        assert_eq!(
+            preview("см. [Гайд](https://exam", MESSAGE_LIMIT),
+            "см. Гайд"
+        );
+        assert_eq!(
+            preview("beta_3.4.5_20699967", MESSAGE_LIMIT),
+            "beta_3.4.5_20699967"
+        );
     }
 }

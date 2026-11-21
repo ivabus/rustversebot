@@ -1,0 +1,2 @@
+{% if p is defined %}<i>{% if p.stage == "researching" %}Проверяю данные GachaBase…{% elif p.stage == "writing" %}Пишу ответ…{% elif p.stage == "complete" %}Ответ готов{% elif p.stage == "failed" %}Ошибка подготовки{% else %}Готовлю ответ…{% endif %}</i> · <code>{{ model }}</code>
+Вызовы инструментов: {{ p.tools }} · Ходы: {{ p.turns }} · Токены: {% if p.tokens is none %}—{% else %}{{ p.tokens }}{% endif %}{% endif %}

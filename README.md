@@ -88,7 +88,11 @@ The default model is `gpt-6.2-sol` with `high` reasoning effort. Select another 
 `/prompt <вопрос>` asks the same agent a standalone question. In private chats
 the bot streams temporary Telegram drafts and sends the completed answer as
 persistent messages. Both use Telegram HTML for emphasis, quotations, code and
-HTTP(S) links. Groups receive the completed answer.
+HTTP(S) links. In groups the bot edits a single progress message at most every
+15 seconds during generation, then replaces it with the answer. The initial
+status and the final footer show the model, tool calls, model turns and the
+confirmed token usage across completed turns. Missing provider usage appears
+as a dash. The footer appears once when a long answer spans multiple messages.
 
 `/diff` opens a beta/release picker. Choose the starting and ending design
 revisions for a direct comparison. `/diff <prev> <cur>` accepts exact names.

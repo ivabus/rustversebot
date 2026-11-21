@@ -5,7 +5,10 @@ mod catalog;
 mod diff;
 mod gachabase;
 mod kit;
+mod progress;
 mod transport;
+use progress::Preview;
+pub use progress::{PromptProgress, PromptStage};
 
 use std::time::Duration;
 
@@ -26,7 +29,7 @@ pub const DEFAULT_MODEL: &str = "gpt-6.2-sol";
 pub fn prompt_version() -> &'static str {
     static VERSION: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
         let input = format!(
-            "{INSTRUCTIONS}\0{REVIEW}\0{TUTORIAL_GUIDANCE}\0{}",
+            "{INSTRUCTIONS}\0{REVIEW}\0{TUTORIAL_GUIDANCE}\0{OUTPUT_FORMAT}\0{}",
             serde_json::to_string(&kit::definitions()).unwrap()
         );
         format!("{:x}", md5::compute(input))
@@ -52,6 +55,7 @@ pub fn api_key() -> Result<String> {
 }
 
 const MAX_TURNS: usize = 12;
+const OUTPUT_FORMAT: &str = "Не выводи таблицы ни в Markdown, ни в HTML. Для сравнений используй короткие абзацы или списки.";
 
 const TUTORIAL_GUIDANCE: &str = "Если встретился незнакомый игровой термин, статус или название механики,
 сначала ищи его через search_gachabase в категории tutorials по исходному английскому или китайскому
@@ -191,20 +195,6 @@ impl AgentHook for FinishAtLimit {
     }
 }
 
-struct Preview(tokio::sync::watch::Sender<String>);
-
-impl AgentHook for Preview {
-    async fn on_text_delta(
-        &self,
-        _: &HookContext,
-        event: rig_agent::agent::TextDelta<'_>,
-    ) -> rig_agent::agent::ObservationAction {
-        self.0
-            .send_replace(event.aggregated.chars().take(4096).collect());
-        rig_agent::agent::ObservationAction::Continue
-    }
-}
-
 /// Answer a standalone question using the same read-only GachaBase tools as beta reports.
 pub async fn prompt(
     client: &Client,
@@ -212,6 +202,34 @@ pub async fn prompt(
     model: &str,
     question: &str,
     preview: Option<tokio::sync::watch::Sender<String>>,
+) -> Result<String> {
+    question_run(client, key, model, question, preview.map(Preview::Text)).await
+}
+
+/// Stream partial text, model turns, tool invocations and confirmed token usage.
+pub async fn prompt_with_progress(
+    client: &Client,
+    key: &str,
+    model: &str,
+    question: &str,
+    progress: tokio::sync::watch::Sender<PromptProgress>,
+) -> Result<String> {
+    question_run(
+        client,
+        key,
+        model,
+        question,
+        Some(Preview::Progress(progress)),
+    )
+    .await
+}
+
+async fn question_run(
+    client: &Client,
+    key: &str,
+    model: &str,
+    question: &str,
+    preview: Option<Preview>,
 ) -> Result<String> {
     ensure!(!question.trim().is_empty(), "Пустой запрос");
     let instructions = "Ты помощник по Zenless Zone Zero. Отвечай на языке вопроса.
@@ -236,7 +254,7 @@ async fn run_agent(
     tools: kit::KitTools,
     instructions: String,
     input: String,
-    preview: Option<tokio::sync::watch::Sender<String>>,
+    preview: Option<Preview>,
 ) -> Result<String> {
     let http = DynHttpClient::new(transport::ReportHttp::new()?);
     let wire =
@@ -245,6 +263,7 @@ async fn run_agent(
     let mut builder = AgentBuilder::new(rig_core::Model::new(wire, http))
         .preamble(instructions)
         .append_preamble(TUTORIAL_GUIDANCE)
+        .append_preamble(OUTPUT_FORMAT)
         .dynamic_tools(tools.into_tools())
         .additional_params(json!({"store":false,"include":["reasoning.encrypted_content"]}))
         .default_max_turns(MAX_TURNS)
@@ -255,7 +274,7 @@ async fn run_agent(
     let run = async move {
         if let Some(preview) = preview {
             let (result, events) = builder
-                .add_hook(Preview(preview))
+                .add_hook(preview)
                 .build()
                 .prompt(input)
                 .run_channel();
@@ -415,28 +434,49 @@ mod tests {
         use axum::{Json, Router, routing::post};
         let server=mock_openai(Router::new().route("/v1/responses",post(|Json(body):Json<Value>| async move {
             assert_eq!(body["stream"],true);
+            assert!(body["instructions"].as_str().unwrap().contains(OUTPUT_FORMAT));
+            if !body["input"].as_array().unwrap().iter().any(|item|item["type"]=="function_call_output") {
+                // A search with invalid arguments exercises local tool dispatch without using the network.
+                let call=json!({"type":"function_call","id":"fc_1","call_id":"call_1","name":"search_gachabase","arguments":"{}","status":"completed"});
+                let events=[
+                    json!({"type":"response.output_item.added","output_index":0,"item":{"type":"function_call","id":"fc_1","call_id":"call_1","name":"search_gachabase","arguments":""}}),
+                    json!({"type":"response.function_call_arguments.delta","output_index":0,"item_id":"fc_1","delta":"{}"}),
+                    json!({"type":"response.output_item.done","output_index":0,"item":call}),
+                    json!({"type":"response.completed","response":{"id":"resp_tool","object":"response","status":"completed","model":DEFAULT_MODEL,"usage":{"input_tokens":8,"output_tokens":2,"total_tokens":10},"output":[call]}}),
+                ];
+                return ([("content-type","text/event-stream")],events.into_iter().map(|e|format!("data: {e}\n\n")).collect::<String>());
+            }
             let message=json!({"type":"message","role":"assistant","id":"msg_a","phase":"final_answer","status":"completed","content":[{"type":"output_text","text":"Ответ","annotations":[]}]});
             let events=[
                 json!({"type":"response.output_item.added","output_index":0,"item":{"id":"msg_a","type":"message","role":"assistant","content":[]}}),
                 json!({"type":"response.output_text.delta","output_index":0,"content_index":0,"item_id":"msg_a","delta":"Ответ"}),
                 json!({"type":"response.output_item.done","output_index":0,"item":message}),
-                json!({"type":"response.completed","response":{"id":"resp_a","object":"response","status":"completed","model":DEFAULT_MODEL,"output":[message]}})
+                json!({"type":"response.completed","response":{"id":"resp_a","object":"response","status":"completed","model":DEFAULT_MODEL,"usage":{"input_tokens":17,"output_tokens":3,"total_tokens":20},"output":[message]}})
             ];
             ([("content-type","text/event-stream")],events.into_iter().map(|e|format!("data: {e}\n\n")).collect::<String>())
         }))).await;
-        let (tx, rx) = tokio::sync::watch::channel(String::new());
+        let (tx, rx) = tokio::sync::watch::channel(PromptProgress::default());
         let answer = run_agent(
             &server,
             DEFAULT_MODEL,
             kit::KitTools::new(Client::new()),
             "Answer".into(),
             "question".into(),
-            Some(tx),
+            Some(Preview::Progress(tx)),
         )
         .await
         .unwrap();
         assert_eq!(answer, "Ответ");
-        assert_eq!(*rx.borrow(), "Ответ");
+        assert!(
+            rx.has_changed().is_err(),
+            "the Telegram status updater must stop when generation finishes"
+        );
+        let progress = rx.borrow();
+        assert_eq!(progress.text, "Ответ");
+        assert_eq!(
+            (progress.turns, progress.tools, progress.tokens),
+            (2, 1, Some(30))
+        );
     }
 
     #[test]

@@ -1,1 +1,3 @@
-{{ text | safe }}
+{% if error %}{{ error }}{% else %}{{ text | safe }}{% endif %}{% if footer %}{% if text or error %}
+
+{% endif %}{{ footer | safe }}{% endif %}

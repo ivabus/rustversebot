@@ -122,6 +122,15 @@ impl<'a> BotTemplateSender<'a> {
         send_rendered_message(self.bot, chat_id, rendered).await
     }
 
+    pub async fn send_rendered_to_thread(
+        &self,
+        chat: ChatId,
+        thread: Option<teloxide::types::ThreadId>,
+        rendered: RenderedTemplate,
+    ) -> anyhow::Result<Message> {
+        send_rendered_to_thread(self.bot, chat, thread, rendered).await
+    }
+
     pub async fn send_photo_with_rendered(
         &self,
         chat_id: ChatId,

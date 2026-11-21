@@ -92,6 +92,7 @@ const TEMPLATES: &[EmbeddedTemplate] = &[
     template!("ai_ban_done", "txt"),
     template!("ai_unban_done", "txt"),
     template!("prompt_answer", "html"),
+    template!("prompt_status", "html"),
     template!("promocodes", "html"),
     template!("register_success", "txt"),
     template!("register_already", "txt"),

@@ -1,85 +1,258 @@
-use std::time::{Duration, Instant};
-
-use anyhow::Result;
+use anyhow::{Context, Result};
+use rustverse_ai::{PromptProgress, PromptStage};
 use serde_json::json;
-use teloxide::{prelude::*, types::ThreadId};
-use tokio::sync::watch;
+use std::time::Duration;
+use teloxide::{
+    prelude::*,
+    types::{MessageId, ParseMode},
+};
+use tokio::{sync::watch, time::Instant};
 
-use crate::{BotState, bot_templates::BotTemplateSender, telegram_html};
+use crate::{
+    BotState,
+    bot_templates::{BotTemplateSender, MESSAGE_LIMIT, RenderedTemplate},
+    telegram_html,
+    templates::TemplateEngine,
+};
 
-// teloxide 0.13 predates sendMessageDraft. Its client and API URL also work
-// with self-hosted Bot API servers. Never log errors containing the tokenized URL.
-async fn previews(
-    bot: &Bot,
-    chat: ChatId,
-    thread: Option<ThreadId>,
-    draft_id: i32,
-    updates: watch::Receiver<String>,
-) {
-    let Ok(url) = bot
-        .api_url()
-        .join(&format!("./bot{}/sendMessageDraft", bot.token()))
-    else {
-        return;
+const DRAFT_INTERVAL: Duration = Duration::from_millis(1500);
+const GROUP_INTERVAL: Duration = Duration::from_secs(15);
+const DRAFT_REFRESH: Duration = Duration::from_secs(20);
+
+#[derive(Clone, Copy)]
+enum LiveMessage {
+    Draft,
+    Group(MessageId),
+}
+
+struct PromptOutput<'a> {
+    bot: &'a Bot,
+    msg: &'a Message,
+    state: &'a BotState,
+}
+
+fn footer(
+    templates: &TemplateEngine,
+    model: &str,
+    progress: &PromptProgress,
+) -> Result<RenderedTemplate> {
+    // Keep even a malformed configured model name within Telegram's message limit.
+    let model: String = model.chars().take(128).collect();
+    templates.render("prompt_status", &json!({"model":model,"p":progress}))
+}
+
+fn messages(
+    templates: &TemplateEngine,
+    model: &str,
+    progress: &PromptProgress,
+    text: &str,
+    live: bool,
+) -> Result<Vec<RenderedTemplate>> {
+    let footer = footer(templates, model, progress)?;
+    // The source length also counts the footer's tags and escapes, giving a conservative bound.
+    let limit = MESSAGE_LIMIT
+        .checked_sub(footer.text.encode_utf16().count() + 2)
+        .filter(|n| *n >= 2)
+        .context("Статус превышает лимит сообщения")?;
+    let mut parts = if live {
+        vec![telegram_html::preview(text, limit)]
+    } else {
+        telegram_html::chunks(text, limit)
     };
-    let mut interval = tokio::time::interval(Duration::from_millis(1500));
-    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-    let mut last = None;
-    let mut sent = Instant::now();
-    loop {
-        interval.tick().await;
-        let text = updates.borrow().clone();
-        if last.as_ref() == Some(&text) && sent.elapsed() < Duration::from_secs(20) {
-            continue;
-        }
-        let mut body = json!({"chat_id":chat.0,"draft_id":draft_id,"text":telegram_html::preview(&text),"parse_mode":"HTML"});
-        if let Some(thread) = thread {
+    parts.retain(|s| !s.trim().is_empty());
+    if parts.is_empty() {
+        return Ok(vec![footer]);
+    }
+    let last = parts.len() - 1;
+    parts
+        .into_iter()
+        .enumerate()
+        .map(|(index, part)| {
+            templates.render(
+                "prompt_answer",
+                &json!({"text":part,"footer":(index==last).then_some(&footer.text)}),
+            )
+        })
+        .collect()
+}
+
+enum Update {
+    Sent,
+    Wait(Duration),
+    Unavailable,
+}
+
+impl PromptOutput<'_> {
+    // teloxide 0.13 predates sendMessageDraft. Never expose its tokenized URL in errors.
+    async fn draft(&self, text: &str) -> Update {
+        let Ok(url) = self
+            .bot
+            .api_url()
+            .join(&format!("./bot{}/sendMessageDraft", self.bot.token()))
+        else {
+            return Update::Unavailable;
+        };
+        let mut body = json!({"chat_id":self.msg.chat.id.0,"draft_id":self.msg.id.0.max(1),"text":text,"parse_mode":"HTML"});
+        if let Some(thread) = self.msg.thread_id {
             body["message_thread_id"] = json!(thread);
         }
-        let result = bot
+        let Ok(response) = self
+            .bot
             .client()
-            .post(url.clone())
+            .post(url)
             .json(&body)
             .timeout(Duration::from_secs(5))
             .send()
-            .await;
-        let Ok(response) = result else { return };
-        if response.status().as_u16() == 429 {
-            let Ok(body) = response.json::<serde_json::Value>().await else {
-                return;
-            };
-            let Some(seconds) = body
+            .await
+        else {
+            return Update::Unavailable;
+        };
+        if response.status().is_success() {
+            return Update::Sent;
+        }
+        if response.status().as_u16() == 429
+            && let Ok(body) = response.json::<serde_json::Value>().await
+            && let Some(seconds) = body
                 .pointer("/parameters/retry_after")
                 .and_then(|v| v.as_u64())
-            else {
+        {
+            return Update::Wait(Duration::from_secs(seconds));
+        }
+        Update::Unavailable
+    }
+
+    async fn edit(&self, id: MessageId, text: &str) -> Result<(), teloxide::RequestError> {
+        match self
+            .bot
+            .edit_message_text(self.msg.chat.id, id, text)
+            .parse_mode(ParseMode::Html)
+            .await
+        {
+            Ok(_) | Err(teloxide::RequestError::Api(teloxide::ApiError::MessageNotModified)) => {
+                Ok(())
+            }
+            Err(e) => Err(e),
+        }
+    }
+
+    async fn start(&self, status: RenderedTemplate) -> Result<LiveMessage> {
+        if self.msg.chat.is_private() && matches!(self.draft(&status.text).await, Update::Sent) {
+            return Ok(LiveMessage::Draft);
+        }
+        let message = self.send(status, None).await?;
+        Ok(LiveMessage::Group(message))
+    }
+
+    async fn updates(
+        &self,
+        target: LiveMessage,
+        mut progress: watch::Receiver<PromptProgress>,
+        mut last: String,
+    ) {
+        let spacing = match target {
+            LiveMessage::Draft => DRAFT_INTERVAL,
+            LiveMessage::Group(_) => GROUP_INTERVAL,
+        };
+        let mut timer = tokio::time::interval_at(Instant::now() + spacing, spacing);
+        timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        let mut sent = Instant::now();
+        loop {
+            tokio::select! {
+                changed = progress.changed() => {
+                    if changed.is_err() {return}
+                    continue;
+                }
+                _ = timer.tick() => {}
+            }
+            let p = progress.borrow().clone();
+            let Ok(parts) = messages(
+                &self.state.templates,
+                &self.state.beta.model,
+                &p,
+                &p.text,
+                true,
+            ) else {
                 return;
             };
-            tokio::time::sleep(Duration::from_secs(seconds)).await;
-            // Read the latest preview after the wait; the answer may already be complete.
-            continue;
+            let text = &parts[0].text;
+            let refresh = matches!(target, LiveMessage::Draft) && sent.elapsed() >= DRAFT_REFRESH;
+            if *text == last && !refresh {
+                continue;
+            }
+            let update = match target {
+                LiveMessage::Draft => self.draft(text).await,
+                LiveMessage::Group(id) => match self.edit(id, text).await {
+                    Ok(()) => Update::Sent,
+                    Err(teloxide::RequestError::RetryAfter(wait)) => Update::Wait(wait.duration()),
+                    Err(_) => Update::Unavailable,
+                },
+            };
+            match update {
+                Update::Sent => {
+                    last.clone_from(text);
+                    sent = Instant::now();
+                }
+                Update::Wait(wait) => timer.reset_after(wait.max(spacing)),
+                Update::Unavailable => return,
+            }
         }
-        if !response.status().is_success() {
-            return;
+    }
+
+    // Replace the group's status with the first final chunk, and append subsequent
+    // chunks. Retry only the chunk Telegram rejected. A deleted status can be replaced.
+    async fn send(
+        &self,
+        rendered: RenderedTemplate,
+        mut edit: Option<MessageId>,
+    ) -> Result<MessageId> {
+        let attempts = crate::scheduler::SchedulerSettings::from_env()
+            .retry_attempts
+            .max(1);
+        let sender = BotTemplateSender::new(self.bot, &self.state.templates);
+        for attempt in 1..=attempts {
+            if let Some(id) = edit {
+                match self.edit(id, &rendered.text).await {
+                    Ok(()) => return Ok(id),
+                    Err(teloxide::RequestError::Api(
+                        teloxide::ApiError::MessageCantBeEdited
+                        | teloxide::ApiError::MessageToEditNotFound,
+                    )) => edit = None,
+                    Err(teloxide::RequestError::RetryAfter(wait)) if attempt < attempts => {
+                        tokio::time::sleep(wait.duration()).await;
+                        continue;
+                    }
+                    Err(err) => return Err(err.into()),
+                }
+            }
+            match sender
+                .send_rendered_to_thread(self.msg.chat.id, self.msg.thread_id, rendered.clone())
+                .await
+            {
+                Ok(msg) => return Ok(msg.id),
+                Err(err) => match err.downcast_ref::<teloxide::RequestError>() {
+                    Some(teloxide::RequestError::RetryAfter(wait)) if attempt < attempts => {
+                        tokio::time::sleep(wait.duration()).await
+                    }
+                    _ => return Err(err),
+                },
+            }
         }
-        last = Some(text);
-        sent = Instant::now();
+        unreachable!("last delivery attempt always returns")
     }
 }
 
 pub async fn command(bot: &Bot, msg: &Message, question: &str, state: &BotState) -> Result<()> {
     let sender = BotTemplateSender::new(bot, &state.templates);
-    let chat = msg.chat.id;
-    let thread = msg.thread_id;
     if question.trim().is_empty() {
         sender
-            .send_to_thread(chat, thread, "prompt_usage", &())
+            .send_to_thread(msg.chat.id, msg.thread_id, "prompt_usage", &())
             .await?;
         return Ok(());
     }
     if !crate::agent_access::admit(
         bot,
-        chat,
-        thread,
+        msg.chat.id,
+        msg.thread_id,
         crate::agent_access::sender(msg),
         "prompt",
         state,
@@ -88,73 +261,90 @@ pub async fn command(bot: &Bot, msg: &Message, question: &str, state: &BotState)
     {
         return Ok(());
     }
-    let result = async {
+    let output = PromptOutput { bot, msg, state };
+    let model = &state.beta.model;
+    let initial = PromptProgress::default();
+    let status = footer(&state.templates, model, &initial)?;
+    let last = status.text.clone();
+    let target = output.start(status).await?;
+    let (tx, rx) = watch::channel(initial);
+    let generate = async move {
         let key = rustverse_ai::api_key()?;
-        let (updates, rx) = watch::channel(String::new());
-        let private = msg.chat.is_private();
-        let answer = rustverse_ai::prompt(
-            &state.beta.client,
-            &key,
-            &state.beta.model,
-            question,
-            private.then_some(updates),
-        );
-        tokio::pin!(answer);
-        if private {
-            tokio::select! {
-                result=&mut answer => result,
-                _=previews(bot,chat,thread,msg.id.0.max(1),rx) => answer.await,
-            }
-        } else {
-            answer.await
-        }
-    }
-    .await;
-    match result {
+        rustverse_ai::prompt_with_progress(&state.beta.client, &key, model, question, tx).await
+    };
+    // Finish an in-flight Telegram edit before delivering the permanent answer,
+    // so a delayed status update cannot overwrite it.
+    let (answer, ()) = tokio::join!(generate, output.updates(target, rx.clone(), last));
+    let mut stats = rx.borrow().clone();
+    let parts = match answer {
         Ok(text) => {
-            let attempts = crate::scheduler::SchedulerSettings::from_env().retry_attempts;
-            send_answer(&sender, chat, thread, &text, attempts).await?;
+            stats.stage = PromptStage::Complete;
+            messages(&state.templates, model, &stats, &text, false)?
         }
         Err(err) => {
-            sender
-                .send_to_thread(
-                    chat,
-                    thread,
-                    "error_generic",
-                    &json!({"error":err.to_string()}),
-                )
-                .await?;
+            stats.stage = PromptStage::Failed;
+            let error = state
+                .templates
+                .render("error_generic", &json!({"error":err.to_string()}))?;
+            vec![state.templates.render(
+                "prompt_answer",
+                &json!({"error":error.text,"footer":footer(&state.templates,model,&stats)?.text}),
+            )?]
         }
+    };
+    let mut edit = match target {
+        LiveMessage::Group(id) => Some(id),
+        LiveMessage::Draft => None,
+    };
+    for part in parts {
+        output.send(part, edit.take()).await?;
     }
     Ok(())
 }
 
-async fn send_answer(
-    sender: &BotTemplateSender<'_>,
-    chat: ChatId,
-    thread: Option<ThreadId>,
-    text: &str,
-    attempts: usize,
-) -> Result<()> {
-    for chunk in telegram_html::chunks(text)
-        .into_iter()
-        .filter(|c| !c.trim().is_empty())
-    {
-        let data = json!({"text":chunk});
-        for attempt in 1..=attempts.max(1) {
-            match sender
-                .send_to_thread(chat, thread, "prompt_answer", &data)
-                .await
-            {
-                Ok(_) => break,
-                Err(err) => match err.downcast_ref::<teloxide::RequestError>() {
-                    Some(teloxide::RequestError::RetryAfter(wait)) if attempt < attempts => {
-                        tokio::time::sleep(wait.duration()).await;
-                    }
-                    _ => return Err(err),
-                },
-            }
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn status_and_final_footer_fit_and_only_the_last_part_has_counters() {
+        let templates = TemplateEngine::new().unwrap();
+        let initial = PromptProgress::default();
+        let status = messages(&templates, "model<&>", &initial, "", true).unwrap();
+        assert!(status[0].text.contains("Готовлю ответ") && status[0].text.contains("Ходы: 0"));
+        let p = PromptProgress {
+            stage: PromptStage::Complete,
+            tools: 4,
+            turns: 3,
+            tokens: Some(1300),
+            ..initial
+        };
+        let parts = messages(
+            &templates,
+            "model<&>",
+            &p,
+            &format!("**{}**", "🌙".repeat(6200)),
+            false,
+        )
+        .unwrap();
+        assert!(parts.len() > 1);
+        for part in &parts[..parts.len() - 1] {
+            assert!(!part.text.contains("Токены"));
         }
+        let last = &parts.last().unwrap().text;
+        assert!(
+            last.contains("Ответ готов")
+                && last.contains("Вызовы инструментов: 4 · Ходы: 3 · Токены: 1300")
+        );
+        for part in parts {
+            let visible = scraper::Html::parse_fragment(&part.text)
+                .root_element()
+                .text()
+                .collect::<String>();
+            assert!(visible.encode_utf16().count() <= MESSAGE_LIMIT);
+        }
+        let unknown = PromptProgress { tokens: None, ..p };
+        let footer = footer(&templates, "model<&>", &unknown).unwrap().text;
+        assert!(footer.contains("Токены: —") && footer.contains("&lt;&amp;&gt;"));
     }
-    Ok(())
 }
