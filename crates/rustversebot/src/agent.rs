@@ -17,7 +17,10 @@ use teloxide::{prelude::*, types::User};
 use tokio::{sync::watch, time::Instant};
 
 pub(crate) enum Status<'a> {
-    Question(&'a str),
+    Question {
+        text: &'a str,
+        session_id: uuid::Uuid,
+    },
     Activity {
         template: &'static str,
         context: Value,
@@ -32,8 +35,8 @@ impl Status<'_> {
         p: &PromptProgress,
     ) -> Result<RenderedTemplate> {
         match self {
-            Self::Question(question) => {
-                Ok(messages(templates, model, p, question, &p.text, true)?.remove(0))
+            Self::Question { text, .. } => {
+                Ok(messages(templates, model, p, text, &p.text, true)?.remove(0))
             }
             Self::Activity { template, context } => {
                 status_footer(templates, model, p, template, context)
@@ -95,14 +98,19 @@ pub(crate) async fn launch(
         templates: &state.templates,
         address,
     }
-    .start(rendered, matches!(initial, Status::Question(_)))
+    .start(rendered, matches!(initial, Status::Question { .. }))
     .await?;
     let bot = bot.clone();
     let state = state.clone();
     let span = tracing::info_span!(target: "rustverse::ai", "telegram.command",
         otel.name = command, model = %model, source = "telegram",
         image_count = tracing::field::Empty, history_image_count = tracing::field::Empty,
+        langfuse.observation.input = tracing::field::Empty, langfuse.observation.output = tracing::field::Empty,
         otel.status_code = tracing::field::Empty);
+    if let Status::Question { text, session_id } = initial {
+        rustverse_ai::telemetry::set_prompt_session(&span, session_id.to_string());
+        span.record("langfuse.observation.input", text);
+    }
     slot.send(Box::pin(async move {
         let mut run = AgentRun {
             output: LiveOutput {
@@ -223,7 +231,11 @@ impl AgentRun<'_> {
                 (message.text, None, None, Default::default(), vec![])
             }
         };
-        let Status::Question(question) = status else {
+        let Status::Question {
+            text: question,
+            session_id,
+        } = status
+        else {
             anyhow::bail!("expected question for text answer")
         };
         let (text, parent, author, references, image_ids) = answer;
@@ -236,6 +248,7 @@ impl AgentRun<'_> {
             false,
         )?;
         let turn = crate::db::DeliveredTurn {
+            session_id,
             question,
             image_ids: &image_ids,
             answer: &text,

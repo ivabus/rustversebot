@@ -2,14 +2,16 @@ use anyhow::{Context, bail};
 use libsql::{Builder, Connection, Database, params};
 use serde::Serialize;
 use std::collections::HashMap;
+use uuid::Uuid;
 
 mod admin;
 pub(crate) use admin::AiFeature;
 
-const SCHEMA_VERSION: i64 = 15;
+const SCHEMA_VERSION: i64 = 16;
 
-#[derive(Default)]
+#[cfg_attr(test, derive(Default))]
 pub struct DeliveredTurn<'a> {
+    pub session_id: Uuid,
     pub question: &'a str,
     pub image_ids: &'a [String],
     pub answer: &'a str,
@@ -17,10 +19,20 @@ pub struct DeliveredTurn<'a> {
     pub references: rustverse_ai::TurnReferences,
 }
 
-#[derive(Default)]
 pub struct PromptSession {
+    pub id: Uuid,
     pub last_answer: Option<i32>,
     pub turns: Vec<rustverse_ai::ImagePromptTurn<String>>,
+}
+
+impl Default for PromptSession {
+    fn default() -> Self {
+        Self {
+            id: Uuid::new_v4(),
+            last_answer: None,
+            turns: Vec::new(),
+        }
+    }
 }
 
 #[derive(Serialize)]
@@ -340,6 +352,28 @@ impl Db {
             .await
             .context("applying migration 15")?;
         }
+        if version < 16 {
+            tx.execute_batch("ALTER TABLE prompt_turns ADD COLUMN session_id TEXT;")
+                .await?;
+            // Backfill each surviving conversation in one transaction, including
+            // branches whose original parent has already expired and been deleted.
+            let mut roots = tx
+                .query(
+                    "SELECT DISTINCT t.chat_id,t.topic_id,COALESCE(t.parent_id,t.message_id) FROM prompt_turns t
+                WHERE NOT EXISTS (SELECT 1 FROM prompt_turns p WHERE p.chat_id=t.chat_id
+                    AND p.topic_id IS t.topic_id AND p.message_id=t.parent_id)",
+                    (),
+                )
+                .await?;
+            while let Some(root) = roots.next().await? {
+                tx.execute("WITH RECURSIVE branch(id) AS (SELECT ?3 UNION ALL
+                    SELECT p.message_id FROM prompt_turns p JOIN branch ON p.parent_id=branch.id
+                    WHERE p.chat_id=?1 AND p.topic_id IS ?2)
+                    UPDATE prompt_turns SET session_id=?4 WHERE chat_id=?1 AND topic_id IS ?2 AND message_id IN branch",
+                    params![root.get::<i64>(0)?, root.get::<Option<i32>>(1)?, root.get::<i32>(2)?, Uuid::new_v4().to_string()]).await?;
+            }
+            tx.execute_batch("PRAGMA user_version=16;").await?;
+        }
         tx.commit().await.context("committing migrations")?;
         Ok(())
     }
@@ -390,18 +424,26 @@ impl Db {
         participant: Option<i64>,
     ) -> anyhow::Result<Option<PromptSession>> {
         let mut rows=self.connection()?.query(
-            "WITH RECURSIVE history(message_id,parent_id,question,answer,author,lookup_refs,image_ids,depth) AS (
-                SELECT message_id,parent_id,question,answer,author,lookup_refs,image_ids,0 FROM prompt_turns
+            "WITH RECURSIVE history(message_id,parent_id,question,answer,author,lookup_refs,image_ids,session_id,depth) AS (
+                SELECT message_id,parent_id,question,answer,author,lookup_refs,image_ids,session_id,0 FROM prompt_turns
                 WHERE chat_id=?1 AND topic_id IS ?2 AND expires_at>unixepoch()
                   AND message_id=COALESCE((SELECT first_id FROM prompt_parts WHERE chat_id=?1 AND message_id=?3),?3)
                 UNION ALL
-                SELECT p.message_id,p.parent_id,p.question,p.answer,p.author,p.lookup_refs,p.image_ids,h.depth+1
+                SELECT p.message_id,p.parent_id,p.question,p.answer,p.author,p.lookup_refs,p.image_ids,p.session_id,h.depth+1
                 FROM history h JOIN prompt_turns p ON p.chat_id=?1 AND p.message_id=h.parent_id
                 WHERE p.topic_id IS ?2 AND p.expires_at>unixepoch()
-             ) SELECT message_id,question,answer,author,lookup_refs,image_ids FROM history ORDER BY depth DESC",
+             ) SELECT message_id,question,answer,author,lookup_refs,image_ids,session_id FROM history ORDER BY depth DESC",
             params![chat,topic,reply_to]).await?;
-        let mut session = PromptSession::default();
+        let mut session = None;
         while let Some(row) = rows.next().await? {
+            let session = match &mut session {
+                Some(session) => session,
+                None => session.insert(PromptSession {
+                    id: row.get::<String>(6)?.parse()?,
+                    last_answer: None,
+                    turns: Vec::new(),
+                }),
+            };
             session.last_answer = Some(row.get(0)?);
             let mut question: String = row.get(1)?;
             if let Some(author) = row.get::<Option<i64>>(3)? {
@@ -422,7 +464,7 @@ impl Db {
                 images: serde_json::from_str(&row.get::<String>(5)?)?,
             });
         }
-        Ok(session.last_answer.map(|_| session))
+        Ok(session)
     }
 
     pub async fn save_prompt_turn(
@@ -438,9 +480,9 @@ impl Db {
             .transpose()?;
         self.connection()?
             .execute(
-                "INSERT INTO prompt_turns(chat_id,topic_id,message_id,parent_id,question,answer,author,lookup_refs,image_ids)
-             VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9) ON CONFLICT(chat_id,message_id) DO NOTHING",
-                params![chat, topic, message, parent, turn.question, turn.answer, turn.author, refs, serde_json::to_string(turn.image_ids)?],
+                "INSERT INTO prompt_turns(chat_id,topic_id,message_id,parent_id,question,answer,author,lookup_refs,image_ids,session_id)
+             VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10) ON CONFLICT(chat_id,message_id) DO NOTHING",
+                params![chat, topic, message, parent, turn.question, turn.answer, turn.author, refs, serde_json::to_string(turn.image_ids)?, turn.session_id.to_string()],
             )
             .await?;
         Ok(())
@@ -1394,12 +1436,46 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn v15_migration_groups_replies_and_keeps_unrelated_sessions_separate() {
+        let db = Db::new_test().await.unwrap();
+        db.connection
+            .execute_batch(
+                "ALTER TABLE prompt_turns DROP COLUMN session_id;
+            PRAGMA user_version=15;
+            INSERT INTO prompt_turns(chat_id,topic_id,message_id,parent_id,question,answer) VALUES
+                (1,5,10,NULL,'root','a'), (1,5,11,10,'reply','a'), (1,5,12,10,'sibling','a'),
+                (2,5,10,NULL,'other chat','a'), (1,6,20,NULL,'other topic','a'),
+                (1,5,31,30,'missing parent','a'), (1,5,32,30,'sibling','a');
+            INSERT INTO prompt_parts(chat_id,message_id,first_id) VALUES(1,13,11);",
+            )
+            .await
+            .unwrap();
+        db.migrate().await.unwrap();
+        let id = async |chat, topic, message| {
+            db.prompt_session(chat, Some(topic), message, None)
+                .await
+                .unwrap()
+                .unwrap()
+                .id
+        };
+        let root = id(1, 5, 10).await;
+        assert_eq!(root.get_version_num(), 4);
+        assert_eq!(root, id(1, 5, 12).await);
+        assert_eq!(root, id(1, 5, 13).await);
+        assert_ne!(root, id(2, 5, 10).await);
+        assert_ne!(root, id(1, 6, 20).await);
+        assert_ne!(root, id(1, 5, 31).await);
+        assert_eq!(id(1, 5, 31).await, id(1, 5, 32).await);
+    }
+
+    #[tokio::test]
     async fn v14_text_sessions_accept_image_replies_after_migration() {
         let db = Db::new_test().await.unwrap();
-        db.connection.execute_batch("ALTER TABLE prompt_turns DROP COLUMN image_ids;
+        db.connection.execute_batch("ALTER TABLE prompt_turns DROP COLUMN session_id; ALTER TABLE prompt_turns DROP COLUMN image_ids;
             PRAGMA user_version=14;
             INSERT INTO prompt_turns(chat_id,message_id,question,answer) VALUES(1,1,'before','answer');").await.unwrap();
         db.migrate().await.unwrap();
+        let root = db.prompt_session(1, None, 1, None).await.unwrap().unwrap();
         db.save_prompt_turn(
             1,
             None,
@@ -1407,6 +1483,7 @@ mod tests {
             Some(1),
             &DeliveredTurn {
                 question: "after",
+                session_id: root.id,
                 answer: "new",
                 image_ids: &["file".into()],
                 ..Default::default()
@@ -1416,6 +1493,7 @@ mod tests {
         .unwrap();
         let history = db.prompt_session(1, None, 2, None).await.unwrap().unwrap();
         assert!(history.turns[0].images.is_empty());
+        assert_eq!(history.id, root.id);
         assert_eq!(history.turns[1].images, ["file"]);
     }
 
@@ -1425,6 +1503,8 @@ mod tests {
         let url = format!("file:{}", dir.path().join("prompts.db").display());
         let topic = Some(7);
         let db = Db::connect(&url).await.unwrap();
+        let session_id = PromptSession::default().id;
+        assert_ne!(session_id, PromptSession::default().id);
         db.save_prompt_turn(
             -1,
             topic,
@@ -1432,6 +1512,7 @@ mod tests {
             None,
             &DeliveredTurn {
                 question: "Q1",
+                session_id,
                 answer: "A1",
                 ..Default::default()
             },
@@ -1446,6 +1527,7 @@ mod tests {
             Some(100),
             &DeliveredTurn {
                 question: "Q2",
+                session_id,
                 answer: "A2",
                 ..Default::default()
             },
@@ -1459,6 +1541,7 @@ mod tests {
             Some(100),
             &DeliveredTurn {
                 question: "Q3",
+                session_id,
                 answer: "A3",
                 ..Default::default()
             },
@@ -1478,6 +1561,7 @@ mod tests {
                 .await
                 .unwrap()
                 .unwrap();
+            assert_eq!(session.id, session_id);
             assert_eq!(
                 session
                     .turns
@@ -1543,6 +1627,14 @@ mod tests {
             1
         );
         db.expire_prompt_sessions().await.unwrap();
+        assert_eq!(
+            db.prompt_session(-1, topic, 107, None)
+                .await
+                .unwrap()
+                .unwrap()
+                .id,
+            session_id
+        );
         assert!(
             db.optional_string("SELECT question FROM prompt_turns WHERE message_id=100", ())
                 .await
@@ -1584,6 +1676,7 @@ mod tests {
                 answer: "Комната 2",
                 author: Some(21),
                 references: save(62053),
+                session_id: Uuid::new_v4(),
                 image_ids: &["first".into(), "second".into()],
             },
         )

@@ -1,17 +1,25 @@
 //! Optional Langfuse Cloud export shared by the bot and the diff CLI.
 use anyhow::{Context, Result, bail};
 use base64::{Engine, engine::general_purpose::STANDARD};
-use opentelemetry::trace::TracerProvider;
+use opentelemetry::{
+    Context as OtelContext, KeyValue,
+    trace::{Span as _, TracerProvider},
+};
 use opentelemetry_otlp::{
     HttpExporterBuilderSet, Protocol, SpanExporter, SpanExporterBuilder, WithExportConfig,
     WithHttpConfig,
 };
 use opentelemetry_sdk::{
     Resource,
-    trace::{BatchConfigBuilder, BatchSpanProcessor, SdkTracerProvider},
+    error::OTelSdkResult,
+    trace::{
+        BatchConfigBuilder, BatchSpanProcessor, SdkTracerProvider, Span as SdkSpan, SpanData,
+        SpanProcessor,
+    },
 };
 use std::{collections::HashMap, env, time::Duration};
 use tracing::{Instrument, Span, Subscriber};
+use tracing_opentelemetry::OpenTelemetrySpanExt;
 use tracing_subscriber::{Layer, filter::filter_fn, prelude::*};
 
 pub struct Langfuse(SdkTracerProvider);
@@ -57,10 +65,49 @@ pub fn init(service: &'static str) -> Result<Option<Langfuse>> {
         .build();
     let provider = SdkTracerProvider::builder()
         .with_resource(Resource::builder_empty().with_service_name(service).build())
-        .with_span_processor(processor)
+        .with_span_processor(SessionProcessor(processor))
         .build();
     tracing::subscriber::set_global_default(subscriber(&provider))?;
     Ok(Some(Langfuse(provider)))
+}
+
+#[derive(Clone)]
+struct PromptSessionId(String);
+
+/// Each Telegram request starts a fresh trace, carrying the conversation UUID
+/// locally through its OTel parent contexts (including Rig's internal spans).
+pub fn set_prompt_session(root: &Span, session_id: String) {
+    if !root.is_disabled()
+        && let Err(error) =
+            root.set_parent(OtelContext::new().with_value(PromptSessionId(session_id)))
+    {
+        log::warn!("Could not attach the Langfuse session: {error}");
+    }
+}
+
+#[derive(Debug)]
+pub(crate) struct SessionProcessor<P>(pub(crate) P);
+
+impl<P: SpanProcessor> SpanProcessor for SessionProcessor<P> {
+    fn on_start(&self, span: &mut SdkSpan, cx: &OtelContext) {
+        if let Some(session) = cx.get::<PromptSessionId>() {
+            span.set_attribute(KeyValue::new("langfuse.session.id", session.0.clone()));
+        }
+        self.0.on_start(span, cx);
+    }
+
+    fn on_end(&self, span: SpanData) {
+        self.0.on_end(span);
+    }
+    fn force_flush(&self) -> OTelSdkResult {
+        self.0.force_flush()
+    }
+    fn shutdown_with_timeout(&self, timeout: Duration) -> OTelSdkResult {
+        self.0.shutdown_with_timeout(timeout)
+    }
+    fn set_resource(&mut self, resource: &Resource) {
+        self.0.set_resource(resource);
+    }
 }
 
 fn cloud_exporter(

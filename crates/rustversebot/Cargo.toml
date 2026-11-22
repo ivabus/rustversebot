@@ -25,6 +25,7 @@ scraper = { version = "0.29", default-features = false }
 axum = "0.8"
 log = "0.4"
 tracing = "0.1"
+uuid = { version = "1", features = ["v4"] }
 env_logger = "0.11"
 url = "2"
 rustverse_images = { version = "0.1.0", path = "../rustverse_images" }

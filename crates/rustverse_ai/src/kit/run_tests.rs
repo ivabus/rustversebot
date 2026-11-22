@@ -224,19 +224,27 @@ async fn long_research_keeps_the_branch_and_numeric_sources_across_compactions()
 
 #[tokio::test]
 async fn langfuse_records_multimodal_research_tools_compaction_and_editing() {
-    use opentelemetry_sdk::trace::{InMemorySpanExporter, SdkTracerProvider};
+    use opentelemetry_sdk::trace::{InMemorySpanExporter, SdkTracerProvider, SimpleSpanProcessor};
     use tracing::Instrument;
 
     let exporter = InMemorySpanExporter::default();
     let provider = SdkTracerProvider::builder()
-        .with_simple_exporter(exporter.clone())
+        .with_span_processor(crate::telemetry::SessionProcessor(
+            SimpleSpanProcessor::new(exporter.clone()),
+        ))
         .build();
     let _guard = tracing::subscriber::set_default(crate::telemetry::subscriber(&provider));
-    check_answer(Some(EDITED), EDITED)
-        .instrument(tracing::info_span!(target: "rustverse::ai", "prompt"))
-        .await;
+    let root = tracing::info_span!(target: "rustverse::ai", "prompt");
+    let session_id = "020d2bcc-6631-4535-9399-c439f12c0374";
+    crate::telemetry::set_prompt_session(&root, session_id.to_owned());
+    check_answer(Some(EDITED), EDITED).instrument(root).await;
     let spans = exporter.get_finished_spans().unwrap();
     let root = spans.iter().find(|s| s.name == "prompt").unwrap();
+    assert!(spans.iter().all(|s| {
+        s.attributes
+            .iter()
+            .any(|kv| kv.key.as_str() == "langfuse.session.id" && kv.value.as_str() == session_id)
+    }));
     assert!(
         spans
             .iter()

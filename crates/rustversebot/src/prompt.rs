@@ -123,7 +123,10 @@ struct Question {
 
 impl ChatAgent for Question {
     fn initial_status(&self) -> Status<'_> {
-        Status::Question(&self.text)
+        Status::Question {
+            text: &self.text,
+            session_id: self.session.id,
+        }
     }
 
     async fn execute(&self, run: &mut AgentRun<'_>, state: &BotState) -> Result<Outcome> {
@@ -170,6 +173,7 @@ impl ChatAgent for Question {
                 .await
             })
             .await?;
+        tracing::Span::current().record("langfuse.observation.output", &answer.text);
         Ok(Outcome::Answer {
             text: answer.text,
             image_ids: self.images.clone(),
