@@ -210,13 +210,18 @@ impl Fixture {
                 "compute",
                 json!({"script":"x0","bindings":[{"source":"missing","path":"/damage"}]}),
             ),
-            5..=14 => call(
+            5..=13 => call(
                 n,
                 "compute",
                 json!({"script":"damage * 2.0","bindings":[{"name":"damage","source":SOURCE,"path":"/damage"}]}),
             ),
+            14 => call(
+                n,
+                "compute",
+                json!({"script":"calls[2].result.result.value * 3.0","bindings":[]}),
+            ),
             15 => {
-                assert!(input.contains("42.0"));
+                assert!(input.contains("63.0"));
                 message(FINAL)
             }
             _ => panic!("unexpected extra turn"),
@@ -315,6 +320,62 @@ async fn batch_seasons_keep_order_references_and_full_compute_sources() {
         .await
         .unwrap();
     assert_eq!(rows[2], single);
+}
+
+#[tokio::test]
+async fn compute_can_combine_call_history_and_explicit_bindings() {
+    let mut kit = KitTools::for_question(Client::new(), QUESTION);
+    kit.seasons = Some(SeasonTools::fixture());
+    let kit = Mutex::new(kit);
+    let initial = KitTools::dispatch(
+        &kit,
+        "compute",
+        json!({
+            "script":"[len(calls), 2]", "bindings":[]
+        }),
+    )
+    .await
+    .unwrap();
+    assert_eq!(initial["result"], json!([0, 2]));
+    let path = "/zones/0/zone/monster_level";
+    let page = json!({"mode":"shiyu_defense","season":"62053","selector":path});
+    let batch = KitTools::dispatch(
+        &kit,
+        "get_endgame_seasons",
+        json!({
+            "requests":[page,{"mode":"shiyu_defense","season":"62053","selector":"/zones/bad"}]
+        }),
+    )
+    .await
+    .unwrap();
+    let err = KitTools::dispatch(&kit, "get_endgame_seasons", json!({"requests":[]}))
+        .await
+        .unwrap_err();
+    let script = r#"
+        let matches = 0;
+        for c in calls {
+            if c.name == "get_endgame_seasons" && c.result.error == () {
+                for row in c.result.results {
+                    if row.status != "unavailable" && row.value != () { matches += row.value; }
+                }
+            }
+        }
+        [len(calls), matches, sum(calls[0].result.result), len(calls[1].args.requests), x0]
+    "#;
+    let summary = KitTools::dispatch(
+        &kit,
+        "compute",
+        json!({
+            "script":script,"bindings":[{"source":batch["results"][0]["source"],"path":path}]
+        }),
+    )
+    .await
+    .unwrap();
+    assert_eq!(summary["result"], json!([3, 60, 2.0, 2, 60.0]));
+    assert_eq!(
+        kit.lock().await.calls[2]["result"]["error"],
+        err.to_string()
+    );
 }
 
 #[tokio::test]

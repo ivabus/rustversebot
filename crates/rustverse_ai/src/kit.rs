@@ -63,7 +63,7 @@ pub(crate) fn definitions() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "compute",
-            description: "Calculate with verified numeric fields. Each binding takes an exact source from a read or initial diff, a JSON pointer, and an optional name. Use /*/ for one number per array row. Use names directly in the Rhai script, e.g. sum(hits) or after - before. Unnamed bindings use x0, x1, ... by position. Bound numbers are floats; use 1.0 for fractional arithmetic. Return a finite number or a flat array of up to 64 numbers.",
+            description: "Run Rhai on this run's completed tool calls and optional numeric bindings. calls is a read-only array in completion order. Each call has name, args and result (including errors and prior compute results). Pass bindings: [] to use calls alone. Example after a season batch: calls[-1].result.results[0].season_id. Filter calls by name and args when reading several. Iterate JSON arrays by value and objects by key; use obj.key or obj[key]. JSON integers retain integer arithmetic; multiply by 1.0 before fractional division. Each explicit binding reads an exact source and JSON pointer, with at most one /*/ for one number per array row. Use its name or x0, x1, ... by position; bound numbers are floats. Return a finite number or a flat array of up to 64 numbers.",
             parameters: json!({"type":"object","additionalProperties":false,"properties":{"script":{"type":"string","description":"Rhai expression or short script, up to 2048 bytes."},"bindings":{"type":"array","maxItems":12,"items":{"anyOf":[named,reference]}}},"required":["script","bindings"]}),
         },
     ]
@@ -148,6 +148,7 @@ pub(crate) struct KitTools {
     client: Client,
     indexes: HashMap<(Category, Language, String), Index>,
     sources: HashMap<String, Value>,
+    calls: Vec<Arc<Value>>,
     report_changes: HashMap<(u64, Language, String), Groups>,
     seasons: Option<crate::seasons::SeasonTools>,
     pinned: Option<String>,
@@ -161,6 +162,7 @@ impl KitTools {
             references: Default::default(),
             indexes: HashMap::new(),
             sources: HashMap::new(),
+            calls: Vec::new(),
             seasons: None,
             pinned: None,
             report_changes: HashMap::new(),
@@ -253,11 +255,7 @@ impl KitTools {
                     ToolName::new(spec.name).expect("static tool name"),
                     spec.description,
                     spec.parameters,
-                    move |mut args| {
-                        // The progress hook reads the original dispatch. Only lookup arguments go to GachaBase.
-                        if research_updates && let Some(fields) = args.as_object_mut() {
-                            fields.remove("research_status");
-                        }
+                    move |args| {
                         let shared = Arc::clone(&shared);
                         Box::pin(async move {
                             let result = Self::dispatch(&shared, spec.name, args).await;
@@ -272,6 +270,25 @@ impl KitTools {
     }
 
     async fn dispatch(shared: &Mutex<Self>, name: &str, args: Value) -> Result<Value> {
+        let mut tool_args = args.clone();
+        if let Some(fields) = tool_args.as_object_mut() {
+            fields.remove("research_status");
+        }
+        let result = Self::execute(shared, name, tool_args).await;
+        let output = match &result {
+            Ok(value) => value.clone(),
+            Err(err) => json!({"error":err.to_string()}),
+        };
+        let record = Value::Object(serde_json::Map::from_iter([
+            ("name".into(), Value::from(name)),
+            ("args".into(), args),
+            ("result".into(), output),
+        ]));
+        shared.lock().await.calls.push(Arc::new(record));
+        result
+    }
+
+    async fn execute(shared: &Mutex<Self>, name: &str, args: Value) -> Result<Value> {
         if name != "compute" {
             let mut kit = shared.lock().await;
             let result = kit.call(name, args).await?;
@@ -281,8 +298,11 @@ impl KitTools {
             return Ok(result);
         }
         let calculation: Calculation = serde_json::from_value(args)?;
-        let prepared = calculation.prepare(&shared.lock().await.sources)?;
-        tokio::task::spawn_blocking(move || prepared.run()).await?
+        let kit = shared.lock().await;
+        let prepared = calculation.prepare(&kit.sources)?;
+        let calls = kit.calls.clone();
+        drop(kit);
+        tokio::task::spawn_blocking(move || prepared.run(calls)).await?
     }
 
     async fn revisions(&mut self) -> Result<&[String]> {

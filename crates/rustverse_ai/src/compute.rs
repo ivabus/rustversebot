@@ -1,5 +1,7 @@
 //! Local arithmetic over numeric fields from this run's immutable source views.
-use std::collections::HashMap;
+mod history;
+
+use std::{collections::HashMap, sync::Arc};
 
 use anyhow::{Context, Result, bail, ensure};
 use rhai::{Array, Dynamic, Engine, Scope};
@@ -53,15 +55,19 @@ impl Binding {
         let entry = sources
             .get(&self.source)
             .context("Unknown source in this run")?;
+        ensure!(self.path.starts_with('/'), "JSON pointer must start with /");
         ensure!(
-            self.path.starts_with('/') && self.path.len() <= 384,
-            "Expected a JSON pointer"
+            self.path.len() <= 384,
+            "JSON pointer is {} bytes; maximum is 384",
+            self.path.len()
         );
         let value = if let Some((prefix, suffix)) = self.path.split_once("/*/") {
-            let rows = entry
-                .pointer(prefix)
-                .and_then(Value::as_array)
-                .context("Expected an array before /*/")?;
+            let collection = entry.pointer(prefix).with_context(|| {
+                format!("No field at {prefix:?} before the wildcard; check the source page")
+            })?;
+            let rows = collection.as_array().with_context(|| {
+                format!("Wildcard requires an array at {prefix:?}; for an object use its exact key")
+            })?;
             *count += rows.len();
             ensure!(*count <= MAX_VALUES, "Too many numeric inputs");
             let ptr = format!("/{suffix}");
@@ -69,10 +75,14 @@ impl Binding {
                 .iter()
                 .enumerate()
                 .map(|(i, r)| {
-                    number(
-                        r.pointer(&ptr)
-                            .with_context(|| format!("Missing field in row {i}"))?,
-                    )
+                    let field = r.pointer(&ptr).with_context(|| {
+                        if suffix.split('/').any(|segment| segment == "*") {
+                            format!("Only one array wildcard is expanded; replace later wildcards in {ptr} with exact keys or indices (row {i})")
+                        } else {
+                            format!("Missing field at {prefix}/{i}{ptr}; check the source page")
+                        }
+                    })?;
+                    number(field).with_context(|| format!("At {prefix}/{i}{ptr}"))
                 })
                 .collect::<Result<Vec<_>>>()?;
             Numbers::Array(numbers)
@@ -95,8 +105,14 @@ impl Binding {
 impl Calculation {
     pub fn prepare(self, sources: &HashMap<String, Value>) -> Result<Prepared> {
         ensure!(
-            self.script.len() <= 2048 && self.bindings.len() <= 12,
-            "Calculation too large"
+            self.bindings.len() <= 12,
+            "Received {} bindings; maximum is 12. Split the calculation or bind a numeric array",
+            self.bindings.len()
+        );
+        ensure!(
+            self.script.len() <= 2048,
+            "Script is {} bytes; maximum is 2048. Shorten it or split the calculation",
+            self.script.len()
         );
         let mut count = 0;
         let mut values = Vec::with_capacity(self.bindings.len());
@@ -113,7 +129,7 @@ impl Calculation {
             );
             let value = binding.resolve(sources, &mut count).map_err(|err| {
                 anyhow::anyhow!(
-                    "bindings[{i}] {name} ({} at {}): {err}",
+                    "bindings[{i}] {name} ({} at {}): {err:#}",
                     binding.source,
                     binding.path
                 )
@@ -128,11 +144,11 @@ impl Calculation {
 }
 
 impl Prepared {
-    pub fn run(self) -> Result<Value> {
+    pub fn run(self, calls: Vec<Arc<Value>>) -> Result<Value> {
         let mut engine = Engine::new_raw();
         engine
             .set_max_operations(8000)
-            .set_max_variables(32)
+            .set_max_variables(32 + 1) // Keep the script's variable budget alongside calls.
             .set_max_expr_depths(24)
             .set_max_array_size(MAX_VALUES)
             .set_max_string_size(512)
@@ -156,6 +172,7 @@ impl Prepared {
             },
         );
         let mut scope = Scope::new();
+        history::bind(&mut engine, &mut scope, calls);
         for (name, value) in self.values {
             let input = match value {
                 Numbers::Array(array) => {
@@ -199,7 +216,7 @@ mod tests {
         ]);
         serde_json::from_value::<Calculation>(json!({"script":script,"bindings":bindings}))?
             .prepare(&sources)?
-            .run()
+            .run(Vec::new())
     }
 
     #[test]
@@ -242,5 +259,93 @@ mod tests {
             err.to_string()
                 .contains("before (current at /absent): Missing numeric input")
         );
+    }
+
+    #[test]
+    fn size_errors_identify_the_limit_exceeded() {
+        let bindings = vec![json!({"source":"previous","path":"/hit"}); 17];
+        let err = calculate("1", json!(bindings)).unwrap_err().to_string();
+        assert!(err.contains("Received 17 bindings; maximum is 12"), "{err}");
+        let err = calculate(&"1".repeat(2049), json!([]))
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("Script is 2049 bytes; maximum is 2048"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn a_single_wildcard_binds_numeric_rows_for_iteration() {
+        let sources = HashMap::from([(
+            "page".into(),
+            json!({"rows":[{"hp":50},{"hp":200},{"hp":150}]}),
+        )]);
+        let request: Calculation = serde_json::from_value(json!({
+            "script":"let peak = hp[0]; for value in hp { peak = max(peak, value); } 100.0 * (peak / hp[0] - 1.0)",
+            "bindings":[{"name":"hp","source":"page","path":"/rows/*/hp"}]
+        })).unwrap();
+        let value = request.prepare(&sources).unwrap().run(Vec::new()).unwrap();
+        assert_eq!(value["result"], 300.0);
+    }
+
+    #[test]
+    fn script_can_walk_large_responses_and_id_keyed_rooms() {
+        let calls = vec![Arc::new(
+            json!({"name":"get_endgame_seasons","args":{},"result":{
+                "results":[{"unrelated":"x".repeat(4096)},{"rooms":{"a~/b":{"id":7,"hp":12.5}}}]
+            }}),
+        )];
+        let request: Calculation = serde_json::from_value(json!({
+            "bindings":[],
+            "script":r#"
+                let rooms = calls[-1].result.results[-1].rooms;
+                for id in rooms {
+                    if rooms[id].id == 7 { return [len(rooms), rooms[id].hp]; }
+                }
+                []
+            "#
+        }))
+        .unwrap();
+        let value = request
+            .prepare(&HashMap::new())
+            .unwrap()
+            .run(calls)
+            .unwrap();
+        assert_eq!(value["result"], json!([1, 12.5]));
+    }
+
+    #[test]
+    fn wildcard_errors_identify_the_path_to_correct() {
+        let sources = HashMap::from([(
+            "page".into(),
+            json!({"zones":[{"rooms":{"42":{"hp":20}}},{"rooms":{"42":{"hp":"unknown"}}}]}),
+        )]);
+        let error_at = |path: &str| {
+            let request: Calculation = serde_json::from_value(json!({
+                "script":"hp", "bindings":[{"name":"hp","source":"page","path":path}]
+            }))
+            .unwrap();
+            request.prepare(&sources).err().unwrap().to_string()
+        };
+        for (path, message) in [
+            ("/zones/*/rooms/*/hp", "replace later wildcards"),
+            ("/zones/0/rooms/*/hp", "for an object use its exact key"),
+            (
+                "/zones/*/rooms/43/hp",
+                "Missing field at /zones/0/rooms/43/hp",
+            ),
+            (
+                "/zones/*/rooms/42/hp",
+                "At /zones/1/rooms/42/hp: Expected a numeric field",
+            ),
+        ] {
+            let err = error_at(path);
+            assert!(
+                err.contains(&format!("bindings[0] hp (page at {path})")),
+                "{err}"
+            );
+            assert!(err.contains(message), "{err}");
+        }
     }
 }
