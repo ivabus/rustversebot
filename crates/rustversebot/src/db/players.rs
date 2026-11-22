@@ -14,7 +14,7 @@ pub(crate) struct ChatPlayers {
 }
 
 impl ChatPlayers {
-    async fn select(&self, player: Option<&str>) -> Result<Result<UserRow, Value>> {
+    async fn select(&self, player: Option<&str>, own_only: bool) -> Result<Result<UserRow, Value>> {
         let mut matches = match player.map(str::trim) {
             None => {
                 self.db
@@ -43,13 +43,20 @@ impl ChatPlayers {
                     .collect()
             }
         };
+        if own_only {
+            matches.retain(|u| u.telegram_user_id == self.author);
+        }
         if matches.len() == 1 {
             return Ok(Ok(matches.pop().unwrap()));
         }
         let accounts: Vec<_> = matches.iter().map(|u| self.account(u)).collect();
+        let status = match (accounts.is_empty(), own_only) {
+            (false, _) => "choose_account",
+            (true, true) => "no_matching_own_account",
+            (true, false) => "not_registered_in_chat",
+        };
         Ok(Err(
-            json!({"requester":self.display_name,"accounts":accounts,
-            "status": if accounts.is_empty() {"not_registered_in_chat"} else {"choose_account"}}),
+            json!({"requester":self.display_name,"accounts":accounts,"status":status}),
         ))
     }
 
@@ -61,26 +68,34 @@ impl ChatPlayers {
 #[async_trait::async_trait]
 impl ChatPlayerData for ChatPlayers {
     async fn profile(&self, query: PlayerQuery) -> Result<Value> {
-        let account = match self.select(query.player.as_deref()).await? {
+        let account = match self
+            .select(query.player.as_deref(), query.used_only)
+            .await?
+        {
             Ok(u) => u,
             Err(status) => return Ok(status),
         };
         let mut rows = self.db.connection()?.query(
             "SELECT a.avatar_id,NULLIF(a.name,'') FROM avatar_cache a JOIN users u USING(uid)
-             WHERE u.chat_id=?1 AND u.uid=?2 AND u.telegram_user_id=?3 AND a.avatar_id>0 ORDER BY a.avatar_id",
-            params![self.chat, account.uid.clone(), account.telegram_user_id],
+             WHERE u.chat_id=?1 AND u.uid=?2 AND u.telegram_user_id=?3 AND a.avatar_id>0
+               AND (?4=0 OR EXISTS (SELECT 1 FROM used_agents p WHERE p.uid=a.uid AND p.avatar_id=a.avatar_id))
+             ORDER BY a.avatar_id",
+            params![self.chat, account.uid.clone(), account.telegram_user_id, query.used_only],
         ).await?;
         let mut agents = Vec::new();
         while let Some(row) = rows.next().await? {
             agents.push(json!({"id":row.get::<i64>(0)?,"name":row.get::<Option<String>>(1)?}));
         }
-        Ok(
-            json!({"requester":self.display_name,"account":self.account(&account),"known_agents":agents}),
-        )
+        let field = if query.used_only {
+            "used_agents"
+        } else {
+            "known_agents"
+        };
+        Ok(json!({"requester":self.display_name,"account":self.account(&account),(field):agents}))
     }
 
     async fn runs(&self, query: RunQuery) -> Result<Value> {
-        let account = match self.select(query.player.as_deref()).await? {
+        let account = match self.select(query.player.as_deref(), false).await? {
             Ok(u) => u,
             Err(status) => return Ok(status),
         };

@@ -15,6 +15,8 @@ pub trait ChatPlayerData: Send + Sync {
 #[serde(deny_unknown_fields)]
 pub struct PlayerQuery {
     pub player: Option<String>,
+    #[serde(default)]
+    pub used_only: bool,
 }
 
 #[derive(Deserialize)]
@@ -47,12 +49,12 @@ pub(crate) fn definitions() -> [ToolSpec; 2] {
     [
         ToolSpec {
             name: "get_player_profile",
-            description: "Only for an explicit request to build teams for a player in this chat or analyze a failed run. Identify the speaker and selected account and read its known agents. Otherwise never call.",
-            parameters: json!({"type":"object","properties":{"player":player},"required":["player"],"additionalProperties":false}),
+            description: "For a direct question about which agents the speaker has played, request used_only=true. This returns distinct agents observed in their Deadly Assault and Shiyu battles. For team advice or a failed run, used_only=false includes the profile roster. Never call for unrelated questions.",
+            parameters: json!({"type":"object","properties":{"player":player,"used_only":{"type":"boolean","description":"True for the speaker's own played agents. False for the known roster when advising on teams."}},"required":["player","used_only"],"additionalProperties":false}),
         },
         ToolSpec {
             name: "get_player_runs",
-            description: "Only for an explicit request to build teams for a player in this chat or analyze a failed run. With no season, returns the latest recorded result per season. For a selected season, returns distinct combat results newest first by first observation. Repeated polls and leaderboard changes are ignored, including across pages. Otherwise never call.",
+            description: "Read saved room lineups and scores to build, evaluate or improve a specific chat player's teams, or analyze their failed run. For 'are my current lineups OK?', look here before asking for a screenshot. With no season, returns the latest recorded result per season. For a selected season, returns distinct combat results newest first by first observation. Never call for other purposes.",
             parameters: json!({"type":"object","properties":{"player":player,
                 "mode":{"type":"string","enum":["deadly_assault","shiyu_defense"]},
                 "season_start":{"type":["string","null"],"description":"Exact season_start from a result, or null."},

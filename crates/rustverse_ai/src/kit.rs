@@ -603,7 +603,7 @@ mod tests {
         impl ChatPlayerData for Probe {
             async fn profile(&self, q: PlayerQuery) -> Result<Value> {
                 self.0.fetch_add(1, Ordering::SeqCst);
-                Ok(json!(q.player))
+                Ok(json!({"player":q.player,"used_only":q.used_only}))
             }
             async fn runs(&self, q: RunQuery) -> Result<Value> {
                 self.0.fetch_add(1, Ordering::SeqCst);
@@ -646,11 +646,19 @@ mod tests {
         assert_eq!(probe.0.load(Ordering::SeqCst), 0);
         assert_eq!(
             profile
-                .run(json!({"player":"Samurai","research_status":null}))
+                .run(json!({"player":"Samurai","used_only":false,"research_status":null}))
                 .await
                 .unwrap()
                 .as_json(),
-            Some(&json!("Samurai"))
+            Some(&json!({"player":"Samurai","used_only":false}))
+        );
+        let own_history = profile
+            .run(json!({"player":null,"used_only":true}))
+            .await
+            .unwrap();
+        assert_eq!(
+            own_history.as_json(),
+            Some(&json!({"player":null,"used_only":true}))
         );
         let runs = tool("get_player_runs")
             .run(
@@ -659,7 +667,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(runs.as_json(), Some(&json!("deadly_assault")));
-        assert_eq!(probe.0.load(Ordering::SeqCst), 2);
+        assert_eq!(probe.0.load(Ordering::SeqCst), 3);
     }
 
     #[tokio::test]

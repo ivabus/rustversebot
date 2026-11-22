@@ -8,7 +8,7 @@ mod admin;
 pub(crate) mod players;
 pub(crate) use admin::AiFeature;
 
-const SCHEMA_VERSION: i64 = 17;
+const SCHEMA_VERSION: i64 = 18;
 
 #[cfg_attr(test, derive(Default))]
 pub struct DeliveredTurn<'a> {
@@ -380,6 +380,11 @@ impl Db {
             tx.execute_batch(include_str!("db/roster.sql"))
                 .await
                 .context("collecting agents from existing endgame results")?;
+        }
+        if version < 18 {
+            tx.execute_batch(include_str!("db/used_agents.sql"))
+                .await
+                .context("recording agents observed in battles")?;
         }
         tx.commit().await.context("committing migrations")?;
         Ok(())
@@ -1263,7 +1268,7 @@ mod tests {
         let db = Db::new_test().await.unwrap();
         db.connection
             .execute_batch(
-                "DROP TRIGGER collect_played_agents;
+                "DROP TRIGGER collect_played_agents; DROP TABLE used_agents;
             DROP VIEW played_agents; PRAGMA user_version=16;",
             )
             .await
@@ -1283,6 +1288,12 @@ mod tests {
             .await
             .unwrap();
         db.insert_result("A", "shiyu_defense", "old", "end", 1, "bad json")
+            .await
+            .unwrap();
+        // Recreate the v17 state: the cache merged showcase and battle IDs,
+        // including agents already named by the profile.
+        db.connection
+            .execute_batch(include_str!("db/roster.sql"))
             .await
             .unwrap();
         db.migrate().await.unwrap();
@@ -1312,14 +1323,16 @@ mod tests {
             author: 10,
             display_name: "Tester".into(),
         };
-        let lookup = async |player: Option<&str>| {
+        let profile = async |player: Option<&str>, used_only| {
             players
                 .profile(PlayerQuery {
                     player: player.map(str::to_owned),
+                    used_only,
                 })
                 .await
                 .unwrap()
         };
+        let lookup = async |player: Option<&str>| profile(player, false).await;
         assert_eq!(lookup(None).await["status"], "choose_account");
         let known = lookup(Some("A")).await;
         assert_eq!(known["account"]["is_requester"], true);
@@ -1335,9 +1348,36 @@ mod tests {
             serde_json::json!([])
         );
         assert_eq!(lookup(Some("C")).await["account"]["is_requester"], false);
+        let used = profile(Some("A"), true).await;
+        assert_eq!(
+            used["used_agents"],
+            serde_json::json!([
+                {"id":2,"name":"Two"},{"id":3,"name":"Three"},{"id":4,"name":null},
+                {"id":5,"name":null},{"id":6,"name":null}
+            ])
+        );
+        assert!(used.get("known_agents").is_none());
+        assert_eq!(profile(None, true).await["status"], "choose_account");
+        assert_eq!(
+            profile(Some("B"), true).await["used_agents"],
+            serde_json::json!([])
+        );
+        assert_eq!(
+            profile(Some("C"), true).await["status"],
+            "no_matching_own_account"
+        );
         assert_eq!(lookup(Some("D")).await["status"], "not_registered_in_chat");
+        db.add_user(1, 20, "C", Some("A")).await.unwrap();
+        assert_eq!(profile(Some("A"), true).await, used);
         db.remove_user(1, "A").await.unwrap();
-        assert_eq!(lookup(Some("A")).await["status"], "not_registered_in_chat");
+        assert_eq!(
+            profile(Some("A"), true).await["status"],
+            "no_matching_own_account"
+        );
+        assert_eq!(
+            profile(None, true).await["used_agents"],
+            serde_json::json!([])
+        );
     }
 
     #[tokio::test]
