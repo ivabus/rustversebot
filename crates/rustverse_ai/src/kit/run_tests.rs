@@ -26,7 +26,7 @@ struct Fixture {
     summaries: Arc<AtomicUsize>,
     progress: watch::Receiver<PromptProgress>,
     editing_calls: Arc<AtomicUsize>,
-    editing_replies: &'static [Option<&'static str>],
+    editing_replies: Vec<Option<&'static str>>,
 }
 
 // A vision model with a smaller context window than the 384k compaction threshold.
@@ -306,31 +306,17 @@ async fn langfuse_records_multimodal_research_tools_compaction_and_editing() {
 }
 
 #[tokio::test]
-async fn rejected_edits_use_the_latest_feedback_and_stop_after_three_attempts() {
-    check_answer(
-        &[
-            Some(WRONG),
-            Some(WRONG_ROOM),
-            Some(STILL_WRONG),
-            Some(WRONG_VALUE),
-            Some(EDITED),
-            Some("SAME"),
-        ],
-        EDITED,
-    )
-    .await;
-    check_answer(
-        &[
-            Some(WRONG),
-            Some(WRONG_ROOM),
-            Some(STILL_WRONG),
-            Some(WRONG_VALUE),
-            Some(WRONG),
-            Some(WRONG_ROOM),
-        ],
-        FINAL,
-    )
-    .await;
+async fn rejected_edits_use_the_latest_feedback_and_stop_after_ten_attempts() {
+    let mut replies = [
+        Some(WRONG),
+        Some(WRONG_ROOM),
+        Some(STILL_WRONG),
+        Some(WRONG_VALUE),
+    ]
+    .repeat(5);
+    check_answer(&replies, FINAL).await;
+    replies[18..].copy_from_slice(&[Some(EDITED), Some("SAME")]);
+    check_answer(&replies, EDITED).await;
     check_answer(&[Some(WRONG), Some("DIFFERENT"), Some(FINAL)], FINAL).await;
 }
 
@@ -342,14 +328,14 @@ async fn unchanged_or_unfinished_edits_deliver_the_researched_draft() {
     check_answer(&[Some(EDITED), None], FINAL).await;
 }
 
-async fn check_answer(editing_replies: &'static [Option<&'static str>], expected: &str) {
+async fn check_answer(editing_replies: &[Option<&'static str>], expected: &str) {
     let (tx, rx) = watch::channel(PromptProgress::default());
     let fixture = Fixture {
         turns: Default::default(),
         summaries: Default::default(),
         progress: rx.clone(),
         editing_calls: Default::default(),
-        editing_replies,
+        editing_replies: editing_replies.to_vec(),
     };
     let mut tools = KitTools::for_question(Client::new(), QUESTION);
     tools.seasons = Some(SeasonTools::fixture());

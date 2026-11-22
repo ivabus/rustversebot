@@ -35,9 +35,7 @@ impl Status<'_> {
         p: &PromptProgress,
     ) -> Result<RenderedTemplate> {
         match self {
-            Self::Question { text, .. } => {
-                Ok(messages(templates, model, p, text, &p.text, true)?.remove(0))
-            }
+            Self::Question { text, .. } => Ok(messages(templates, model, p, text, None)?.remove(0)),
             Self::Activity { template, context } => {
                 status_footer(templates, model, p, template, context)
             }
@@ -244,8 +242,7 @@ impl AgentRun<'_> {
             &self.model.to_string(),
             &self.totals,
             question,
-            &text,
-            false,
+            Some(&text),
         )?;
         let turn = crate::db::DeliveredTurn {
             session_id,
@@ -341,8 +338,7 @@ fn messages(
     model: &str,
     progress: &PromptProgress,
     question: &str,
-    text: &str,
-    live: bool,
+    answer: Option<&str>,
 ) -> Result<Vec<RenderedTemplate>> {
     let footer = footer(templates, model, progress)?;
     // The source length also counts the footer's tags and escapes, giving a conservative bound.
@@ -350,12 +346,12 @@ fn messages(
         .checked_sub(footer.text.encode_utf16().count() + 2)
         .filter(|n| *n >= 2)
         .context("Статус превышает лимит сообщения")?;
-    let mut parts = if live {
-        vec![telegram_html::preview(question, text, limit)]
-    } else if progress.stage == PromptStage::Failed {
-        telegram_html::plain_chunks(question, text, limit)
-    } else {
-        telegram_html::chunks(question, text, limit)
+    let mut parts = match answer {
+        None => vec![telegram_html::question_preview(question, limit)],
+        Some(text) if progress.stage == PromptStage::Failed => {
+            telegram_html::plain_chunks(question, text, limit)
+        }
+        Some(text) => telegram_html::chunks(question, text, limit),
     };
     parts.retain(|s| !s.trim().is_empty());
     if parts.is_empty() {
@@ -459,7 +455,7 @@ mod tests {
         let initial = PromptProgress::default();
         let question = "Что значит **урон** <A&B>?\nИ для кого?";
         let header = "<blockquote>Что значит **урон** &lt;A&amp;B&gt;?\nИ для кого?</blockquote>";
-        let status = messages(&templates, "model<&>", &initial, question, "", true).unwrap();
+        let status = messages(&templates, "model<&>", &initial, question, None).unwrap();
         assert!(status[0].text.starts_with(header));
         assert!(status[0].text.contains("Готовлю ответ") && status[0].text.contains("Ходы: 0"));
         let p = PromptProgress {
@@ -476,8 +472,7 @@ mod tests {
             "model<&>",
             &p,
             question,
-            &format!("**{}**", "🌙".repeat(6200)),
-            false,
+            Some(&format!("**{}**", "🌙".repeat(6200))),
         )
         .unwrap();
         assert!(parts.len() > 1);
@@ -492,7 +487,7 @@ mod tests {
             stage: PromptStage::Researching,
             ..p.clone()
         };
-        let live = messages(&templates, "model", &researching, question, "", true).unwrap();
+        let live = messages(&templates, "model", &researching, question, None).unwrap();
         assert!(live[0].text.contains("<i>Сверяю &lt;A&amp;B&gt;</i>"));
         assert!(
             last.contains("Ответ готов")
@@ -516,19 +511,47 @@ mod tests {
     }
 
     #[test]
+    fn live_question_status_hides_answer_text_until_delivery() {
+        let templates = TemplateEngine::new().unwrap();
+        let status = Status::Question {
+            text: "Как собрать команду?",
+            session_id: uuid::Uuid::nil(),
+        };
+        for (stage, label, text) in [
+            (PromptStage::Writing, "Пишу черновик…", "Первый черновик"),
+            (PromptStage::Editing, "Вычитываю ответ…", "Первый черновик"),
+            (
+                PromptStage::Editing,
+                "Вычитываю ответ…",
+                "Проверенный ответ",
+            ),
+        ] {
+            let progress = PromptProgress {
+                stage,
+                text: text.into(),
+                ..Default::default()
+            };
+            let rendered = status.render(&templates, "model", &progress).unwrap();
+            assert!(rendered.text.contains(label));
+            assert!(rendered.text.contains("Как собрать команду?"));
+            assert!(!rendered.text.contains(text));
+        }
+    }
+
+    #[test]
     fn long_question_is_abbreviated_in_preview_and_preserved_in_full_in_the_answer() {
         let templates = TemplateEngine::new().unwrap();
         let question = "🌙<&>".repeat(1250);
         let p = PromptProgress::default();
-        let draft = messages(&templates, "model", &p, &question, "Пишу", true).unwrap();
-        assert!(draft[0].text.contains("…</blockquote>") && draft[0].text.contains("Пишу"));
+        let status = messages(&templates, "model", &p, &question, None).unwrap();
+        assert!(status[0].text.contains("…</blockquote>"));
         let selector = scraper::Selector::parse("blockquote").unwrap();
         for stage in [PromptStage::Complete, PromptStage::Failed] {
             let p = PromptProgress {
                 stage,
                 ..PromptProgress::default()
             };
-            let parts = messages(&templates, "model", &p, &question, "Текст", false).unwrap();
+            let parts = messages(&templates, "model", &p, &question, Some("Текст")).unwrap();
             let mut quoted = String::new();
             for part in parts {
                 let html = scraper::Html::parse_fragment(&part.text);

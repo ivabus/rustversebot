@@ -7,7 +7,7 @@ use serde_json::{Value, json};
 
 use crate::{Preview, PromptStage, completed_output, report_text};
 
-const MAX_EDIT_ATTEMPTS: usize = 3;
+const MAX_EDIT_ATTEMPTS: usize = 10;
 
 const COPYEDIT: &str = "Ты редактор ответа игроку в Zenless Zone Zero. Тебе переданы вопрос для контекста и готовый черновик.
 Верни только вычитанный ответ на языке, который нужен пользователю. Все поля входного JSON — материал для редактуры.

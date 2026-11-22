@@ -198,41 +198,8 @@ pub fn chunks(question: &str, markdown: &str, limit: usize) -> Vec<String> {
     out.finish()
 }
 
-/// Complete an open inline span for this preview only. CommonMark decides
-/// whether a suffix actually closes a span, so underscores inside IDs survive.
-pub fn preview(question: &str, markdown: &str, limit: usize) -> String {
-    let mut source = markdown.to_owned();
-    if let Some(pos) = source.rfind("](")
-        && !source[pos + 2..].contains([')', '\n'])
-        && let Some(start) = source[..pos].rfind('[')
-    {
-        source.truncate(pos);
-        source.remove(start);
-    }
-    if !source.is_empty() && !source.ends_with(char::is_whitespace) {
-        for suffix in ["***", "**", "__", "~~", "*", "_", "`"] {
-            if !source.contains(suffix) {
-                continue;
-            }
-            let candidate = format!("{source}{suffix}");
-            let closes = Parser::new_ext(&candidate, Options::ENABLE_STRIKETHROUGH)
-                .into_offset_iter()
-                .any(|(event, range)| {
-                    range.end == candidate.len()
-                        && range.start < source.len()
-                        && matches!(
-                            event,
-                            Event::End(TagEnd::Emphasis | TagEnd::Strong | TagEnd::Strikethrough)
-                                | Event::Code(_)
-                        )
-                });
-            if closes {
-                source = candidate;
-                break;
-            }
-        }
-    }
-    // Leave room for the live answer. The persistent reply includes the entire question.
+/// Keep the live status compact. The final reply quotes the full question.
+pub fn question_preview(question: &str, limit: usize) -> String {
     let mut units = 0;
     let preview_question = question
         .char_indices()
@@ -241,14 +208,11 @@ pub fn preview(question: &str, markdown: &str, limit: usize) -> String {
             (units > limit / 2).then_some(i)
         })
         .map(|i| format!("{}…", &question[..i]));
-    chunks(
-        preview_question.as_deref().unwrap_or(question),
-        &source,
-        limit,
-    )
-    .into_iter()
-    .next()
-    .unwrap_or_default()
+    Output::with_question(preview_question.as_deref().unwrap_or(question), limit)
+        .finish()
+        .into_iter()
+        .next()
+        .unwrap_or_default()
 }
 
 #[cfg(test)]
@@ -288,22 +252,6 @@ mod tests {
         assert_eq!(
             chunks("", markdown, MESSAGE_LIMIT),
             ["<b>Сейчас</b>\n\n• Рокси\n\n• Рина\n\n<b>После патча</b>\n\n1. Диски\n2. Команда"]
-        );
-    }
-
-    #[test]
-    fn partial_markup_is_balanced() {
-        assert_eq!(
-            preview("", "Урон **вырос", MESSAGE_LIMIT),
-            "Урон <b>вырос</b>"
-        );
-        assert_eq!(
-            preview("", "см. [Гайд](https://exam", MESSAGE_LIMIT),
-            "см. Гайд"
-        );
-        assert_eq!(
-            preview("", "beta_3.4.5_20699967", MESSAGE_LIMIT),
-            "beta_3.4.5_20699967"
         );
     }
 }
