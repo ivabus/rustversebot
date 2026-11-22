@@ -7,7 +7,7 @@ use uuid::Uuid;
 mod admin;
 pub(crate) use admin::AiFeature;
 
-const SCHEMA_VERSION: i64 = 19;
+const SCHEMA_VERSION: i64 = 20;
 
 #[cfg_attr(test, derive(Default))]
 pub struct DeliveredTurn<'a> {
@@ -386,6 +386,16 @@ impl Db {
             .await
             .context("retiring the AI roster index")?;
         }
+        if version < 20 {
+            tx.execute_batch(
+                "CREATE TABLE IF NOT EXISTS beta_pending_text (
+                    chat_id INTEGER NOT NULL, revision TEXT NOT NULL, agent INTEGER NOT NULL,
+                    remaining TEXT NOT NULL, PRIMARY KEY(chat_id,revision,agent));
+                 PRAGMA user_version=20;",
+            )
+            .await
+            .context("applying migration 20")?;
+        }
         tx.commit().await.context("committing migrations")?;
         Ok(())
     }
@@ -667,6 +677,35 @@ impl Db {
         Ok(agents)
     }
 
+    pub async fn pending_beta_text(
+        &self,
+        chat: i64,
+        cur: &str,
+        agent: u64,
+    ) -> anyhow::Result<Option<Vec<String>>> {
+        self.optional_string(
+            "SELECT remaining FROM beta_pending_text WHERE chat_id=?1 AND revision=?2 AND agent=?3",
+            params![chat, cur, i64::try_from(agent)?],
+        )
+        .await?
+        .map(|json| serde_json::from_str(&json))
+        .transpose()
+        .map_err(Into::into)
+    }
+
+    pub async fn save_pending_beta_text(
+        &self,
+        chat: i64,
+        cur: &str,
+        agent: u64,
+        remaining: &[String],
+    ) -> anyhow::Result<()> {
+        self.connection()?.execute("INSERT INTO beta_pending_text(chat_id,revision,agent,remaining)
+            VALUES(?1,?2,?3,?4) ON CONFLICT(chat_id,revision,agent) DO UPDATE SET remaining=excluded.remaining",
+            params![chat,cur,i64::try_from(agent)?,serde_json::to_string(remaining)?]).await?;
+        Ok(())
+    }
+
     pub async fn mark_beta_delivered(
         &self,
         chat: i64,
@@ -678,13 +717,22 @@ impl Db {
             .copied()
             .map(i64::try_from)
             .collect::<Result<_, _>>()?;
-        self.connection()?
-            .execute(
-                "INSERT OR IGNORE INTO beta_deliveries(chat_id,revision,agent)
-                 SELECT ?1, ?2, value FROM json_each(?3)",
-                params![chat, cur, serde_json::to_string(&ids)?],
-            )
-            .await?;
+        let ids = serde_json::to_string(&ids)?;
+        let connection = self.connection()?;
+        let tx = connection.transaction().await?;
+        tx.execute(
+            "INSERT OR IGNORE INTO beta_deliveries(chat_id,revision,agent)
+                    SELECT ?1, ?2, value FROM json_each(?3)",
+            params![chat, cur, ids.as_str()],
+        )
+        .await?;
+        tx.execute(
+            "DELETE FROM beta_pending_text WHERE chat_id=?1 AND revision=?2
+                    AND agent IN (SELECT value FROM json_each(?3))",
+            params![chat, cur, ids.as_str()],
+        )
+        .await?;
+        tx.commit().await?;
         Ok(())
     }
 
@@ -1312,7 +1360,7 @@ mod tests {
             let row = state.next().await.unwrap().unwrap();
             assert_eq!(
                 (row.get::<i64>(0).unwrap(), row.get::<i64>(1).unwrap()),
-                (19, 0)
+                (SCHEMA_VERSION, 0)
             );
             assert!(db.get_user(10, "111").await.unwrap().is_some());
             assert_eq!(
@@ -1390,6 +1438,44 @@ mod tests {
             db.pending_promo_announcements(&["B"]).await.unwrap()["B"],
             [20]
         );
+    }
+
+    #[tokio::test]
+    async fn text_delivery_resumes_after_migration_and_restart() {
+        let dir = tempfile::tempdir().unwrap();
+        let url = format!("file:{}", dir.path().join("report.db").display());
+        let db = Db::connect(&url).await.unwrap();
+        db.connection
+            .execute_batch("DROP TABLE beta_pending_text; PRAGMA user_version=19;")
+            .await
+            .unwrap();
+        db.connection
+            .execute(
+                "INSERT INTO beta_deliveries(chat_id,revision,agent) VALUES(5,\'r2\',1)",
+                (),
+            )
+            .await
+            .unwrap();
+        drop(db);
+        let db = Db::connect(&url).await.unwrap();
+        assert!(
+            db.delivered_beta_agents(5, "r2")
+                .await
+                .unwrap()
+                .contains(&1)
+        );
+        let tail = vec!["вторая часть".to_string(), "третья часть".to_string()];
+        db.save_pending_beta_text(5, "r2", 2, &tail).await.unwrap();
+        drop(db);
+        let db = Db::connect(&url).await.unwrap();
+        assert_eq!(
+            db.pending_beta_text(5, "r2", 2).await.unwrap().unwrap(),
+            tail
+        );
+        assert!(db.pending_beta_text(6, "r2", 2).await.unwrap().is_none());
+        db.mark_beta_delivered(5, "r2", &[2, 3]).await.unwrap();
+        assert!(db.pending_beta_text(5, "r2", 2).await.unwrap().is_none());
+        assert_eq!(db.delivered_beta_agents(5, "r2").await.unwrap().len(), 3);
     }
 
     #[tokio::test]

@@ -1,8 +1,9 @@
 use crate::{
     BotState,
     agent::{self, AgentRun, ChatAgent, MessageAddress, Outcome, Status},
-    bot_templates::BotTemplateSender,
+    bot_templates::{BotTemplateSender, MESSAGE_LIMIT},
     scheduler::SchedulerSettings,
+    telegram_html,
 };
 use anyhow::{Context, Result};
 use rustverse_ai::beta::{AgentChange, Branch, Revision, branch_revisions, revisions};
@@ -12,9 +13,6 @@ use std::{
     time::Duration,
 };
 use teloxide::prelude::*;
-
-mod album;
-use album::{Page, album_groups, send_album};
 
 pub(crate) struct BetaPages {
     pub(crate) client: reqwest::Client,
@@ -144,7 +142,6 @@ async fn report(
 enum DiffStage {
     Prepare,
     Report,
-    Render,
     Send,
 }
 
@@ -160,116 +157,118 @@ fn diff_status(
     }
 }
 
-/// Render each requested character once, sharing its PNG between chat deliveries.
-struct RevisionAlbums<'a> {
-    revision: &'a Revision,
-    state: &'a BotState,
-    model: &'a str,
-    rendered: BTreeMap<u64, Page>,
+async fn send_report_part(
+    sender: &BotTemplateSender<'_>,
+    chat: ChatId,
+    thread: Option<teloxide::types::ThreadId>,
+    part: &str,
+    settings: &SchedulerSettings,
+) -> Result<()> {
+    let mut attempt = 1;
+    loop {
+        tokio::time::sleep(settings.request_spacing).await;
+        let result = sender
+            .send_to_thread(
+                chat,
+                thread,
+                "prompt_answer",
+                &json!({"text":part, "footer":null}),
+            )
+            .await;
+        let error = match result {
+            Ok(_) => return Ok(()),
+            Err(error) if attempt >= settings.retry_attempts => return Err(error),
+            Err(error) => error,
+        };
+        let wait = match error.downcast_ref::<teloxide::RequestError>() {
+            Some(teloxide::RequestError::RetryAfter(wait)) => wait.duration(),
+            Some(teloxide::RequestError::Network(_)) => {
+                settings.retry_base_delay * (1u32 << (attempt - 1).min(8))
+            }
+            _ => return Err(error),
+        };
+        tokio::time::sleep(wait).await;
+        attempt += 1;
+    }
 }
 
-impl<'a> RevisionAlbums<'a> {
-    fn new(state: &'a BotState, revision: &'a Revision, model: &'a str) -> Self {
-        Self {
-            state,
-            revision,
-            model,
-            rendered: BTreeMap::new(),
-        }
-    }
-
-    async fn send(
-        &mut self,
-        bot: &Bot,
-        chat: ChatId,
-        settings: &SchedulerSettings,
-        mut status: Option<&mut AgentRun<'_>>,
-    ) -> Result<()> {
-        let automatic = status.is_none();
-        let row = self.revision;
-        let confirmed = if automatic {
-            self.state
+async fn send_reports(
+    bot: &Bot,
+    state: &BotState,
+    row: &Revision,
+    model: &str,
+    chat: ChatId,
+    settings: &SchedulerSettings,
+    mut status: Option<&mut AgentRun<'_>>,
+) -> Result<()> {
+    let automatic = status.is_none();
+    let thread = status.as_ref().and_then(|s| s.address().thread);
+    let confirmed = if automatic {
+        state.db.delivered_beta_agents(chat.0, &row.current).await?
+    } else {
+        HashSet::new()
+    };
+    let sender = BotTemplateSender::new(bot, &state.templates);
+    for agent in &row.agents {
+        let mut outstanding = agent
+            .changed_members()
+            .filter(|m| !confirmed.contains(&m.id));
+        let Some(first) = outstanding.next() else {
+            continue;
+        };
+        let ids: Vec<_> = std::iter::once(first.id)
+            .chain(outstanding.map(|m| m.id))
+            .collect();
+        let pending = if automatic {
+            state
                 .db
-                .delivered_beta_agents(chat.0, &row.current)
+                .pending_beta_text(chat.0, &row.current, first.id)
                 .await?
         } else {
-            HashSet::new()
+            None
         };
-        let groups = album_groups(&row.agents);
-        for (index, agents) in groups.iter().enumerate() {
-            let mut pages = Vec::new();
-            let mut links = Vec::new();
-            let mut ids = Vec::new();
-            for agent in *agents {
-                if agent
-                    .changed_members()
-                    .all(|member| confirmed.contains(&member.id))
-                {
-                    continue;
-                }
-                ids.extend(agent.changed_members().map(|member| member.id));
-                let linked_member = agent
-                    .changed_members()
-                    .next()
-                    .context("empty character report")?;
-                links.push(
-                    json!({"url":rustverse_ai::beta::diff_url(row,linked_member)?.as_str(),
-                    "name":agent.name.chars().take(36).collect::<String>()}),
-                );
-                let page = match self.rendered.entry(agent.id) {
-                    std::collections::btree_map::Entry::Occupied(entry) => entry.into_mut(),
-                    std::collections::btree_map::Entry::Vacant(entry) => {
-                        let text =
-                            report(self.state, row, agent, self.model, status.as_deref_mut())
-                                .await?;
-                        if let Some(status) = status.as_deref_mut() {
-                            status
-                                .show(&diff_status(
-                                    Some(&row.previous),
-                                    Some(&row.current),
-                                    DiffStage::Render,
-                                    Some(&agent.name),
-                                ))
-                                .await?;
-                        }
-                        entry.insert(Page::new(
-                            agent.id,
-                            rustverse_images::beta_page(&text).await?,
-                        )?)
-                    }
-                };
-                pages.push(page.clone());
+        let parts = match pending {
+            Some(remaining) => remaining,
+            None => {
+                let text = report(state, row, agent, model, status.as_deref_mut()).await?;
+                let source = state.templates.render("beta_source", &json!({
+                    "comparison": !automatic,
+                    "hotfix": row.previous.rsplit_once('_').map(|p| p.0) == row.current.rsplit_once('_').map(|p| p.0),
+                    "release": row.current.starts_with("release_"),
+                    "url": rustverse_ai::beta::diff_url(row, first)?.as_str(),
+                }))?;
+                telegram_html::chunks("", &format!("{text}\n\n{}", source.text), MESSAGE_LIMIT)
             }
-            if pages.is_empty() {
-                continue;
-            }
-            let caption = self.state.templates.render("beta_album", &json!({
-                "previous":row.previous.chars().take(48).collect::<String>(), "current":row.current.chars().take(48).collect::<String>(),
-                "hotfix":row.previous.rsplit_once('_').map(|p|p.0)==row.current.rsplit_once('_').map(|p|p.0),
-                "release":row.current.starts_with("release_"), "comparison":!automatic,
-                "part":index+1, "parts":groups.len(), "links":links
-            }))?;
-            if let Some(status) = status.as_deref_mut() {
-                status
-                    .show(&diff_status(
-                        Some(&row.previous),
-                        Some(&row.current),
-                        DiffStage::Send,
-                        None,
-                    ))
-                    .await?;
-            }
-            let thread = status.as_ref().and_then(|s| s.address().thread);
-            send_album(bot, chat, thread, &pages, &caption.text, settings).await?;
+        };
+        if let Some(status) = status.as_deref_mut() {
+            status
+                .show(&diff_status(
+                    Some(&row.previous),
+                    Some(&row.current),
+                    DiffStage::Send,
+                    Some(&agent.name),
+                ))
+                .await?;
+        }
+        for (i, part) in parts.iter().enumerate() {
+            send_report_part(&sender, chat, thread, part, settings).await?;
             if automatic {
-                self.state
-                    .db
-                    .mark_beta_delivered(chat.0, &row.current, &ids)
-                    .await?;
+                let remaining = &parts[i + 1..];
+                if remaining.is_empty() {
+                    state
+                        .db
+                        .mark_beta_delivered(chat.0, &row.current, &ids)
+                        .await?;
+                } else {
+                    state
+                        .db
+                        .save_pending_beta_text(chat.0, &row.current, first.id, remaining)
+                        .await?;
+                }
             }
         }
-        Ok(())
     }
+    Ok(())
 }
 
 pub async fn diff_command(
@@ -505,7 +504,7 @@ impl ChatAgent for Diff {
                 .render("beta_empty", &json!({"previous":prev,"current":cur}))
                 .map(Outcome::Notice);
         }
-        // Preflight the whole range so an over-budget command sends no partial albums.
+        // Check the whole range before sending the first report.
         if !self.admin
             && rows.iter().map(|r| r.agents.len()).sum::<usize>() > state.beta.manual_limit
         {
@@ -525,11 +524,9 @@ impl ChatAgent for Diff {
             }
         }
         for row in &rows {
-            RevisionAlbums::new(state, row, &model)
-                .send(&bot, chat, &settings, Some(status))
-                .await?;
+            send_reports(&bot, state, row, &model, chat, &settings, Some(status)).await?;
         }
-        Ok(Outcome::MediaDelivered)
+        Ok(Outcome::Delivered)
     }
 }
 
@@ -601,7 +598,6 @@ async fn deliver_revision(
     settings: &SchedulerSettings,
     model: &str,
 ) {
-    let mut albums = RevisionAlbums::new(state, row, model);
     let mut successful = Vec::new();
     for &chat in active.iter() {
         let delivery = async {
@@ -612,7 +608,7 @@ async fn deliver_revision(
             {
                 return Ok(false);
             }
-            albums.send(bot, ChatId(chat), settings, None).await?;
+            send_reports(bot, state, row, model, ChatId(chat), settings, None).await?;
             state
                 .db
                 .advance_revision(chat, branch.name(), &row.previous, &row.current)
@@ -634,21 +630,20 @@ mod tests {
     use super::*;
 
     #[test]
-    fn release_caption_escapes_names_and_links_only_sent_entries() {
+    fn text_report_keeps_the_release_source_link() {
         let template = crate::templates::TemplateEngine::new().unwrap();
-        let caption=template.render("beta_album",&json!({"release":true,"hotfix":false,"comparison":false,
-            "previous":"release_3.2.0_1","current":"release_3.3.0_2","part":1,"parts":1,
-            "links":[{"name":"A & B","url":"https://zzz.gachabase.net/diff/agents/1/a?prev=x&cur=y"}]})).unwrap();
-        assert_eq!(caption.parse_mode(), Some(teloxide::types::ParseMode::Html));
-        assert!(caption.text.contains("Релиз патча") && caption.text.contains(">A &amp; B</a>"));
-        assert_eq!(
-            scraper::Html::parse_fragment(&caption.text)
-                .select(&scraper::Selector::parse("a").unwrap())
-                .next()
-                .unwrap()
-                .value()
-                .attr("href"),
-            Some("https://zzz.gachabase.net/diff/agents/1/a?prev=x&cur=y")
-        );
+        let url = "https://zzz.gachabase.net/diff/agents/1/a?prev=x&cur=y";
+        let source = template
+            .render("beta_source", &json!({"release":true, "url":url}))
+            .unwrap();
+        let parts =
+            telegram_html::chunks("", &format!("# A & B\n\n{}", source.text), MESSAGE_LIMIT);
+        let html = scraper::Html::parse_fragment(&parts[0]);
+        let link = html
+            .select(&scraper::Selector::parse("a").unwrap())
+            .next()
+            .unwrap();
+        assert_eq!(link.value().attr("href"), Some(url));
+        assert_eq!(link.text().collect::<String>(), "Релиз патча · GachaBase");
     }
 }

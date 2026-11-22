@@ -1,7 +1,5 @@
 //! Typst → SVG → PNG rendering. Each invocation owns its input files and processes.
-mod beta;
 const HIRES_WIDTH: &str = "2560";
-pub use beta::beta_page;
 
 use std::{
     collections::BTreeSet,
@@ -19,7 +17,6 @@ use tokio::{fs, process::Command};
 
 #[derive(Debug, Clone, Copy)]
 pub enum Template {
-    BetaAgent,
     TopDa,
     TopShiyu,
     Da,
@@ -31,7 +28,6 @@ pub enum Template {
 impl Template {
     pub fn parse(name: &str) -> anyhow::Result<Self> {
         match name {
-            "beta_agent" | "beta_agent.typ" => Ok(Self::BetaAgent),
             "top_da" | "top_da.typ" => Ok(Self::TopDa),
             "top_sd" | "top_sd.typ" => Ok(Self::TopShiyu),
             "individual_da" | "individual_da.typ" => Ok(Self::Da),
@@ -44,7 +40,6 @@ impl Template {
 
     fn source(self) -> &'static str {
         match self {
-            Self::BetaAgent => include_str!("../beta_agent.typ"),
             Self::TopDa => include_str!("../top_da.typ"),
             Self::TopShiyu => include_str!("../top_sd.typ"),
             Self::Da => include_str!("../individual_da.typ"),
@@ -224,36 +219,29 @@ pub async fn render(
         !matches!(template, Template::Shiyu) || season.is_some(),
         "individual Shiyu requires season JSON"
     );
-    let with_images = !matches!(template, Template::BetaAgent);
     let directory = tempfile::tempdir()?;
     let root = directory.path();
     fs::create_dir(root.join("images")).await?;
     fs::write(root.join("template.typ"), template.source()).await?;
     fs::write(root.join("prelude.typ"), include_bytes!("../prelude.typ")).await?;
     fs::write(root.join("inpin.ttf"), include_bytes!("../inpin.ttf")).await?;
-    let data = match template {
-        Template::BetaAgent => serde_json::to_vec(&beta::template_data(input)?)?,
-        _ => serde_json::to_vec(input)?,
-    };
-    fs::write(root.join("input.json"), data).await?;
+    fs::write(root.join("input.json"), serde_json::to_vec(input)?).await?;
     if let Some(season) = season {
         fs::write(root.join("season.json"), serde_json::to_vec(season)?).await?;
     }
-    if with_images {
-        stage_images(input, season, &root.join("images")).await?;
-        for (name, bytes) in [
-            ("da.webp", include_bytes!("../image/da.webp").as_slice()),
-            (
-                "shiyu.webp",
-                include_bytes!("../image/shiyu.webp").as_slice(),
-            ),
-            (
-                "star-icon.png",
-                include_bytes!("../image/star-icon.png").as_slice(),
-            ),
-        ] {
-            fs::write(root.join("images").join(name), bytes).await?;
-        }
+    stage_images(input, season, &root.join("images")).await?;
+    for (name, bytes) in [
+        ("da.webp", include_bytes!("../image/da.webp").as_slice()),
+        (
+            "shiyu.webp",
+            include_bytes!("../image/shiyu.webp").as_slice(),
+        ),
+        (
+            "star-icon.png",
+            include_bytes!("../image/star-icon.png").as_slice(),
+        ),
+    ] {
+        fs::write(root.join("images").join(name), bytes).await?;
     }
     let typst = std::env::var_os("TYPST_BIN").unwrap_or_else(|| "typst".into());
     let resvg = std::env::var_os("RESVG_BIN").unwrap_or_else(|| "resvg".into());

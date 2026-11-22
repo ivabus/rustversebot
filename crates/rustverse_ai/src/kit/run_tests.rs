@@ -68,6 +68,119 @@ fn response(item: &Value, id: &str) -> Value {
         "usage":{"input_tokens":18,"output_tokens":2,"total_tokens":20}})
 }
 
+// Non-streaming report generation is used by both the scheduler and CLI.
+#[derive(Default)]
+struct ReportFixture(AtomicUsize);
+
+impl HttpClientExt for ReportFixture {
+    fn send(
+        &self,
+        request: Request<Bytes>,
+    ) -> impl Future<Output = http_client::Result<Response<LazyBody>>> + Send + 'static {
+        let body: Value = serde_json::from_slice(request.body()).unwrap();
+        let draft = "### Базовая атака\n- Урон вырос с 20 до 24.";
+        let corrected = draft.replace("24", "21");
+        let reply = match request.uri().path() {
+            "/v1/responses/input_tokens" => json!({"input_tokens": 1000}),
+            "/v1/responses" => {
+                let step = self.0.fetch_add(1, Ordering::Relaxed);
+                let history = body["input"].as_array().unwrap();
+                let input = &history.last().unwrap()["content"][0]["text"];
+                if step == 0 {
+                    let task = input.as_str().unwrap();
+                    assert!(task.contains(crate::REPORT_TASK) && task.contains("beta_1.0.0_2"));
+                    assert!(!task.contains("before") && !task.contains("damage"));
+                    let mut reply = response(&Value::Null, "lookup");
+                    reply["output"] = ["en", "cn"].iter().enumerate().map(|(i, lang)| call(i, "get_gachabase_entry",
+                        json!({"category":"agents","id":1601,"version":"beta_1.0.0_2","language":lang,
+                               "selector":"@changes","offset":null,"skill_level":null,"core_level":null}))).collect();
+                    reply
+                } else {
+                    let answer = match step {
+                        1 => draft,
+                        2 => {
+                            let input: Value =
+                                serde_json::from_str(input.as_str().unwrap()).unwrap();
+                            assert_eq!(input["draft"], draft);
+                            draft
+                        }
+                        3 | 4 => {
+                            let input: Value =
+                                serde_json::from_str(input.as_str().unwrap()).unwrap();
+                            let outputs: Vec<_> = history
+                                .iter()
+                                .filter_map(|m| {
+                                    m["content"][0]["text"]
+                                        .as_str()?
+                                        .strip_prefix("[tool get_gachabase_entry result] ")
+                                })
+                                .collect();
+                            assert_eq!(outputs.len(), 2);
+                            let mut languages = BTreeSet::new();
+                            for output in outputs {
+                                let data: Value = serde_json::from_str(output).unwrap();
+                                languages.insert(data["language"].as_str().unwrap().to_owned());
+                                assert_eq!(data["result"][0]["changes"][0]["before"], 20);
+                                assert_eq!(data["result"][0]["changes"][0]["after"], 21);
+                            }
+                            assert_eq!(languages, BTreeSet::from(["en".into(), "cn".into()]));
+                            if step == 3 {
+                                assert_eq!(input["answer"], draft);
+                                r#"{"corrections":[{"original":"24","replacement":"21","source":"en/cn /damage, beta_1.0.0_2: 21"}]}"#
+                            } else {
+                                assert_eq!(input["answer"], corrected);
+                                VERIFIED
+                            }
+                        }
+                        _ => panic!("unexpected report step {step}"),
+                    };
+                    response(&message(answer), "report")
+                }
+            }
+            path => panic!("unexpected report request {path}"),
+        };
+        async move {
+            let body: LazyBody = Box::pin(async move { Ok(Bytes::from(reply.to_string())) });
+            Ok(Response::builder()
+                .header("content-type", "application/json")
+                .body(body)?)
+        }
+    }
+
+    async fn send_streaming(&self, _: Request<Bytes>) -> http_client::Result<StreamingResponse> {
+        panic!("unexpected streaming report request")
+    }
+
+    fn send_multipart(
+        &self,
+        _: Request<MultipartForm>,
+    ) -> impl Future<Output = http_client::Result<Response<LazyBody>>> + Send + 'static {
+        std::future::ready(Err(http_client::Error::permanent("unexpected multipart")))
+    }
+}
+
+#[tokio::test]
+async fn diff_report_reads_changes_through_tools_before_checking_the_text() {
+    let page = Comparison::parse(
+        "https://zzz.gachabase.net/diff/agents/1601/test?prev=beta_1.0.0_1&cur=beta_1.0.0_2",
+    )
+    .unwrap();
+    let snaps = || Snapshots {
+        prev: json!({"agent":{"damage":20}}),
+        cur: json!({"agent":{"damage":21}}),
+    };
+    let mut tools = KitTools::new(Client::new());
+    let input = tools.report_input(&page, snaps(), snaps()).unwrap();
+    let provider = crate::transport::Provider {
+        config: OpenAIConfig::new("mock"),
+        client: DynHttpClient::new(ReportFixture::default()),
+    };
+    let report = crate::write_report(tools, input, provider, MODEL, None)
+        .await
+        .unwrap();
+    assert_eq!(report, "### Базовая атака\n- Урон вырос с 20 до 21.");
+}
+
 impl HttpClientExt for Fixture {
     fn send(
         &self,
@@ -890,7 +1003,7 @@ async fn check_run(
         },
         if route.is_some() { "auto" } else { MODEL },
         tools,
-        Some("Answer the question"),
+        ["Answer the question", crate::ENDGAME_GUIDANCE],
         crate::PromptInput {
             text: question.into(),
             images: vec![

@@ -33,10 +33,19 @@ pub const DEFAULT_MODEL: &str = "gpt-6.2-sol";
 /// Identifies the instructions, review prompt and tools that produced a cached report.
 pub fn prompt_version() -> &'static str {
     static VERSION: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
-        let input = format!(
-            "{INSTRUCTIONS}\0{REVIEW}\0{TUTORIAL_GUIDANCE}\0{OUTPUT_FORMAT}\0{}",
-            serde_json::to_string(&kit::definitions()).unwrap()
-        );
+        let input = serde_json::to_vec(&(
+            [
+                INSTRUCTIONS,
+                REVIEW,
+                REPORT_TASK,
+                TUTORIAL_GUIDANCE,
+                OUTPUT_FORMAT,
+                RESEARCH_UPDATES,
+            ],
+            editing::REVIEW_PROMPTS,
+            kit::definitions(),
+        ))
+        .unwrap();
         format!("{:x}", md5::compute(input))
     });
     &VERSION
@@ -150,9 +159,7 @@ const INSTRUCTIONS: &str = "Ты анализируешь изменения а�
 без данных. Если игровых изменений нет, сообщи об этом кратко. Заверши отчёт последней правкой, без
 повторного резюме и предложений дальнейших действий.";
 
-const REVIEW: &str = "Сам решай, какие данные нужны и когда отчёт готов. Для большого диффа вход содержит
-перечень групп с селекторами. Прочитай группы обеих локализаций через get_gachabase_entry с версией cur.
-Проверь каждую группу; если все её changes уже во входе, повторно загружать их не нужно.
+const REVIEW: &str = "Сам решай, какие данные нужны и когда отчёт готов. Во входе указаны агент, формы и ревизии. Для каждого ID запроси get_gachabase_entry с selector=@changes, версией cur и языками en и cn. Проверь каждую группу. Если её changes уже вернулись в списке, повторно загружать их не нужно.
 Запрашивай независимые группы вместе. next_offset продолжает группу;
 read у большой правки указывает на значение её конкретной стороны. Для производных чисел доступен compute
 со ссылками на поля снимков до и после. Дочитай нужные поля в каждой ревизии через get_gachabase_entry; для нового
@@ -203,14 +210,23 @@ async fn analyze_comparison(
         .to_owned();
     let mut tools = kit::KitTools::new(client);
     let input = tools.report_input(&page, en, cn)?;
-    let text = write_report(tools, input, api_key, model, None).await?;
+    let text = write_report(
+        tools,
+        input,
+        transport::Provider::new(api_key)?,
+        model,
+        None,
+    )
+    .await?;
     Ok(format_report(&name, &page.prev, &page.cur, &text))
 }
+
+const REPORT_TASK: &str = "Подготовь текстовый отчёт на русском об изменениях агента. Сохрани заголовки групп ### и пункты под ними, сравни значения и условия до и после по обеим локализациям. Имя и строку ревизий добавит приложение. Ниже указано, какие записи GachaBase сравнить. Подробности получи инструментами.";
 
 async fn write_report(
     tools: kit::KitTools,
     input: Option<String>,
-    key: &str,
+    provider: transport::Provider,
     model: &str,
     progress: Option<tokio::sync::watch::Sender<PromptProgress>>,
 ) -> Result<String> {
@@ -218,11 +234,11 @@ async fn write_report(
         return Ok("Игровых изменений нет.".into());
     };
     run_agent(
-        transport::Provider::new(key)?,
+        provider,
         model,
         tools,
-        None,
-        input.into(),
+        [INSTRUCTIONS, REVIEW],
+        format!("{REPORT_TASK}\n\n{input}").into(),
         &[],
         progress.map(Preview::Progress),
     )
@@ -462,7 +478,7 @@ async fn question_run(
         transport::Provider::new(key)?,
         model,
         tools,
-        Some(instructions),
+        [instructions, ENDGAME_GUIDANCE],
         question,
         history,
         preview,
@@ -478,7 +494,7 @@ async fn run_agent(
     provider: transport::Provider,
     model: &str,
     tools: kit::KitTools,
-    question_instructions: Option<&str>,
+    [instructions, guidance]: [&str; 2],
     input: PromptInput,
     history: &[ImagePromptTurn],
     preview: Option<Preview>,
@@ -487,7 +503,7 @@ async fn run_agent(
         Some(Preview::Progress(tx)) => Some(tx.clone()),
         _ => None,
     };
-    let selection: ModelSelection = if model == "auto" && question_instructions.is_some() {
+    let selection: ModelSelection = if model == "auto" {
         let routed = routing::choose(&provider, &input, history, progress.as_ref()).await;
         if let Some(tx) = &progress {
             tx.send_modify(|p| p.research_model = Some(routed.into()));
@@ -507,13 +523,10 @@ async fn run_agent(
         );
     }
     let research_updates = matches!(&preview, Some(Preview::Progress(_)));
-    let builder = AgentBuilder::new(provider.endpoint(&selection.slug, progress));
-    let builder = match question_instructions {
-        Some(instructions) => builder.preamble(instructions),
-        None => builder.preamble(INSTRUCTIONS).append_preamble(REVIEW),
-    };
     let tracing_enabled = telemetry::content_enabled();
-    let mut builder = builder
+    let mut builder = AgentBuilder::new(provider.endpoint(&selection.slug, progress))
+        .preamble(instructions)
+        .append_preamble(guidance)
         .record_content_telemetry(tracing_enabled)
         .append_preamble(TUTORIAL_GUIDANCE)
         .append_preamble(OUTPUT_FORMAT)
@@ -523,9 +536,6 @@ async fn run_agent(
         .default_max_turns(usize::MAX);
     if research_updates {
         builder = builder.append_preamble(RESEARCH_UPDATES);
-    }
-    if question_instructions.is_some() {
-        builder = builder.append_preamble(ENDGAME_GUIDANCE);
     }
     if let Some(reasoning) = selection.reasoning {
         builder = builder.reasoning(reasoning);
@@ -579,11 +589,8 @@ async fn run_agent(
         .last()
         .context("Rig не вернул результат модели")?;
     let draft = report_text(completed_output(&call.raw)?)?;
-    if question_instructions.is_none() {
-        return Ok(draft);
-    }
-    // The transcript starts with the player's prompt and ends with the research draft.
-    // The checker receives the question, its images and the candidate together in its last message.
+    // The checker receives the original input (including any diff or images) alongside
+    // the candidate. Keep the intervening tool calls and results as evidence.
     let mut messages = std::mem::take(&mut result.messages);
     drop(result);
     messages.pop();

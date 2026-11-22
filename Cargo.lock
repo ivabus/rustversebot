@@ -2874,7 +2874,6 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "nanoka",
- "pulldown-cmark",
  "reqwest 0.12.28",
  "rustverse",
  "serde",
@@ -2889,7 +2888,6 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "axum",
- "bytes",
  "chrono",
  "env_logger",
  "futures-util",
@@ -2898,7 +2896,6 @@ dependencies = [
  "minijinja",
  "nanoka",
  "pulldown-cmark",
- "reqwest 0.11.27",
  "reqwest 0.12.28",
  "rustverse",
  "rustverse_ai",

@@ -1,4 +1,4 @@
-#let conf(mode: none, size: none, group-digits: true, doc) = {
+#let conf(mode: none, size: none, doc) = {
   set text(font: "inpin hongmengti", fill: white)
   set page(
     height: auto,
@@ -45,22 +45,6 @@
         )]
       }
 
-      #if mode == "diff" {
-        let grad1 = color.map.mako.map(x => x.transparentize(80%).darken(20%))
-        let grad2 = color.map.vlag.map(x => x.transparentize(80%).darken(20%))
-        place(center + horizon)[#rect(
-          stroke: none,
-          width: 100%,
-          height: 100%,
-          fill: (gradient.linear(..grad1, ..grad1.rev()).repeat(1)),
-        )]
-        place(center + horizon)[#rect(
-          stroke: none,
-          width: 100%,
-          height: 100%,
-          fill: (gradient.linear(angle: 45deg, ..grad2, ..grad2.rev()).repeat(1)),
-        )]
-      }
     ],
   )
 
@@ -87,7 +71,7 @@
   show regex("</Term>"): ""
 
   show regex("\d{7,}"): it => {
-    if group-digits { text(str(it.text).rev().clusters().chunks(3).map(array.join).join(" ").rev()) } else { it }
+    text(str(it.text).rev().clusters().chunks(3).map(array.join).join(" ").rev())
   }
 
   doc

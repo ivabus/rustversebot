@@ -66,7 +66,7 @@ pub(crate) fn definitions() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "get_gachabase_entry",
-            description: "Read by ID. For enemies, null selector gives combat and codex descriptions. /enemy_variants contains variant affinities. For agents, @team summarizes Core Passive and Additional Ability; follow a path for exact conditions. Null returns compact pages, empty lists fields, a JSON pointer reads a field, @raw reads the full record. Name/ID or text:<phrase> finds paths. Agent levels default to skill 12 and max core. Use source and JSON pointers for compute. Use @changes only for an agent, language and revision with diff groups in the supplied comparison report input.",
+            description: "Read by ID. For enemies, null selector gives combat and codex descriptions. /enemy_variants contains variant affinities. For agents, @team summarizes Core Passive and Additional Ability; follow a path for exact conditions. Null returns compact pages, empty lists fields, a JSON pointer reads a field, @raw reads the full record. Name/ID or text:<phrase> finds paths. Agent levels default to skill 12 and max core. Use source and JSON pointers for compute. For a requested comparison, read @changes at its cur revision in en and cn to list differences, then follow the returned group selectors.",
             parameters: json!({"type":"object","additionalProperties":false,"properties":{
                 "category":category,"id":{"type":"integer","minimum":1},"language":language,
                 "version":version,"selector":{"type":["string","null"]},"offset":offset,
@@ -81,7 +81,7 @@ pub(crate) fn definitions() -> Vec<ToolSpec> {
     ]
 }
 
-#[derive(Clone, Copy, Hash, Eq, PartialEq, Deserialize)]
+#[derive(Clone, Copy, Hash, Eq, PartialEq, Deserialize, Serialize)]
 #[serde(rename_all = "lowercase")]
 enum Language {
     En,
@@ -207,11 +207,11 @@ impl KitTools {
         } else {
             "updated"
         };
-        let mut input = json!({"agent_id":page.id,"agent":page.slug,"prev":page.prev,"cur":page.cur,"status":status});
+        let input = json!({"agent_id":page.id,"agent":page.slug,"prev":page.prev,"cur":page.cur,"status":status});
         self.pinned = Some(page.cur.clone());
         let mut empty = true;
-        for (label, language, snapshots) in [("en", Language::En, en), ("cn", Language::Cn, cn)] {
-            let mut prepare = |raw: Value, version: &str, side: &str| {
+        for (language, snapshots) in [(Language::En, en), (Language::Cn, cn)] {
+            let mut prepare = |raw: Value, version: &str| {
                 let key = source_key(Category::Agents, page.id, language, version);
                 if raw.is_null() {
                     self.sources.insert(format!("{key}/raw"), Value::Null);
@@ -222,26 +222,17 @@ impl KitTools {
                     .insert(format!("{key}/raw"), catalog::agent_entry(raw));
                 let source = format!("{key}/{}/max", crate::diff::SKILL_LEVEL);
                 self.sources
-                    .insert(source.clone(), catalog::agent_entry(view.clone()));
-                input["sources"][label][side] = json!(source);
+                    .insert(source, catalog::agent_entry(view.clone()));
                 view
             };
             let normalized = Snapshots {
-                prev: prepare(snapshots.prev, &page.prev, "before"),
-                cur: prepare(snapshots.cur, &page.cur, "after"),
+                prev: prepare(snapshots.prev, &page.prev),
+                cur: prepare(snapshots.cur, &page.cur),
             };
             let changes = normalized.changes();
             empty &= changes.is_empty();
-            input[label] = if status == "updated" && serde_json::to_vec(&changes)?.len() <= 8192 {
-                json!(changes)
-            } else {
-                let count = changes.len();
-                let groups = Groups::new(changes);
-                let index = groups.index();
-                self.report_changes
-                    .insert((page.id, language, page.cur.clone()), groups);
-                json!({"change_count":count,"groups":index})
-            };
+            self.report_changes
+                .insert((page.id, language, page.cur.clone()), Groups::new(changes));
         }
         if empty && status == "updated" {
             return Ok(None);
@@ -482,7 +473,8 @@ impl KitTools {
                         .get(&(q.id, q.language, version.clone()))
                         .context("No paged diff for this entry and version")?;
                     return Ok(
-                        json!({"id":q.id,"version":version,"result":changes.read(selector,q.offset.unwrap_or_default())?}),
+                        json!({"id":q.id,"version":version,"language":q.language,"selector":selector,
+                               "result":changes.read(selector,q.offset.unwrap_or_default())?}),
                     );
                 }
                 let key = source_key(q.category, q.id, q.language, &version);
@@ -979,7 +971,7 @@ mod tests {
             .report_input(&page, snapshots(), snapshots())
             .unwrap()
             .unwrap();
-        assert!(input.contains("older effect"));
+        assert!(!input.contains("older effect") && !input.contains("new effect"));
         let args = json!({"category":"agents","id":1601,"language":"cn","version":page.prev,"selector":"text:OLDER"});
         let result = tools.call("get_gachabase_entry", args).await.unwrap();
         assert_eq!(result["result"]["matches"][0]["path"], "/skills/0/text");

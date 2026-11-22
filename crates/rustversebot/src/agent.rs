@@ -53,7 +53,7 @@ pub(crate) enum Outcome {
         references: rustverse_ai::TurnReferences,
     },
     Notice(RenderedTemplate),
-    MediaDelivered,
+    Delivered,
 }
 
 pub(crate) trait ChatAgent: Send + Sync + 'static {
@@ -238,7 +238,7 @@ impl AgentRun<'_> {
         };
         let templates = self.output.templates;
         let answer = match outcome {
-            Ok(Outcome::MediaDelivered) => {
+            Ok(Outcome::Delivered) => {
                 if let Some(id) = edit {
                     self.output.delete(id).await?;
                 }
@@ -375,21 +375,36 @@ fn messages(
     answer: Option<&str>,
 ) -> Result<Vec<RenderedTemplate>> {
     let footer = footer(templates, model, progress)?;
-    // The source length also counts the footer's tags and escapes, giving a conservative bound.
-    let limit = MESSAGE_LIMIT
-        .checked_sub(footer.text.encode_utf16().count() + 2)
-        .filter(|n| *n >= 2)
-        .context("Статус превышает лимит сообщения")?;
+    let visible_len = |html: &str| {
+        scraper::Html::parse_fragment(html)
+            .root_element()
+            .text()
+            .map(|text| text.encode_utf16().count())
+            .sum::<usize>()
+    };
+    let footer_space = visible_len(&footer.text) + 2;
     let mut parts = match answer {
-        None => vec![telegram_html::question_preview(question, limit)],
-        Some(text) if progress.stage == PromptStage::Failed => {
-            telegram_html::plain_chunks(question, text, limit)
+        None => {
+            let limit = MESSAGE_LIMIT
+                .checked_sub(footer_space)
+                .filter(|n| *n >= 2)
+                .context("Статус превышает лимит сообщения")?;
+            vec![telegram_html::question_preview(question, limit)]
         }
-        Some(text) => telegram_html::chunks(question, text, limit),
+        Some(text) if progress.stage == PromptStage::Failed => {
+            telegram_html::plain_chunks(question, text, MESSAGE_LIMIT)
+        }
+        Some(text) => telegram_html::chunks(question, text, MESSAGE_LIMIT),
     };
     parts.retain(|s| !s.trim().is_empty());
     if parts.is_empty() {
         return Ok(vec![footer]);
+    }
+    if parts
+        .last()
+        .is_some_and(|part| visible_len(part) + footer_space > MESSAGE_LIMIT)
+    {
+        parts.push(String::new());
     }
     let last = parts.len() - 1;
     parts
@@ -426,13 +441,13 @@ mod tests {
             "model",
             &totals,
             "diff_status",
-            &json!({"previous":"beta_1", "current":"beta_2", "stage":"render", "character":"A&B"}),
+            &json!({"previous":"beta_1", "current":"beta_2", "stage":"send", "character":"A&B"}),
         )
         .unwrap();
         assert!(
             rendered
                 .text
-                .contains("<b>A&amp;B</b>\n<i>Рендеринг карточки…</i>")
+                .contains("<b>A&amp;B</b>\n<i>Отправляю отчёт…</i>")
         );
         assert!(rendered.text.starts_with(
             "<b>Создаю дифф между версиями</b> · <code>beta_1</code> → <code>beta_2</code>"
@@ -545,6 +560,21 @@ mod tests {
     }
 
     #[test]
+    fn a_full_length_paragraph_stays_together_when_the_footer_needs_another_message() {
+        let templates = TemplateEngine::new().unwrap();
+        let progress = PromptProgress {
+            stage: PromptStage::Complete,
+            ..Default::default()
+        };
+        let paragraph = "🌙".repeat(MESSAGE_LIMIT / 2);
+        let parts = messages(&templates, "model", &progress, "Вопрос", Some(&paragraph)).unwrap();
+        assert_eq!(parts.len(), 3);
+        assert_eq!(parts[0].text, "<blockquote>Вопрос</blockquote>");
+        assert_eq!(parts[1].text, paragraph);
+        assert!(parts[2].text.contains("Ответ готов"));
+    }
+
+    #[test]
     fn live_question_status_hides_answer_text_until_delivery() {
         let templates = TemplateEngine::new().unwrap();
         let status = Status::Question {
@@ -574,6 +604,18 @@ mod tests {
             assert!(rendered.text.contains(label));
             assert!(rendered.text.contains("Как собрать команду?"));
             assert!(!rendered.text.contains(text));
+            if matches!(stage, PromptStage::Editing | PromptStage::FactChecking) {
+                let report = status_footer(
+                    &templates,
+                    "model",
+                    &progress,
+                    "diff_status",
+                    &json!({"stage":"report"}),
+                )
+                .unwrap();
+                assert!(report.text.contains(label));
+                assert!(!report.text.contains(text));
+            }
         }
     }
 

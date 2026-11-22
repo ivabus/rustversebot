@@ -24,6 +24,10 @@ struct Output {
     units: usize,
     active: Vec<Entity>,
     break_lines: usize,
+    item_boundary: bool,
+    // The most recent paragraph starts with a clean entity stack. Keep its HTML
+    // offsets and visible position so an overflow can move the whole paragraph.
+    paragraph: Option<(usize, usize, usize)>,
 }
 
 impl Output {
@@ -32,7 +36,7 @@ impl Output {
             limit,
             ..Self::default()
         };
-        out.write(question, &[Entity::new("<blockquote>", "</blockquote>")]);
+        out.write_paragraphs(question, &[Entity::new("<blockquote>", "</blockquote>")]);
         out.break_lines = 2;
         out
     }
@@ -58,11 +62,28 @@ impl Output {
         }
     }
     fn finish_chunk(&mut self) {
+        self.paragraph = None;
         self.style(&[]);
         if self.units > 0 {
             self.chunks.push(std::mem::take(&mut self.html));
         }
         self.units = 0;
+    }
+    fn move_paragraph(&mut self) {
+        if let Some((end, start, units)) = self.paragraph.take() {
+            let tail = self.html.split_off(start);
+            self.html.truncate(end);
+            self.chunks.push(std::mem::replace(&mut self.html, tail));
+            self.units -= units;
+        }
+    }
+    fn write_paragraphs(&mut self, text: &str, style: &[Entity]) {
+        for (i, paragraph) in text.split("\n\n").enumerate() {
+            if i > 0 {
+                self.break_lines += 2;
+            }
+            self.write(paragraph, style);
+        }
     }
     fn write(&mut self, text: &str, style: &[Entity]) {
         if text.is_empty() {
@@ -70,30 +91,50 @@ impl Output {
         }
         let breaks = if self.units > 0 { self.break_lines } else { 0 };
         self.break_lines = 0;
+        let item_boundary = std::mem::take(&mut self.item_boundary);
         if breaks > 0 {
             self.style(&[]);
+            if breaks == 1 && !item_boundary && self.units + breaks >= self.limit {
+                self.move_paragraph();
+            }
             if self.units + breaks >= self.limit {
                 self.finish_chunk();
             } else {
+                if breaks >= 2 || item_boundary {
+                    self.paragraph = Some((
+                        self.html.len(),
+                        self.html.len() + breaks,
+                        self.units + breaks,
+                    ));
+                }
                 for _ in 0..breaks {
                     self.html.push('\n');
                 }
                 self.units += breaks;
             }
         }
-        self.style(style);
-        for ch in text.chars() {
-            if self.units + ch.len_utf16() > self.limit {
+        for word in text.split_inclusive(char::is_whitespace) {
+            let width = word.encode_utf16().count();
+            if self.units + width > self.limit {
+                self.move_paragraph();
+            }
+            if width <= self.limit && self.units + width > self.limit {
                 self.finish_chunk();
-                self.style(style);
             }
-            match ch {
-                '<' => self.html.push_str("&lt;"),
-                '>' => self.html.push_str("&gt;"),
-                '&' => self.html.push_str("&amp;"),
-                _ => self.html.push(ch),
+            self.style(style);
+            for ch in word.chars() {
+                if self.units + ch.len_utf16() > self.limit {
+                    self.finish_chunk();
+                    self.style(style);
+                }
+                match ch {
+                    '<' => self.html.push_str("&lt;"),
+                    '>' => self.html.push_str("&gt;"),
+                    '&' => self.html.push_str("&amp;"),
+                    _ => self.html.push(ch),
+                }
+                self.units += ch.len_utf16();
             }
-            self.units += ch.len_utf16();
         }
     }
 }
@@ -117,7 +158,7 @@ fn link(url: &str) -> Option<Entity> {
 
 pub fn plain_chunks(question: &str, text: &str, limit: usize) -> Vec<String> {
     let mut out = Output::with_question(question, limit);
-    out.write(text, &[]);
+    out.write_paragraphs(text, &[]);
     out.finish()
 }
 
@@ -169,7 +210,10 @@ pub fn chunks(question: &str, markdown: &str, limit: usize) -> Vec<String> {
                         out.break_lines = 2;
                     }
                     // Loose Markdown list items end in a paragraph with a blank line.
-                    TagEnd::Item => out.break_lines = out.break_lines.max(1),
+                    TagEnd::Item => {
+                        out.item_boundary = true;
+                        out.break_lines = out.break_lines.max(1);
+                    }
                     TagEnd::Paragraph
                     | TagEnd::Heading(_)
                     | TagEnd::BlockQuote(_)
@@ -246,6 +290,32 @@ mod tests {
                 .all(|s| s.starts_with("<b>") && s.ends_with("</b>"))
         );
     }
+    #[test]
+    fn packs_whole_paragraphs_and_preserves_inline_entities() {
+        let parts = chunks(
+            "",
+            "Начало\n\n**Раз** и [два](https://example.org)\n\nКонец",
+            12,
+        );
+        assert_eq!(
+            parts,
+            [
+                "Начало",
+                "<b>Раз</b> и <a href=\"https://example.org/\">два</a>",
+                "Конец"
+            ]
+        );
+        assert_eq!(
+            plain_chunks("", "Один два\n\nТри 🌙", 12),
+            ["Один два", "Три 🌙"]
+        );
+        assert_eq!(chunks("", "Один\n\nДва\n\nТри", 9), ["Один\n\nДва", "Три"]);
+        assert_eq!(
+            chunks("", "Слово **раз два три**", 9),
+            ["Слово ", "<b>раз два </b>", "<b>три</b>"]
+        );
+    }
+
     #[test]
     fn preserves_paragraph_spacing_in_loose_lists_and_keeps_tight_lists_compact() {
         let markdown = "**Сейчас**\n\n- Рокси\n\n- Рина\n\n**После патча**\n\n1. Диски\n2. Команда";

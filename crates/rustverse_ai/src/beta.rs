@@ -430,7 +430,14 @@ pub async fn report_with_progress(
         }
         input
     });
-    let text = crate::write_report(tools, input, key, model, progress).await?;
+    let text = crate::write_report(
+        tools,
+        input,
+        crate::transport::Provider::new(key)?,
+        model,
+        progress,
+    )
+    .await?;
     let mut report =
         crate::format_report(&agent.name, &revision.previous, &revision.current, &text);
     if !assets.is_empty() {
