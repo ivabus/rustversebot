@@ -33,7 +33,7 @@ pub(crate) fn definitions() -> Vec<ToolSpec> {
     let category = json!({"type":"string","enum":["agents","w-engines","drive-discs","bangboo","enemies","tutorials"]});
     let language = json!({"type":"string","enum":["en","cn"]});
     let offset = json!({"type":["integer","null"],"minimum":0,"description":"Start at 0 or null. Copy next_offset to continue."});
-    let version = json!({"type":["string","null"],"description":"Exact revision or branch ('release' or 'beta'). For current live endgame use 'release', then its returned revision. Null reuses the pinned revision or defaults to the newest across both branches for questions. Reports start at cur."});
+    let version = json!({"type":["string","null"],"description":"Exact revision or branch ('release' or 'beta'). For a standalone agent build without a specified patch, or for current live endgame, use 'release', then its returned revision. Null reuses the pinned revision or defaults to the newest across both branches for questions. Reports start at cur."});
     let reference = json!({"type":"object","additionalProperties":false,"properties":{"source":{"type":"string"},"path":{"type":"string"}},"required":["source","path"]});
     let mut named = reference.clone();
     named["properties"]["name"] = json!({"type":"string","description":"Unique Rhai variable name, e.g. before or hits. Up to 64 bytes."});
@@ -54,7 +54,7 @@ pub(crate) fn definitions() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "search_gachabase",
-            description: "Search by name, alias, slug or ID. For a season boss use category=enemies and the monster ID from Nanoka (or its localized name). For a roster use category=agents, query='', offset=null: returns all matching agents at the pinned revision. Filter agents by specialty, element or both (AND), using catalog names in the selected language. Prefer entries with core skills when names collide.",
+            description: "Search by name, alias, slug or ID. For a season boss use category=enemies and the monster ID from Nanoka (or its localized name). For a roster use category=agents, query='', offset=null: returns all matching agents at the selected revision. Each row has beta_only: false if its ID is in release_revision, true if present only in the selected beta compared with the latest release, null if the comparison is unavailable. Filter agents by specialty, element or both (AND), using catalog names in the selected language. Prefer entries with core skills when names collide.",
             parameters: json!({"type":"object","additionalProperties":false,"properties":{
                 "category":category,"query":{"type":"string"},"language":language,"offset":offset,"version":version,
                 "specialty":{"type":["string","null"]},"element":{"type":["string","null"]}
@@ -71,7 +71,7 @@ pub(crate) fn definitions() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "compute",
-            description: "Run Rhai on this run's completed tool calls and optional numeric bindings. calls is a read-only array in completion order. Each call has name, args and result (including errors and prior compute results). Pass bindings: [] to use calls alone. Example after a season batch: calls[-1].result.results[0].season_id. Filter calls by name and args when reading several. Iterate JSON arrays by value and objects by key. obj.keys() lists keys; obj[key] reads a field. Local fn and array.push(value) are available. JSON integers retain integer arithmetic; multiply by 1.0 before fractional division. Each explicit binding reads an exact source and JSON pointer, with * segments to collect numbers across nested arrays (index order) and objects (key order), e.g. /rows/*/stats/*/value. Wildcard inputs include concrete paths and values in matches. Use its name or x0, x1, ... by position; bound numbers are floats. Return a finite number or a flat array of up to 64 numbers.",
+            description: "Run Rhai on this run's completed tool calls and optional numeric bindings. calls is a read-only array in completion order. Each call has name, args and result (including errors and prior compute results). Pass bindings: [] to use calls alone. Example after a season batch: calls[-1].result.results[0].season_id. Filter calls by name and args when reading several. Iterate JSON arrays by value and objects by key. obj.keys() lists keys; obj[key] reads a field. Local fn and array.push(value) are available. JSON integers retain integer arithmetic; multiply by 1.0 before fractional division. Each explicit binding reads an exact source and JSON pointer, with * segments to collect numbers across nested arrays (index order) and objects (key order), e.g. /rows/*/stats/*/value. Wildcard inputs include concrete paths and values in matches. For a GachaBase fragment, append the path inside its value to result.path (e.g. /base_stats/6/value). Bindings address the source document, so omit the response wrapper /result/value. Use its name or x0, x1, ... by position; bound numbers are floats. Return a finite number or a flat array of up to 64 numbers.",
             parameters: json!({"type":"object","additionalProperties":false,"properties":{"script":{"type":"string","description":"Rhai expression or short script, up to 2048 bytes."},"bindings":{"type":"array","maxItems":12,"items":{"anyOf":[named,reference]}}},"required":["script","bindings"]}),
         },
     ]
@@ -141,9 +141,11 @@ impl TurnReferences {
                     path: result["path"].as_str().map(str::to_owned),
                 });
             }
-            if let Some(version) = result["version"].as_str() {
-                self.revisions.insert(version.into());
-            }
+            self.revisions.extend(
+                ["version", "release_revision"]
+                    .iter()
+                    .filter_map(|k| result[k].as_str().map(str::to_owned)),
+            );
             if let Some(source) = result["source"].as_str() {
                 self.entries.insert(source.into());
             }
@@ -320,6 +322,34 @@ impl KitTools {
         Ok(self.timeline.as_ref().unwrap())
     }
 
+    async fn index(
+        &mut self,
+        category: Category,
+        language: Language,
+        revision: &str,
+    ) -> Result<&Index> {
+        Ok(
+            match self
+                .indexes
+                .entry((category, language, revision.to_owned()))
+            {
+                std::collections::hash_map::Entry::Occupied(e) => e.into_mut(),
+                std::collections::hash_map::Entry::Vacant(e) => e.insert(
+                    Index::load(&self.client, category, language.upstream(), revision).await?,
+                ),
+            },
+        )
+    }
+
+    async fn latest_release_agents(&mut self, language: Language) -> Result<&Index> {
+        let revision = self
+            .timeline()
+            .await?
+            .latest(Some("release"))
+            .context("No release revisions")?;
+        self.index(Category::Agents, language, &revision).await
+    }
+
     async fn call(&mut self, name: &str, args: Value) -> Result<Value> {
         match name {
             "list_endgame_seasons" | "get_endgame_season" | "get_endgame_seasons" => {
@@ -351,23 +381,39 @@ impl KitTools {
                 }
                 let q: Search = serde_json::from_value(args)?;
                 let version = self.version(q.version).await?;
-                let index = match self
-                    .indexes
-                    .entry((q.category, q.language, version.clone()))
-                {
-                    std::collections::hash_map::Entry::Occupied(e) => e.into_mut(),
-                    std::collections::hash_map::Entry::Vacant(e) => e.insert(
-                        Index::load(&self.client, q.category, q.language.upstream(), &version)
-                            .await?,
-                    ),
-                };
-                index.search(
+                let index = self.index(q.category, q.language, &version).await?;
+                let mut result = index.search(
                     q.category,
                     &q.query,
                     q.offset.unwrap_or_default(),
                     q.specialty.as_deref(),
                     q.element.as_deref(),
-                )
+                )?;
+                if q.category == Category::Agents && q.query.trim().is_empty() {
+                    let release = if version.starts_with("release_") {
+                        Some(index)
+                    } else {
+                        self.latest_release_agents(q.language)
+                            .await
+                            .inspect_err(|err| {
+                                log::warn!(
+                                    "Could not compare the beta roster against release: {err}"
+                                );
+                            })
+                            .ok()
+                    };
+                    result["release_revision"] = json!(release.map(|r| &r.revision));
+                    for agent in result["matches"]
+                        .as_array_mut()
+                        .expect("catalog matches are an array")
+                    {
+                        let id = agent["id"]
+                            .as_u64()
+                            .expect("catalog entry has a numeric ID");
+                        agent["beta_only"] = json!(release.map(|r| !r.contains(id)));
+                    }
+                }
+                Ok(result)
             }
             "get_gachabase_entry" => {
                 #[derive(Deserialize)]
@@ -694,6 +740,47 @@ mod tests {
                 "Dodge the attack after the teleport."
             );
         }
+    }
+
+    #[tokio::test]
+    async fn roster_distinguishes_beta_only_ids_and_reports_missing_release() {
+        let beta = "beta_3.4.5_42";
+        let release = "release_3.3.0_10";
+        let mut kit = KitTools::for_question(Client::new(), "Полный ростер");
+        // The same display name can occur on distinct IDs and must not merge them.
+        for (branch, patch, number, revision, entries) in [
+            ("beta", "3.4.5", 42, beta, vec![3, 4]),
+            ("release", "3.3.0", 10, release, vec![3]),
+        ] {
+            let layout = json!({"type":"data","nodes":[{"data":[{"language":1,"revisions":2},"en",
+                {"current":3},{"branch":4,"version":5,"design_revision":6},branch,patch,number]}]});
+            let rows = json!({"type":"chunk","data":[{"data":1},{"entries":2},entries,
+                {"id":5,"name":7,"slug":8,"search_data":8},{"id":6,"name":7,"slug":8,"search_data":8},
+                1641,9999,{"text":9},"phoenix","Phoenix"]});
+            let index = Index::decode(&format!("{layout}\n{rows}"), "en", revision).unwrap();
+            kit.indexes
+                .insert((Category::Agents, Language::En, revision.into()), index);
+        }
+        let roster = |version: &str| json!({"category":"agents","query":"","language":"en","version":version});
+        kit.timeline = Some(fixture_timeline(&[beta, release]));
+        let result = kit.call("search_gachabase", roster("beta")).await.unwrap();
+        assert_eq!(result["version"], beta);
+        assert_eq!(result["release_revision"], release);
+        assert_eq!(result["matches"][0]["id"], 1641);
+        assert_eq!(result["matches"][0]["beta_only"], false);
+        assert_eq!(result["matches"][1]["beta_only"], true);
+        assert_eq!(kit.version(None).await.unwrap(), beta);
+        let result = kit
+            .call("search_gachabase", roster("release"))
+            .await
+            .unwrap();
+        assert_eq!(result["total"], 1);
+        assert_eq!(result["matches"][0]["beta_only"], false);
+        kit.timeline = Some(fixture_timeline(&[beta]));
+        let result = kit.call("search_gachabase", roster(beta)).await.unwrap();
+        assert_eq!(result["total"], 2);
+        assert_eq!(result.get("release_revision"), Some(&Value::Null));
+        assert_eq!(result["matches"][0].get("beta_only"), Some(&Value::Null));
     }
 
     #[tokio::test]

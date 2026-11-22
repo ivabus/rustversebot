@@ -119,9 +119,11 @@ fn remember(item: &Value, refs: &mut BTreeSet<String>) {
                     .unwrap_or("");
                 refs.insert(format!("{source} {path}").trim_end().into());
             }
-            if let Some(version) = data["version"].as_str() {
-                refs.insert(version.to_owned());
-            }
+            refs.extend(
+                ["version", "release_revision"]
+                    .iter()
+                    .filter_map(|k| data[k].as_str().map(str::to_owned)),
+            );
             if let (Some(mode), Some(id)) = (data["mode"].as_str(), data["season_id"].as_u64()) {
                 refs.insert(format!("{mode} {id}"));
             }

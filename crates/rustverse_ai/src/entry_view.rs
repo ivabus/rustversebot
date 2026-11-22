@@ -157,7 +157,14 @@ pub(super) fn page(category: Category, entry: &Value, offset: usize) -> Result<V
             &["pieces", "description", "stats"],
         ),
         Category::Agents => (
-            &["name", "rarity_id", "element_ids", "specialty_id"],
+            &[
+                "name",
+                "rarity_id",
+                "element_ids",
+                "specialty_id",
+                "release_version",
+                "release_date",
+            ],
             "skills",
             &[],
         ),
@@ -216,7 +223,14 @@ pub(super) fn team(entry: &Value, offset: usize) -> Result<Value> {
     record_page(
         fields(
             entry,
-            &["name", "specialty_id", "element_ids", "faction_id"],
+            &[
+                "name",
+                "specialty_id",
+                "element_ids",
+                "faction_id",
+                "release_version",
+                "release_date",
+            ],
         ),
         "passives",
         records,
@@ -293,6 +307,18 @@ mod tests {
             "Full condition"
         );
         assert_eq!(rows[1]["description"], "Requires another Anomaly agent");
+    }
+
+    #[test]
+    fn agent_pages_surface_available_release_metadata() {
+        let agent = json!({"release_version":"3.3", "release_date":"2026-10-01"});
+        for view in [
+            page(Category::Agents, &agent, 0).unwrap(),
+            team(&agent, 0).unwrap(),
+        ] {
+            assert_eq!(view["release_version"], "3.3");
+            assert_eq!(view["release_date"], agent["release_date"]);
+        }
     }
 
     #[test]
