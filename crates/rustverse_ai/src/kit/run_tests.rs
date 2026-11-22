@@ -14,7 +14,7 @@ const SOURCE: &str = "agents/1601/en/beta_1.0.0_2/12/max";
 const QUESTION: &str = "Что изменится для второй комнаты?";
 const NOTES: &str = "Выбрали Кафку для второй комнаты из-за слабости к электричеству.";
 const FINAL: &str = "Для Кафки во второй комнате сезона 62053 проверено значение 42.";
-const EDITED: &str = "Во второй комнате сезона 62053 значение для Кафки — 42.";
+const EDITED: &str = "Проверенное значение для Кафки — 42 (вторая комната сезона 62053).";
 
 #[derive(Clone)]
 struct Fixture {
@@ -22,6 +22,7 @@ struct Fixture {
     summaries: Arc<AtomicUsize>,
     progress: watch::Receiver<PromptProgress>,
     editor_reply: Option<&'static str>,
+    review_reply: Option<&'static str>,
 }
 
 // A vision model with a smaller context window than the 384k compaction threshold.
@@ -72,14 +73,19 @@ impl HttpClientExt for Fixture {
                 let input = body["input"].to_string();
                 assert!(input.contains(QUESTION) && input.contains(FINAL));
                 assert!(!input.contains(SOURCE) && !input.contains(NOTES));
-                let reply = self
-                    .editor_reply
-                    .map(|text| response(&message(text), "copyedit"));
-                reply.unwrap_or_else(|| {
-                    json!({"id":"copyedit","object":"response","model":MODEL,
+                let (id, reply) = if body.to_string().contains("DIFFERENT") {
+                    assert!(input.contains(self.editor_reply.unwrap()));
+                    ("semantic_review", self.review_reply)
+                } else {
+                    ("copyedit", self.editor_reply)
+                };
+                reply
+                    .map(|text| response(&message(text), id))
+                    .unwrap_or_else(|| {
+                        json!({"id":id,"object":"response","model":MODEL,
                     "status":"incomplete","incomplete_details":{"reason":"max_output_tokens"},
                     "usage":{"input_tokens":18,"output_tokens":2,"total_tokens":20},"output":[]})
-                })
+                    })
             }
             "/v1/responses" => {
                 assert!(tokens(&body) < INPUT_LIMIT && body.get("tools").is_none());
@@ -219,7 +225,7 @@ impl Fixture {
 
 #[tokio::test]
 async fn long_research_keeps_the_branch_and_numeric_sources_across_compactions() {
-    check_answer(Some(EDITED), EDITED).await;
+    check_answer(Some(EDITED), Some("SAME"), EDITED).await;
 }
 
 #[tokio::test]
@@ -237,7 +243,9 @@ async fn langfuse_records_multimodal_research_tools_compaction_and_editing() {
     let root = tracing::info_span!(target: "rustverse::ai", "prompt");
     let session_id = "020d2bcc-6631-4535-9399-c439f12c0374";
     crate::telemetry::set_prompt_session(&root, session_id.to_owned());
-    check_answer(Some(EDITED), EDITED).instrument(root).await;
+    check_answer(Some(EDITED), Some("SAME"), EDITED)
+        .instrument(root)
+        .await;
     let spans = exporter.get_finished_spans().unwrap();
     let root = spans.iter().find(|s| s.name == "prompt").unwrap();
     assert!(spans.iter().all(|s| {
@@ -285,20 +293,29 @@ async fn langfuse_records_multimodal_research_tools_compaction_and_editing() {
 #[tokio::test]
 async fn rejected_or_unfinished_edits_deliver_the_researched_draft() {
     check_answer(
-        Some("Во второй комнате сезона 62053 значение для Кафки — 43."),
+        Some("Во второй комнате сезона 62053 значение для Кафки не равно 42."),
+        Some("DIFFERENT"),
         FINAL,
     )
     .await;
-    check_answer(None, FINAL).await;
+    check_answer(None, None, FINAL).await;
+    check_answer(Some(FINAL), None, FINAL).await;
+    check_answer(Some(EDITED), Some("не уверен"), FINAL).await;
+    check_answer(Some(EDITED), None, FINAL).await;
 }
 
-async fn check_answer(editor_reply: Option<&'static str>, expected: &str) {
+async fn check_answer(
+    editor_reply: Option<&'static str>,
+    review_reply: Option<&'static str>,
+    expected: &str,
+) {
     let (tx, rx) = watch::channel(PromptProgress::default());
     let fixture = Fixture {
         turns: Default::default(),
         summaries: Default::default(),
         progress: rx.clone(),
         editor_reply,
+        review_reply,
     };
     let mut tools = KitTools::for_question(Client::new(), QUESTION);
     tools.seasons = Some(SeasonTools::fixture());
@@ -339,9 +356,17 @@ async fn check_answer(editor_reply: Option<&'static str>, expected: &str) {
     assert_eq!(answer, expected);
     let summaries = fixture.summaries.load(Ordering::Relaxed);
     assert!(summaries >= 2);
-    assert_eq!(rx.borrow().turns, 16);
-    if editor_reply.is_some() {
-        assert_eq!(rx.borrow().tokens, Some((16 + summaries as u64) * 20));
+    let turns = if editor_reply.is_some_and(|text| text != FINAL) {
+        17
+    } else {
+        16
+    };
+    assert_eq!(rx.borrow().turns, turns);
+    if editor_reply == Some(FINAL) || review_reply.is_some() {
+        assert_eq!(
+            rx.borrow().tokens,
+            Some((turns as u64 + summaries as u64) * 20)
+        );
     }
     let refs = references.lock().await;
     assert!(

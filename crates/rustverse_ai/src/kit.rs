@@ -50,7 +50,7 @@ pub(crate) fn definitions() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "get_gachabase_entry",
-            description: "Read by ID. For enemies, null selector gives combat and codex descriptions. /enemy_variants contains variant affinities. For agents, @team summarizes Core Passive and Additional Ability; follow a path for exact conditions. Null returns compact pages, empty lists fields, a JSON pointer reads a field, @raw reads the full record. Name/ID or text:<phrase> finds paths. Agent levels default to skill 12 and max core. Use source and JSON pointers for compute. @changes lists diff groups.",
+            description: "Read by ID. For enemies, null selector gives combat and codex descriptions. /enemy_variants contains variant affinities. For agents, @team summarizes Core Passive and Additional Ability; follow a path for exact conditions. Null returns compact pages, empty lists fields, a JSON pointer reads a field, @raw reads the full record. Name/ID or text:<phrase> finds paths. Agent levels default to skill 12 and max core. Use source and JSON pointers for compute. Use @changes only for an agent, language and revision with diff groups in the supplied comparison report input.",
             parameters: json!({"type":"object","additionalProperties":false,"properties":{
                 "category":category,"id":{"type":"integer","minimum":1},"language":language,
                 "version":version,"selector":{"type":["string","null"]},"offset":offset,
