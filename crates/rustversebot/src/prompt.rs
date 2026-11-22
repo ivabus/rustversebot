@@ -1,6 +1,6 @@
 use crate::{
     BotState,
-    agent::{self, AgentRun, ChatAgent, Outcome, Status, topic},
+    agent::{self, AgentRun, Attachment, ChatAgent, Outcome, Status, topic},
     bot_templates::BotTemplateSender,
     db::PromptSession,
 };
@@ -39,13 +39,21 @@ async fn replied_session(msg: &Message, db: &crate::db::Db) -> Result<Option<Pro
     let Some(reply) = msg.reply_to_message().filter(|r| r.chat.id == msg.chat.id) else {
         return Ok(None);
     };
-    db.prompt_session(
-        msg.chat.id.0,
-        topic(msg).map(|id| id.0.0),
-        reply.id.0,
-        crate::agent_access::sender(msg).and_then(|u| i64::try_from(u.id.0).ok()),
-    )
-    .await
+    let mut session = db
+        .prompt_session(
+            msg.chat.id.0,
+            topic(msg).map(|id| id.0.0),
+            reply.id.0,
+            crate::agent_access::sender(msg).and_then(|u| i64::try_from(u.id.0).ok()),
+        )
+        .await?;
+    if reply.document().is_some()
+        && let Some(turn) = session.as_mut().and_then(|s| s.turns.last_mut())
+    {
+        turn.answer
+            .push_str("\n\nПользователь отвечает на PNG-инфографику, отправленную с этим ответом.");
+    }
+    Ok(session)
 }
 
 pub async fn follow_up(bot: Bot, msg: Message, state: std::sync::Arc<BotState>) -> Result<()> {
@@ -99,23 +107,45 @@ impl ChatAgent for Question {
 
     async fn execute(&self, run: &mut AgentRun<'_>, state: &BotState) -> Result<Outcome> {
         let model = run.model().to_string();
-        let answer = run
+        let (answer, attachment) = run
             .track(self.initial_status(), |tx| async move {
                 let key = rustverse_ai::api_key()?;
-                rustverse_ai::continue_prompt_with_references(
+                let answer = rustverse_ai::continue_prompt_with_references(
                     &state.beta.client,
                     &key,
                     &model,
                     &self.text,
                     &self.session.turns,
-                    tx,
+                    tx.clone(),
                 )
-                .await
+                .await?;
+                let attachment = if let Some(brief) = &answer.infographic {
+                    match rustverse_ai::infographic::create(
+                        &key,
+                        &model,
+                        brief,
+                        &answer.text,
+                        tx,
+                        rustverse_images::render_infographic,
+                    )
+                    .await
+                    {
+                        Ok(png) => Attachment::Infographic(png),
+                        Err(_) => {
+                            log::warn!("Could not produce a reviewed infographic");
+                            Attachment::Unavailable
+                        }
+                    }
+                } else {
+                    Attachment::None
+                };
+                Ok((answer, attachment))
             })
             .await?;
         Ok(Outcome::Answer {
             text: answer.text,
             references: answer.references,
+            attachment,
             author: self.author,
             parent: self.session.last_answer,
         })

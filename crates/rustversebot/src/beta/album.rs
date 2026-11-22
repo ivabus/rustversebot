@@ -76,7 +76,8 @@ async fn upload_pages(
     pages: &[Page],
     caption: &str,
     photos: bool,
-) -> Result<(), teloxide::RequestError> {
+    reply_to: Option<i32>,
+) -> Result<Option<i32>, teloxide::RequestError> {
     use telegram_http::multipart::{Form, Part};
     use teloxide::types::{False, ResponseParameters, True};
     #[derive(serde::Deserialize)]
@@ -85,8 +86,7 @@ async fn upload_pages(
         Sent {
             #[serde(rename = "ok")]
             _ok: True,
-            #[serde(rename = "result")]
-            _result: serde::de::IgnoredAny,
+            result: serde_json::Value,
         },
         Rejected {
             #[serde(rename = "ok")]
@@ -97,6 +97,12 @@ async fn upload_pages(
     }
 
     let mut form = Form::new().text("chat_id", chat.0.to_string());
+    if let Some(id) = reply_to {
+        form = form.text(
+            "reply_parameters",
+            serde_json::json!({"message_id":id}).to_string(),
+        );
+    }
     if let Some(thread) = thread {
         form = form.text("message_thread_id", thread.0.0.to_string());
     }
@@ -144,7 +150,9 @@ async fn upload_pages(
             raw: body.into(),
         })?;
     match reply {
-        Reply::Sent { .. } => Ok(()),
+        Reply::Sent { result, .. } => Ok(result["message_id"]
+            .as_i64()
+            .and_then(|id| i32::try_from(id).ok())),
         Reply::Rejected {
             description,
             parameters,
@@ -167,6 +175,45 @@ pub(super) async fn send_album(
     caption: &str,
     settings: &SchedulerSettings,
 ) -> Result<()> {
+    deliver_pages(bot, chat, thread, pages, caption, settings, None)
+        .await
+        .map(|_| ())
+}
+
+pub(crate) async fn send_infographic(
+    bot: &Bot,
+    chat: ChatId,
+    thread: Option<ThreadId>,
+    reply_to: i32,
+    png: Vec<u8>,
+) -> Result<i32> {
+    let page = Page {
+        filename: "infographic.png".into(),
+        png: png.into(),
+        photo: false,
+    };
+    deliver_pages(
+        bot,
+        chat,
+        thread,
+        &[page],
+        "",
+        &SchedulerSettings::from_env(),
+        Some(reply_to),
+    )
+    .await?
+    .ok_or_else(|| anyhow::anyhow!("Telegram did not return a document message ID"))
+}
+
+async fn deliver_pages(
+    bot: &Bot,
+    chat: ChatId,
+    thread: Option<ThreadId>,
+    pages: &[Page],
+    caption: &str,
+    settings: &SchedulerSettings,
+    reply_to: Option<i32>,
+) -> Result<Option<i32>> {
     anyhow::ensure!(
         (1..=ALBUM_LIMIT).contains(&pages.len()),
         "invalid album size"
@@ -175,9 +222,9 @@ pub(super) async fn send_album(
     let mut photos = pages.iter().all(|page| page.photo);
     loop {
         tokio::time::sleep(settings.request_spacing).await;
-        let result = upload_pages(bot, chat, thread, pages, caption, photos).await;
+        let result = upload_pages(bot, chat, thread, pages, caption, photos, reply_to).await;
         match result {
-            Ok(()) => return Ok(()),
+            Ok(id) => return Ok(id),
             Err(teloxide::RequestError::Api(error))
                 if photos
                     && (error == teloxide::ApiError::ImageProcessFailed

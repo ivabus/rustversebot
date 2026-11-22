@@ -32,7 +32,15 @@ impl LiveMessage {
 }
 
 fn priority_stage(stage: PromptStage) -> Option<PromptStage> {
-    matches!(stage, PromptStage::Compacting | PromptStage::Editing).then_some(stage)
+    matches!(
+        stage,
+        PromptStage::Compacting
+            | PromptStage::Editing
+            | PromptStage::Designing
+            | PromptStage::Rendering
+            | PromptStage::ReviewingImage
+    )
+    .then_some(stage)
 }
 
 async fn next_update(

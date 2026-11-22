@@ -126,8 +126,8 @@ mod tests {
             .unwrap();
         let dimension =
             |png: &[u8], index| u32::from_be_bytes(png[index..index + 4].try_into().unwrap());
-        assert_eq!(dimension(&short, 16), 1280);
-        assert_eq!(dimension(&long, 16), 1280);
+        assert_eq!(dimension(&short, 16), 2560);
+        assert_eq!(dimension(&long, 16), 2560);
         assert!(dimension(&long, 20) > dimension(&short, 20) * 3);
     }
 }

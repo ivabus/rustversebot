@@ -79,6 +79,7 @@ const TEMPLATES: &[EmbeddedTemplate] = &[
     template!("beta_limit", "txt"),
     template!("beta_usage", "txt"),
     template!("prompt_usage", "txt"),
+    template!("infographic_unavailable", "txt"),
     template!("diff_picker", "txt"),
     template!("diff_button", "txt"),
     template!("ai_limit", "txt"),

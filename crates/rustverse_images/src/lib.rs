@@ -1,5 +1,8 @@
 //! Typst → SVG → PNG rendering. Each invocation owns its input files and processes.
 mod beta;
+mod infographic;
+pub use infographic::render_infographic;
+const HIRES_WIDTH: &str = "2560";
 pub use beta::beta_page;
 
 use std::{
@@ -256,10 +259,10 @@ pub async fn render(
     }
     let typst = std::env::var_os("TYPST_BIN").unwrap_or_else(|| "typst".into());
     let resvg = std::env::var_os("RESVG_BIN").unwrap_or_else(|| "resvg".into());
-    let sizing = if with_images {
-        ["-z", "4"]
-    } else {
-        ["--width", "1280"]
+    let sizing = match template {
+        // The 20 cm season pages are already wider than 2560 px at this zoom.
+        Template::DeadlyInfo | Template::ShiyuInfo => ["-z", "4"],
+        _ => ["--width", HIRES_WIDTH],
     };
     pipeline(root, &typst, &resvg, sizing).await
 }

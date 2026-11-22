@@ -100,22 +100,7 @@ impl<'a> BotTemplateSender<'a> {
         keyboard: InlineKeyboardMarkup,
     ) -> anyhow::Result<Message> {
         let rendered = self.templates.render(caption_template, data)?;
-        validate_length(
-            caption_template,
-            &rendered.text,
-            CAPTION_LIMIT,
-            "photo caption",
-        )?;
-        let mode = rendered.parse_mode();
-        let request = self
-            .bot
-            .send_photo(chat_id, photo)
-            .caption(rendered.text)
-            .reply_markup(keyboard);
-        match mode {
-            Some(mode) => Ok(request.parse_mode(mode).await?),
-            None => Ok(request.await?),
-        }
+        send_card(self.bot, chat_id, photo, rendered, Some(keyboard)).await
     }
 
     pub async fn send_rendered_message(
@@ -188,14 +173,45 @@ pub async fn send_photo_with_rendered(
     photo: InputFile,
     rendered: RenderedTemplate,
 ) -> anyhow::Result<Message> {
-    validate_length("composed", &rendered.text, CAPTION_LIMIT, "photo caption")?;
+    send_card(bot, chat_id, photo, rendered, None).await
+}
 
+async fn send_card(
+    bot: &Bot,
+    chat_id: ChatId,
+    photo: InputFile,
+    rendered: RenderedTemplate,
+    keyboard: Option<InlineKeyboardMarkup>,
+) -> anyhow::Result<Message> {
+    validate_length("composed", &rendered.text, CAPTION_LIMIT, "photo caption")?;
     let mode = selected_parse_mode(&rendered);
-    let request = bot.send_photo(chat_id, photo).caption(rendered.text);
-    match mode {
-        Some(mode) => Ok(request.parse_mode(mode).await?),
-        None => Ok(request.await?),
+    let mut request = bot
+        .send_photo(chat_id, photo.clone())
+        .caption(rendered.text.clone());
+    if let Some(mode) = mode {
+        request = request.parse_mode(mode);
     }
+    if let Some(keyboard) = keyboard.clone() {
+        request = request.reply_markup(keyboard);
+    }
+    match request.await {
+        Ok(message) => return Ok(message),
+        Err(teloxide::RequestError::Api(error))
+            if error == teloxide::ApiError::ImageProcessFailed
+                || matches!(error,teloxide::ApiError::Unknown(ref s) if s.contains("PHOTO_INVALID_DIMENSIONS") || s.contains("PHOTO_TOO_BIG")) =>
+            {}
+        Err(error) => return Err(error.into()),
+    }
+    let mut document = bot
+        .send_document(chat_id, photo.file_name("card.png"))
+        .caption(rendered.text);
+    if let Some(mode) = mode {
+        document = document.parse_mode(mode);
+    }
+    if let Some(keyboard) = keyboard {
+        document = document.reply_markup(keyboard);
+    }
+    Ok(document.await?)
 }
 
 fn selected_parse_mode(rendered: &RenderedTemplate) -> Option<ParseMode> {

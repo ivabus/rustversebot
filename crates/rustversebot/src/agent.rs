@@ -48,9 +48,16 @@ pub(crate) enum Outcome {
         parent: Option<i32>,
         author: Option<i64>,
         references: rustverse_ai::TurnReferences,
+        attachment: Attachment,
     },
     Notice(RenderedTemplate),
     MediaDelivered,
+}
+
+pub(crate) enum Attachment {
+    None,
+    Infographic(Vec<u8>),
+    Unavailable,
 }
 
 pub(crate) trait ChatAgent: Send + Sync + 'static {
@@ -202,9 +209,10 @@ impl AgentRun<'_> {
                 parent,
                 author,
                 references,
+                attachment,
             }) => {
                 self.totals.stage = PromptStage::Complete;
-                (text, parent, author, references)
+                (text, parent, author, references, attachment)
             }
             Err(error) => {
                 let message =
@@ -214,13 +222,19 @@ impl AgentRun<'_> {
                     return Ok(());
                 }
                 self.totals.stage = PromptStage::Failed;
-                (message.text, None, None, Default::default())
+                (
+                    message.text,
+                    None,
+                    None,
+                    Default::default(),
+                    Attachment::None,
+                )
             }
         };
         let Status::Question(question) = status else {
             anyhow::bail!("expected question for text answer")
         };
-        let (text, parent, author, references) = answer;
+        let (text, parent, author, references, attachment) = answer;
         let parts = messages(
             templates,
             &self.model.to_string(),
@@ -236,9 +250,11 @@ impl AgentRun<'_> {
             references,
         };
         let mut first_saved = None;
+        let mut first_delivered = None;
         let address = self.output.address;
         for part in parts {
             let id = self.output.send(part, edit.take()).await?.0;
+            first_delivered.get_or_insert(id);
             if self.totals.stage == PromptStage::Complete {
                 let saved = match first_saved {
                     Some(first) => db.save_prompt_part(address.chat.0, first, id).await,
@@ -259,6 +275,37 @@ impl AgentRun<'_> {
                     }
                     Err(error) => log::error!("Could not cache prompt message {id}: {error}"),
                 }
+            }
+        }
+        match attachment {
+            Attachment::None => {}
+            Attachment::Infographic(png) => {
+                let first = first_delivered.context("Missing delivered text")?;
+                match crate::beta::send_infographic(
+                    self.bot(),
+                    address.chat,
+                    address.thread,
+                    first,
+                    png,
+                )
+                .await
+                {
+                    Ok(id) => {
+                        if let Some(saved) = first_saved {
+                            db.save_prompt_part(address.chat.0, saved, id).await?;
+                        }
+                    }
+                    Err(_) => {
+                        self.output
+                            .send(templates.render("infographic_unavailable", &())?, None)
+                            .await?;
+                    }
+                }
+            }
+            Attachment::Unavailable => {
+                self.output
+                    .send(templates.render("infographic_unavailable", &())?, None)
+                    .await?;
             }
         }
         Ok(())
