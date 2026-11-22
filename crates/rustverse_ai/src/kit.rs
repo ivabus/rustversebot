@@ -17,7 +17,7 @@ use crate::{
     catalog::{self, Category, Index},
     change_groups::Groups,
     compute::Calculation,
-    gachabase::{Comparison, Snapshots, recent_revisions},
+    gachabase::{Comparison, Snapshots, Timeline, TimelineQuery},
 };
 
 pub(crate) const PAGE_CHARS: usize = 4096;
@@ -43,6 +43,14 @@ pub(crate) fn definitions() -> Vec<ToolSpec> {
             name: "list_recent_revisions",
             description: "Recent GachaBase design revisions, newest first, up to ten each for beta and release.",
             parameters: json!({"type":"object","properties":{},"required":[],"additionalProperties":false}),
+        },
+        ToolSpec {
+            name: "list_revision_timeline",
+            description: "Find historical GachaBase design revisions by branch. Null version or a series (1.x, 1.4) lists versions with first and last archived builds. An exact patch (1.4.0) lists its individual revisions. Entries start with the oldest. Follow next_offset. Pass an exact revision to search_gachabase or get_gachabase_entry. design_at is the UTC timestamp of the design build.",
+            parameters: json!({"type":"object","additionalProperties":false,"properties":{
+                "branch":{"type":"string","enum":["release","beta"]},
+                "version":{"type":["string","null"]},"offset":offset
+            },"required":["branch","version","offset"]}),
         },
         ToolSpec {
             name: "search_gachabase",
@@ -152,7 +160,7 @@ pub(crate) struct KitTools {
     report_changes: HashMap<(u64, Language, String), Groups>,
     seasons: Option<crate::seasons::SeasonTools>,
     pinned: Option<String>,
-    recent: Option<Vec<String>>,
+    timeline: Option<Timeline>,
 }
 
 impl KitTools {
@@ -166,7 +174,7 @@ impl KitTools {
             seasons: None,
             pinned: None,
             report_changes: HashMap::new(),
-            recent: None,
+            timeline: None,
         }
     }
 
@@ -305,11 +313,11 @@ impl KitTools {
         tokio::task::spawn_blocking(move || prepared.run(calls)).await?
     }
 
-    async fn revisions(&mut self) -> Result<&[String]> {
-        if self.recent.is_none() {
-            self.recent = Some(recent_revisions(&self.client).await?);
+    async fn timeline(&mut self) -> Result<&Timeline> {
+        if self.timeline.is_none() {
+            self.timeline = Some(Timeline::load(&self.client).await?);
         }
-        Ok(self.recent.as_deref().unwrap_or_default())
+        Ok(self.timeline.as_ref().unwrap())
     }
 
     async fn call(&mut self, name: &str, args: Value) -> Result<Value> {
@@ -323,7 +331,11 @@ impl KitTools {
             }
             "list_recent_revisions" => {
                 ensure!(args == json!({}), "Expected empty arguments");
-                Ok(json!(self.revisions().await?))
+                Ok(json!(self.timeline().await?.recent()))
+            }
+            "list_revision_timeline" => {
+                let query: TimelineQuery = serde_json::from_value(args)?;
+                self.timeline().await?.page(query)
             }
             "search_gachabase" => {
                 #[derive(Deserialize)]
@@ -459,18 +471,15 @@ impl KitTools {
     async fn version(&mut self, requested: Option<String>) -> Result<String> {
         let version = match requested.or_else(|| self.pinned.clone()) {
             None => self
-                .revisions()
+                .timeline()
                 .await?
-                .first()
-                .context("No beta or release revisions")?
-                .clone(),
+                .latest(None)
+                .context("No beta or release revisions")?,
             Some(branch) if matches!(branch.as_str(), "beta" | "release") => self
-                .revisions()
+                .timeline()
                 .await?
-                .iter()
-                .find(|s| s.split('_').next() == Some(branch.as_str()))
-                .context("No revision for requested branch")?
-                .clone(),
+                .latest(Some(&branch))
+                .context("No revision for requested branch")?,
             Some(exact) => exact,
         };
         crate::beta::revision_group(&version)?;
@@ -590,6 +599,62 @@ mod tests {
 
     const PAGE: &str = "https://zzz.gachabase.net/diff/agents/1601/sunbringer?prev=beta_3.4.5_20694646&cur=beta_3.4.5_20699967";
 
+    fn fixture_timeline(newest_first: &[&str]) -> Timeline {
+        let rows: Vec<_> = newest_first.iter().rev().enumerate().map(|(time, name)| {
+            let parts: Vec<_> = name.split('_').collect();
+            json!({"branch":parts[0],"version":parts[1],"design_revision":parts[2].parse::<u64>().unwrap(),"design_timestamp":time})
+        }).collect();
+        Timeline::from_rows(&json!(rows)).unwrap()
+    }
+
+    #[tokio::test]
+    async fn historical_timeline_pages_versions_and_keeps_the_current_release() {
+        let mut rows: Vec<_> = (1..=26)
+            .map(|id| {
+                json!({
+                    "branch":"release","version":"1.4.0","design_revision":id,"design_timestamp":id
+                })
+            })
+            .collect();
+        for (branch, version, id) in [
+            ("release", "1.4.0", 1),
+            ("release", "1.40.0", 18),
+            ("beta", "1.4.0", 27),
+            ("creator", "1.4.0", 28),
+            ("release", "3.3.0", 30),
+        ] {
+            rows.push(json!({"branch":branch,"version":version,"design_revision":id,"design_timestamp":id}));
+        }
+        let mut kit = KitTools::for_question(Client::new(), "История 1.x");
+        kit.timeline = Some(Timeline::from_rows(&json!(rows)).unwrap());
+        let query = |version: &str, offset: usize| json!({"branch":"release","version":version,"offset":offset});
+        let tool = "list_revision_timeline";
+        let series = kit.call(tool, query("1.x", 0)).await.unwrap();
+        assert_eq!(series["total"], 2);
+        let patch = kit.call(tool, query("1.4", 0)).await.unwrap();
+        assert_eq!(patch["total"], 1);
+        assert_eq!(
+            patch["entries"][0],
+            json!({
+                "version":"1.4.0","revision_count":26,
+                "first":{"revision":"release_1.4.0_1","design_at":"1970-01-01T00:00:01Z"},
+                "last":{"revision":"release_1.4.0_26","design_at":"1970-01-01T00:00:26Z"}
+            })
+        );
+        let first = kit.call(tool, query("1.4.0", 0)).await.unwrap();
+        assert_eq!(first["next_offset"], 24);
+        let second = kit.call(tool, query("1.4.0", 24)).await.unwrap();
+        assert_eq!(second["entries"][0]["revision"], "release_1.4.0_25");
+        assert!(second["next_offset"].is_null());
+        assert_eq!(kit.call(tool, query("9.x", 0)).await.unwrap()["total"], 0);
+        assert!(kit.call(tool, query("1..4", 0)).await.is_err());
+        assert!(kit.call(tool, query("1.4.0", 27)).await.is_err());
+        assert_eq!(
+            kit.version(Some("release".into())).await.unwrap(),
+            "release_3.3.0_30"
+        );
+    }
+
     #[tokio::test]
     async fn enemy_search_and_combat_description_use_the_requested_release() {
         let version = "release_3.4.0_42";
@@ -599,7 +664,7 @@ mod tests {
             {"id":4,"slug":5,"name":6,"search_data":7},40009,"integrated-girtablullu",{"text":7},"Integrated - Girtablullu"]});
         let index = Index::decode(&format!("{layout}\n{rows}"), "en", version).unwrap();
         let mut kit = KitTools::for_question(Client::new(), "Текущий штурм");
-        kit.recent = Some(vec!["beta_3.5.0_99".into(), version.into()]);
+        kit.timeline = Some(fixture_timeline(&["beta_3.5.0_99", version]));
         kit.indexes
             .insert((Category::Enemies, Language::En, version.into()), index);
         let source = format!("enemies/40009/en/{version}/raw");
@@ -637,7 +702,7 @@ mod tests {
         let release = "release_3.3.0_10";
         for (newest, older, branch) in [(beta, release, "release"), (release, beta, "beta")] {
             let mut kit = KitTools::for_question(Client::new(), "Как работает навык?");
-            kit.recent = Some(vec![newest.into(), older.into()]);
+            kit.timeline = Some(fixture_timeline(&[newest, older]));
             assert_eq!(kit.version(None).await.unwrap(), newest);
             assert_eq!(kit.version(Some(branch.into())).await.unwrap(), older);
             assert_eq!(kit.version(None).await.unwrap(), newest);

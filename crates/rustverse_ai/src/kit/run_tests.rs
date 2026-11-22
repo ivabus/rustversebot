@@ -153,7 +153,9 @@ impl HttpClientExt for Fixture {
 
 impl Fixture {
     fn frames(&self, body: &Value) -> String {
-        assert_eq!(body["tools"].as_array().unwrap().len(), 7);
+        let tools = body["tools"].as_array().unwrap();
+        assert_eq!(tools.len(), 8);
+        assert!(tools.iter().any(|t| t["name"] == "list_revision_timeline"));
         let n = self.turns.fetch_add(1, Ordering::Relaxed) + 1;
         let input = body["input"].to_string();
         assert!(input.contains(QUESTION));

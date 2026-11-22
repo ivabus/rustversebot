@@ -155,6 +155,7 @@ fn result_status(name: &str, value: &Value) -> &'static str {
         "get_gachabase_entry" => value.pointer("/result/matches"),
         "list_endgame_seasons" => value.get("seasons"),
         "list_recent_revisions" => Some(value),
+        "list_revision_timeline" => value.get("entries"),
         _ => None,
     };
     if rows.and_then(Value::as_array).is_some_and(Vec::is_empty) {
