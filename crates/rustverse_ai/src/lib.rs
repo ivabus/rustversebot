@@ -12,6 +12,7 @@ mod gachabase;
 mod kit;
 pub use kit::{SeasonReference, TurnReferences};
 mod model;
+pub mod players;
 pub use model::ModelSelection;
 mod progress;
 mod seasons;
@@ -20,7 +21,7 @@ mod transport;
 use progress::Preview;
 pub use progress::{PromptProgress, PromptStage};
 
-use std::time::Duration;
+use std::{sync::Arc, time::Duration};
 
 use anyhow::{Context, Result, bail, ensure};
 use reqwest::Client;
@@ -236,6 +237,7 @@ pub async fn prompt(
         model,
         question.into(),
         &[],
+        None,
         preview.map(Preview::Text),
     )
     .await
@@ -367,12 +369,25 @@ pub async fn prompt_with_images(
     history: &[ImagePromptTurn],
     progress: tokio::sync::watch::Sender<PromptProgress>,
 ) -> Result<QuestionAnswer> {
+    prompt_with_chat_players(client, key, model, question, history, None, progress).await
+}
+
+pub async fn prompt_with_chat_players(
+    client: &Client,
+    key: &str,
+    model: &str,
+    question: PromptInput,
+    history: &[ImagePromptTurn],
+    players: Option<Arc<dyn players::ChatPlayerData>>,
+    progress: tokio::sync::watch::Sender<PromptProgress>,
+) -> Result<QuestionAnswer> {
     question_run(
         client,
         key,
         model,
         question,
         history,
+        players,
         Some(Preview::Progress(progress)),
     )
     .await
@@ -384,6 +399,7 @@ async fn question_run(
     model: &str,
     question: PromptInput,
     history: &[ImagePromptTurn],
+    players: Option<Arc<dyn players::ChatPlayerData>>,
     preview: Option<Preview>,
 ) -> Result<QuestionAnswer> {
     ensure!(
@@ -393,6 +409,14 @@ async fn question_run(
     let instructions = "Ты помощник по Zenless Zone Zero. Отвечай на языке вопроса.
 Игрок может приложить одно или несколько изображений. Учитывай все скриншоты в порядке отправки и отвечай текстом.
 Для персонального подбора используй видимый ростер. Если важная деталь неразборчива, попроси уточнить её текстом или прислать крупный план.
+Обращайся к get_player_profile и get_player_runs только и исключительно когда пользователь явно просит составить команды для себя или указанного игрока текущего чата либо проанализировать его проигранный или неудачный ран.
+Во всех остальных случаях никогда не вызывай эти инструменты и не используй прежние персональные данные из диалога. Это относится и к вопросам «кто я?», «какие у меня агенты?», «покажи последние раны», общим вопросам о командах и обзорам сезона.
+Проверяй цель текущей реплики с учётом ветки: явное уточнение к тому же подбору или разбору продолжает задачу. При неясной цели сперва уточни её без доступа к данным.
+Используй только нужный инструмент и только для указанного игрока. Для себя передай player=null, для другого игрока — его игровой ник или UID. При нескольких совпадениях уточни аккаунт.
+get_player_profile возвращает автора запроса, выбранный игровой аккаунт и известную часть его ростера по шоукейсу и прохождениям. Имена для неизвестных ID проверь в каталоге агентов нужной ревизии.
+get_player_runs возвращает сохранённые снимки HoYoLAB. Сверяй режим, сезон, комнату и цель игрока. Если нужной попытки нет или по снимку нельзя установить причину поражения, скажи об этом и попроси результат или скриншот.
+Отсутствие агента в истории не доказывает, что у игрока его нет. Учитывай дополнения игрока, а при явном ограничении на скриншот или список соблюдай его.
+Если у автора несколько UID, используй указанный им аккаунт или уточни выбор. Составы разных аккаунтов и участников храни раздельно.
 Если игрок прислал только изображения, учитывай предыдущий вопрос. Если цель остаётся неясной, уточни её.
 Если игрок просит подобрать команду, дай рекомендацию по известным условиям.
 Для выделений, ссылок, цитат и кода используй обычный Markdown. Бот преобразует его в Telegram HTML.
@@ -440,7 +464,8 @@ async fn question_run(
 Для Sheer DMG используй Sheer Force и Кзащиты = 1. Аномалии и Хаос считай отдельными событиями по правилам эффекта;
 для обычной аномалии учитывай ATK, коэффициент эффекта, знание аномалии (AP / 100), коэффициент уровня и доли накопления агентов.
 Крит для аномалии учитывай только при явной механике, которая его разрешает.";
-    let tools = kit::KitTools::for_question(client.clone(), &question.text);
+    let mut tools = kit::KitTools::for_question(client.clone(), &question.text);
+    tools.players = players;
     let references = tools.references.clone();
     let text = run_agent(
         transport::Provider::new(key)?,

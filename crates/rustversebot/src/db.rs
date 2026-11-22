@@ -5,9 +5,10 @@ use std::collections::HashMap;
 use uuid::Uuid;
 
 mod admin;
+pub(crate) mod players;
 pub(crate) use admin::AiFeature;
 
-const SCHEMA_VERSION: i64 = 16;
+const SCHEMA_VERSION: i64 = 17;
 
 #[cfg_attr(test, derive(Default))]
 pub struct DeliveredTurn<'a> {
@@ -59,6 +60,7 @@ pub struct SeasonEvent {
 }
 
 /// Async persistence backed by a local libSQL database.
+#[derive(Clone)]
 pub struct Db {
     connection: Connection,
 }
@@ -373,6 +375,11 @@ impl Db {
                     params![root.get::<i64>(0)?, root.get::<Option<i32>>(1)?, root.get::<i32>(2)?, Uuid::new_v4().to_string()]).await?;
             }
             tx.execute_batch("PRAGMA user_version=16;").await?;
+        }
+        if version < 17 {
+            tx.execute_batch(include_str!("db/roster.sql"))
+                .await
+                .context("collecting agents from existing endgame results")?;
         }
         tx.commit().await.context("committing migrations")?;
         Ok(())
@@ -894,8 +901,10 @@ impl Db {
     pub async fn cache_avatars(&self, uid: &str, names: &[(i64, &str)]) -> anyhow::Result<()> {
         let conn = self.connection()?;
         let tx = conn.transaction().await?;
-        for (id, name) in names {
-            tx.execute("INSERT OR REPLACE INTO avatar_cache(uid,avatar_id,name,updated_at) VALUES(?1,?2,?3,datetime('now'))",params![uid,*id,*name]).await?;
+        for &(id, name) in names.iter().filter(|(id, _)| *id > 0) {
+            tx.execute("INSERT INTO avatar_cache(uid,avatar_id,name) VALUES(?1,?2,?3)
+                ON CONFLICT(uid,avatar_id) DO UPDATE SET name=excluded.name,updated_at=datetime('now')
+                WHERE excluded.name<>''",params![uid,id,name]).await?;
         }
         tx.commit().await?;
         Ok(())
@@ -906,11 +915,12 @@ impl Db {
         avatar_id: i64,
     ) -> anyhow::Result<Option<String>> {
         self.optional_string(
-            "SELECT name FROM avatar_cache WHERE uid=?1 AND avatar_id=?2",
+            "SELECT name FROM avatar_cache WHERE uid=?1 AND avatar_id=?2 AND name<>''",
             params![uid, avatar_id],
         )
         .await
     }
+
     pub async fn is_checkpoint_posted(
         &self,
         chat_id: i64,
@@ -1246,6 +1256,88 @@ mod tests {
             .err()
             .expect("remote databases must be rejected");
         assert!(error.to_string().contains("local file: URL"));
+    }
+
+    #[tokio::test]
+    async fn player_rosters_recover_history_and_follow_each_registered_account() {
+        let db = Db::new_test().await.unwrap();
+        db.connection
+            .execute_batch(
+                "DROP TRIGGER collect_played_agents;
+            DROP VIEW played_agents; PRAGMA user_version=16;",
+            )
+            .await
+            .unwrap();
+        for (chat, author, uid) in [(1, 10, "A"), (1, 10, "B"), (1, 20, "C"), (2, 10, "D")] {
+            db.add_user(chat, author, uid, Some(uid)).await.unwrap();
+        }
+        db.cache_avatars("A", &[(1, "One"), (2, "Two")])
+            .await
+            .unwrap();
+        let da = r#"{"list":[{"avatar_list":[{"id":2},{"id":3}],"buddy":{"id":99}}],
+            "hard_list":[{"avatar_list":[{"id":4},{"id":3},{"id":0}]}]}"#;
+        db.insert_result("A", "deadly_assault", "old", "end", 1, da)
+            .await
+            .unwrap();
+        db.insert_result("A", "deadly_assault", "old", "end", 2, "{}")
+            .await
+            .unwrap();
+        db.insert_result("A", "shiyu_defense", "old", "end", 1, "bad json")
+            .await
+            .unwrap();
+        db.migrate().await.unwrap();
+
+        let sd = r#"{"fourth_layer_detail":{"layer_challenge_info_list":[{"avatar_list":[{"id":5}]}]},
+            "fitfh_layer_detail":{"layer_challenge_info_list":[{"avatar_list":[{"id":3}]},
+            {"avatar_list":[{"id":6}],"buddy":{"id":98}}]}}"#;
+        for _ in 0..2 {
+            db.insert_result("A", "shiyu_defense", "new", "end", 2, sd)
+                .await
+                .unwrap();
+        }
+        db.cache_avatars("A", &[(3, "Three"), (2, "")])
+            .await
+            .unwrap();
+        for (uid, agent) in [("C", 11), ("D", 12)] {
+            db.cache_avatars(uid, &[(agent, "Other")]).await.unwrap();
+        }
+        db.connection
+            .execute("DELETE FROM endgame_results", ())
+            .await
+            .unwrap();
+        use rustverse_ai::players::{ChatPlayerData, PlayerQuery};
+        let players = players::ChatPlayers {
+            db: db.clone(),
+            chat: 1,
+            author: 10,
+            display_name: "Tester".into(),
+        };
+        let lookup = async |player: Option<&str>| {
+            players
+                .profile(PlayerQuery {
+                    player: player.map(str::to_owned),
+                })
+                .await
+                .unwrap()
+        };
+        assert_eq!(lookup(None).await["status"], "choose_account");
+        let known = lookup(Some("A")).await;
+        assert_eq!(known["account"]["is_requester"], true);
+        assert_eq!(known["requester"], "Tester");
+        assert_eq!(
+            known["known_agents"],
+            serde_json::json!([
+            {"id":1,"name":"One"},{"id":2,"name":"Two"},{"id":3,"name":"Three"},
+            {"id":4,"name":null},{"id":5,"name":null},{"id":6,"name":null}])
+        );
+        assert_eq!(
+            lookup(Some("B")).await["known_agents"],
+            serde_json::json!([])
+        );
+        assert_eq!(lookup(Some("C")).await["account"]["is_requester"], false);
+        assert_eq!(lookup(Some("D")).await["status"], "not_registered_in_chat");
+        db.remove_user(1, "A").await.unwrap();
+        assert_eq!(lookup(Some("A")).await["status"], "not_registered_in_chat");
     }
 
     #[tokio::test]
@@ -1737,7 +1829,9 @@ mod tests {
         {
             let database = Builder::new_local(&path).build().await.unwrap();
             database.connect().unwrap().execute_batch(
-                "CREATE TABLE users(chat_id INTEGER);
+                "CREATE TABLE endgame_results(id INTEGER PRIMARY KEY,uid TEXT,endgame_type TEXT,data_json TEXT);
+                 CREATE TABLE avatar_cache(uid TEXT,avatar_id INTEGER,name TEXT,PRIMARY KEY(uid,avatar_id));
+                 CREATE TABLE users(chat_id INTEGER);
                  INSERT INTO users VALUES(77);
                  CREATE TABLE beta_cursors(chat_id INTEGER PRIMARY KEY,revision TEXT NOT NULL);
                  INSERT INTO beta_cursors VALUES(77,'old_beta');
