@@ -6,6 +6,7 @@ mod change_groups;
 mod compute;
 mod context;
 mod diff;
+mod editing;
 mod entry_view;
 mod gachabase;
 mod kit;
@@ -358,7 +359,8 @@ async fn run_agent(
     )
     .with_strict_tools();
     let research_updates = matches!(&preview, Some(Preview::Progress(_)));
-    let builder = AgentBuilder::new(rig_core::Model::new(wire, http));
+    let endpoint = rig_core::Model::new(wire, http);
+    let builder = AgentBuilder::new(endpoint.clone());
     let builder = match question_instructions {
         Some(instructions) => builder.preamble(instructions),
         None => builder.preamble(INSTRUCTIONS).append_preamble(REVIEW),
@@ -380,7 +382,7 @@ async fn run_agent(
         builder = builder.reasoning(reasoning);
     }
     let streaming = preview.is_some();
-    if let Some(preview) = preview {
+    if let Some(preview) = preview.clone() {
         builder = builder.add_hook(preview);
     }
     let history = history.iter().flat_map(|turn| {
@@ -389,7 +391,7 @@ async fn run_agent(
             rig_core::message::Message::assistant(&turn.answer),
         ]
     });
-    let runner = builder.build().prompt(input).history(history);
+    let runner = builder.build().prompt(input.as_str()).history(history);
     let result = if streaming {
         let (result, events) = runner.run_channel();
         drop(events);
@@ -419,7 +421,33 @@ async fn run_agent(
         .completion_calls
         .last()
         .context("Rig не вернул результат модели")?;
-    report_text(completed_output(&call.raw)?)
+    let draft = report_text(completed_output(&call.raw)?)?;
+    drop(result);
+    if question_instructions.is_none() {
+        return Ok(draft);
+    }
+    let answer = editing::proofread(
+        endpoint,
+        selection.reasoning,
+        &input,
+        &draft,
+        preview.as_ref(),
+    )
+    .await
+    .unwrap_or_else(|_| {
+        log::warn!("Proofreading did not produce a usable edit; delivering the completed draft");
+        draft
+    });
+    if let Some(preview) = preview {
+        let text = answer.chars().take(4096).collect();
+        match preview {
+            Preview::Text(tx) => {
+                tx.send_replace(text);
+            }
+            Preview::Progress(tx) => tx.send_modify(|p| p.text = text),
+        }
+    }
+    Ok(answer)
 }
 
 fn format_report(agent: &str, prev: &str, cur: &str, report: &str) -> String {

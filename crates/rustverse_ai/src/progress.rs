@@ -13,6 +13,7 @@ pub enum PromptStage {
     Compacting,
     Researching,
     Writing,
+    Editing,
     Complete,
     Failed,
 }
@@ -49,6 +50,7 @@ impl Default for PromptProgress {
     }
 }
 
+#[derive(Clone)]
 pub(super) enum Preview {
     Text(watch::Sender<String>),
     Progress(watch::Sender<PromptProgress>),

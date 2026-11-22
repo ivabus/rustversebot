@@ -31,11 +31,15 @@ impl LiveMessage {
     }
 }
 
+fn priority_stage(stage: PromptStage) -> Option<PromptStage> {
+    matches!(stage, PromptStage::Compacting | PromptStage::Editing).then_some(stage)
+}
+
 async fn next_update(
     progress: &mut watch::Receiver<PromptProgress>,
     target: LiveMessage,
     shown: Option<&str>,
-    shown_compacting: bool,
+    shown_phase: Option<PromptStage>,
     next: Instant,
     retry_at: Option<Instant>,
 ) -> Option<PromptProgress> {
@@ -47,8 +51,8 @@ async fn next_update(
     }
     tokio::select! {
         changed = progress.wait_for(|p| {
-            (p.stage == PromptStage::Compacting) != shown_compacting
-                || (p.stage != PromptStage::Compacting && target.new_research_stage(p, shown))
+            priority_stage(p.stage) != shown_phase
+                || (priority_stage(p.stage).is_none() && target.new_research_stage(p, shown))
         }) => {
             changed.ok()?;
         }
@@ -183,12 +187,12 @@ impl LiveOutput<'_> {
         let mut sent = Instant::now();
         let mut next = sent + spacing;
         let mut shown = None;
-        let mut shown_compacting = false;
+        let mut shown_phase = None;
         while let Some(mut p) = next_update(
             &mut progress,
             target,
             shown.as_deref(),
-            shown_compacting,
+            shown_phase,
             next,
             *retry_at,
         )
@@ -198,8 +202,8 @@ impl LiveOutput<'_> {
             next = Instant::now() + spacing;
             // A text delta can arrive in the same watch snapshot as a new stage.
             // Make sure the first edit for that stage actually displays its name.
-            let compacting = p.stage == PromptStage::Compacting;
-            if !compacting && target.new_research_stage(&p, shown.as_deref()) {
+            let phase = priority_stage(p.stage);
+            if phase.is_none() && target.new_research_stage(&p, shown.as_deref()) {
                 p.stage = PromptStage::Researching;
             }
             let Ok(text) = render(&p) else {
@@ -208,7 +212,7 @@ impl LiveOutput<'_> {
             let refresh = matches!(target, LiveMessage::Draft) && sent.elapsed() >= DRAFT_REFRESH;
             if text == *last && !refresh {
                 shown = p.research_status;
-                shown_compacting = compacting;
+                shown_phase = phase;
                 continue;
             }
             let update = self.update(target, &text, spacing).await;
@@ -217,7 +221,7 @@ impl LiveOutput<'_> {
                     *last = text;
                     sent = Instant::now();
                     shown = p.research_status;
-                    shown_compacting = compacting;
+                    shown_phase = phase;
                     next = sent + spacing;
                 }
                 Update::Wait(wait) => {
@@ -331,19 +335,20 @@ impl LiveOutput<'_> {
 mod tests {
     use super::*;
     #[tokio::test]
-    async fn compaction_and_its_end_update_both_drafts_and_group_messages() {
+    async fn compaction_and_proofreading_update_both_drafts_and_group_messages() {
         for target in [LiveMessage::Draft, LiveMessage::Message(MessageId(1))] {
             let (tx, mut rx) = watch::channel(PromptProgress::default());
-            for (was_compacting, stage) in [
-                (false, PromptStage::Compacting),
-                (true, PromptStage::Preparing),
+            for (shown_phase, stage) in [
+                (None, PromptStage::Compacting),
+                (Some(PromptStage::Compacting), PromptStage::Preparing),
+                (None, PromptStage::Editing),
             ] {
                 tx.send_modify(|p| p.stage = stage);
                 let next = next_update(
                     &mut rx,
                     target,
                     None,
-                    was_compacting,
+                    shown_phase,
                     Instant::now() + GROUP_INTERVAL,
                     None,
                 );
@@ -370,7 +375,7 @@ mod tests {
         });
         let update = tokio::time::timeout(
             Duration::from_secs(1),
-            next_update(&mut rx, group, None, false, later, None),
+            next_update(&mut rx, group, None, None, later, None),
         )
         .await
         .unwrap()
@@ -385,14 +390,14 @@ mod tests {
             assert!(
                 tokio::time::timeout(
                     Duration::ZERO,
-                    next_update(&mut rx, target, previous, false, later, limited)
+                    next_update(&mut rx, target, previous, None, later, limited)
                 )
                 .await
                 .is_err()
             );
         }
         tx.send_modify(|p| p.research_status = Some("Сравниваю версии".into()));
-        let update = next_update(&mut rx, group, shown, false, later, Some(Instant::now()))
+        let update = next_update(&mut rx, group, shown, None, later, Some(Instant::now()))
             .await
             .unwrap();
         assert_eq!(update.research_status.as_deref(), Some("Сравниваю версии"));
