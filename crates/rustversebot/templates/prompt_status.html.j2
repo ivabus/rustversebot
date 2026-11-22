@@ -9,5 +9,4 @@
 {%- elif model == "auto" %}Выбираю модель…
 {%- else %}Готовлю ответ…
 {%- endif %}{% endblock %}</i> · <code>{{ model }}</code>
-Вызовы инструментов: {{ p.tools }} · Ходы: {{ p.turns }} · Токены: {% if p.tokens is none %}—{% else %}{{ p.tokens }}{% endif %} · Стоимость: {{ cost or "—" }}{% if activity is none and p.stage not in ["complete", "failed"] %}
-Остановить запрос — /stop{% endif %}{% endif %}
+Вызовы инструментов: {{ p.tools }} · Ходы: {{ p.turns }} · Токены: {% if p.tokens is none %}—{% else %}{{ p.tokens }}{% endif %} · Стоимость: {{ cost or "—" }}{% endif %}

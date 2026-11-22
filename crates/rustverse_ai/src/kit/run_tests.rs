@@ -152,8 +152,8 @@ impl HttpClientExt for Fixture {
                 )
                 .unwrap();
                 let id = if payload.get("edited").is_some() {
-                    assert_eq!(body["model"], "gpt-6-luna");
-                    assert_eq!(body["reasoning"]["effort"], "high");
+                    assert_eq!(body["model"], "gpt-6.2-sol");
+                    assert_eq!(body["reasoning"]["effort"], "low");
                     assert!(input.contains(self.editing_replies[step - 1].unwrap()));
                     assert!(!input.contains("previous_edit") && !input.contains("feedback"));
                     "semantic_review"

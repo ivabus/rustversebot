@@ -33,7 +33,11 @@ pub(crate) fn definitions() -> Vec<ToolSpec> {
     let category = json!({"type":"string","enum":["agents","w-engines","drive-discs","bangboo","enemies","tutorials"]});
     let language = json!({"type":"string","enum":["en","cn"]});
     let offset = json!({"type":["integer","null"],"minimum":0,"description":"Start at 0 or null. Copy next_offset to continue."});
-    let version = json!({"type":["string","null"],"description":"Exact revision or branch ('release' or 'beta'). For a standalone agent build without a specified patch, or for current live endgame, use 'release', then its returned revision. Null reuses the pinned revision or defaults to the newest across both branches for questions. Reports start at cur."});
+    let version = json!({"type":["string","null"],"description":"Exact revision or branch ('release' or 'beta'). For current live endgame use 'release'. Read entries at the exact revision returned by search. Null reuses the pinned revision or defaults to the newest across both branches for questions. Reports start at cur."});
+    let mut search_version = version.clone();
+    search_version["description"] = json!(
+        "For an unversioned build or stat goal, look up the agent by name with 'release_then_beta': check release first, then beta on a miss. For an explicitly requested branch, live endgame or an exact patch, use the requested branch or revision. Null reuses the pinned revision or the newest available."
+    );
     let reference = json!({"type":"object","additionalProperties":false,"properties":{"source":{"type":"string"},"path":{"type":"string"}},"required":["source","path"]});
     let mut named = reference.clone();
     named["properties"]["name"] = json!({"type":"string","description":"Unique Rhai variable name, e.g. before or hits. Up to 64 bytes."});
@@ -56,7 +60,7 @@ pub(crate) fn definitions() -> Vec<ToolSpec> {
             name: "search_gachabase",
             description: "Search by name, alias, slug or ID. For a season boss use category=enemies and the monster ID from Nanoka (or its localized name). For a roster use category=agents, query='', offset=null: returns all matching agents at the selected revision. Each row has beta_only: false if its ID is in release_revision, true if present only in the selected beta compared with the latest release, null if the comparison is unavailable. Filter agents by specialty, element or both (AND), using catalog names in the selected language. Prefer entries with core skills when names collide.",
             parameters: json!({"type":"object","additionalProperties":false,"properties":{
-                "category":category,"query":{"type":"string"},"language":language,"offset":offset,"version":version,
+                "category":category,"query":{"type":"string"},"language":language,"offset":offset,"version":search_version,
                 "specialty":{"type":["string","null"]},"element":{"type":["string","null"]}
             },"required":["category","query","language","offset","version","specialty","element"]}),
         },
@@ -350,6 +354,33 @@ impl KitTools {
         self.index(Category::Agents, language, &revision).await
     }
 
+    async fn find_build_agent(&mut self, query: &str, language: Language) -> Result<Value> {
+        let release = self.latest_release_agents(language).await?;
+        let mut result = release.search(Category::Agents, query, 0, None, None)?;
+        let release_revision = release.revision.clone();
+        if result["total"] == 0 {
+            let beta = self
+                .timeline()
+                .await?
+                .latest(Some("beta"))
+                .context("No beta revisions")?;
+            result = self
+                .index(Category::Agents, language, &beta)
+                .await?
+                .search(Category::Agents, query, 0, None, None)?;
+        }
+        if result["total"] != 0 {
+            self.pinned.get_or_insert_with(|| {
+                result["version"]
+                    .as_str()
+                    .expect("catalog revision")
+                    .to_owned()
+            });
+        }
+        result["release_revision"] = json!(release_revision);
+        Ok(result)
+    }
+
     async fn call(&mut self, name: &str, args: Value) -> Result<Value> {
         match name {
             "list_endgame_seasons" | "get_endgame_season" | "get_endgame_seasons" => {
@@ -380,6 +411,17 @@ impl KitTools {
                     version: Option<String>,
                 }
                 let q: Search = serde_json::from_value(args)?;
+                if q.version.as_deref() == Some("release_then_beta") {
+                    ensure!(
+                        q.category == Category::Agents
+                            && !q.query.trim().is_empty()
+                            && q.offset.unwrap_or_default() == 0
+                            && q.specialty.is_none()
+                            && q.element.is_none(),
+                        "release_then_beta requires an unfiltered first-page agent name or ID; use the returned revision for later pages"
+                    );
+                    return self.find_build_agent(&q.query, q.language).await;
+                }
                 let version = self.version(q.version).await?;
                 let index = self.index(q.category, q.language, &version).await?;
                 let mut result = index.search(
@@ -740,6 +782,57 @@ mod tests {
                 "Dodge the attack after the teleport."
             );
         }
+    }
+
+    #[tokio::test]
+    async fn unversioned_build_search_reads_release_first_and_resolves_beta_only_agents() {
+        let beta = "beta_3.4.5_42";
+        let release = "release_3.3.0_10";
+        let mut kit = KitTools::for_question(Client::new(), "цель билда робин");
+        kit.timeline = Some(fixture_timeline(&[beta, release]));
+        for (branch, patch, id, revision, entries) in [
+            ("release", "3.3.0", 10, release, vec![3]),
+            ("beta", "3.4.5", 42, beta, vec![3, 4]),
+        ] {
+            let layout = json!({"type":"data","nodes":[{"data":[{"language":1,"revisions":2},"en",
+                {"current":3},{"branch":4,"version":5,"design_revision":6},branch,patch,id]}]});
+            let rows = json!({"type":"chunk","data":[{"data":1},{"entries":2},entries,
+                {"id":5,"name":7,"slug":8,"search_data":8},{"id":6,"name":9,"slug":10,"search_data":10},
+                1641,1661,{"text":11},"phoenix",{"text":12},"robin","Phoenix","Robin"]});
+            kit.indexes.insert(
+                (Category::Agents, Language::En, revision.into()),
+                Index::decode(&format!("{layout}\n{rows}"), "en", revision).unwrap(),
+            );
+        }
+        let search = |query: &str, version: &str| json!({"category":"agents","language":"en","query":query,"version":version});
+        let tool = "search_gachabase";
+        let found = kit
+            .call(tool, search("Robin", "release_then_beta"))
+            .await
+            .unwrap();
+        assert_eq!(found["release_revision"], release);
+        assert_eq!(found["version"], beta);
+        assert_eq!(found["matches"][0]["id"], 1661);
+        assert_eq!(kit.version(None).await.unwrap(), beta);
+        for version in ["release", release] {
+            let miss = kit.call(tool, search("Robin", version)).await.unwrap();
+            assert_eq!(miss["version"], release);
+            assert_eq!(miss["total"], 0);
+        }
+        let neither = kit
+            .call(tool, search("Nobody", "release_then_beta"))
+            .await
+            .unwrap();
+        assert_eq!(neither["total"], 0);
+        assert_eq!(neither["version"], beta);
+        // A release hit still works when no beta is available.
+        kit.timeline = Some(fixture_timeline(&[release]));
+        let common = kit
+            .call(tool, search("Phoenix", "release_then_beta"))
+            .await
+            .unwrap();
+        assert_eq!(common["version"], release);
+        assert_eq!(common["matches"][0]["id"], 1641);
     }
 
     #[tokio::test]
