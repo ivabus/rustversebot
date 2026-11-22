@@ -168,7 +168,8 @@ pub fn chunks(question: &str, markdown: &str, limit: usize) -> Vec<String> {
                         lists.pop();
                         out.break_lines = 2;
                     }
-                    TagEnd::Item => out.break_lines = 1,
+                    // Loose Markdown list items end in a paragraph with a blank line.
+                    TagEnd::Item => out.break_lines = out.break_lines.max(1),
                     TagEnd::Paragraph
                     | TagEnd::Heading(_)
                     | TagEnd::BlockQuote(_)
@@ -281,6 +282,15 @@ mod tests {
                 .all(|s| s.starts_with("<b>") && s.ends_with("</b>"))
         );
     }
+    #[test]
+    fn preserves_paragraph_spacing_in_loose_lists_and_keeps_tight_lists_compact() {
+        let markdown = "**Сейчас**\n\n- Рокси\n\n- Рина\n\n**После патча**\n\n1. Диски\n2. Команда";
+        assert_eq!(
+            chunks("", markdown, MESSAGE_LIMIT),
+            ["<b>Сейчас</b>\n\n• Рокси\n\n• Рина\n\n<b>После патча</b>\n\n1. Диски\n2. Команда"]
+        );
+    }
+
     #[test]
     fn partial_markup_is_balanced() {
         assert_eq!(

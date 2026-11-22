@@ -60,6 +60,7 @@ impl HttpClientExt for Fixture {
         request: Request<Bytes>,
     ) -> impl Future<Output = http_client::Result<Response<LazyBody>>> + Send + 'static {
         let body: Value = serde_json::from_slice(request.body()).unwrap();
+        assert_eq!(body["model"], MODEL);
         let reply = match request.uri().path() {
             "/v1/responses/input_tokens" => json!({"input_tokens":tokens(&body)}),
             "/v1/responses" if self.progress.borrow().stage == PromptStage::Editing => {
@@ -118,6 +119,7 @@ impl HttpClientExt for Fixture {
     ) -> http_client::Result<StreamingResponse> {
         assert_eq!(request.uri().path(), "/v1/responses");
         let body: Value = serde_json::from_slice(request.body()).unwrap();
+        assert_eq!(body["model"], MODEL);
         assert!(tokens(&body) < INPUT_LIMIT);
         let frames = self.frames(&body);
         let stream: http_client::BoxedStream =
