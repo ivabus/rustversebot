@@ -196,11 +196,24 @@ impl AgentRun<'_> {
         status: Status<'_>,
         generate: impl FnOnce(watch::Sender<PromptProgress>) -> F,
     ) -> Result<T> {
-        self.show(&status).await?;
         let (tx, rx) = watch::channel(PromptProgress::default());
+        self.track_progress(status, rx, generate(tx)).await
+    }
+
+    /// A prefetched report can already be running when it reaches the front
+    /// of the delivery queue. Its own receiver retains its full usage totals.
+    pub async fn track_progress<T>(
+        &mut self,
+        status: Status<'_>,
+        rx: watch::Receiver<PromptProgress>,
+        result: impl Future<Output = Result<T>>,
+    ) -> Result<T> {
+        if rx.has_changed().is_ok() {
+            self.show(&status).await?;
+        }
         let model = &self.model;
         let (result, ()) = tokio::join!(
-            generate(tx),
+            result,
             self.output.updates(
                 self.target,
                 rx.clone(),

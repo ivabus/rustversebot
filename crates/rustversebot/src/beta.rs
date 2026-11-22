@@ -6,17 +6,24 @@ use crate::{
     telegram_html,
 };
 use anyhow::{Context, Result};
+use futures_util::{StreamExt, stream};
+use rustverse_ai::PromptProgress;
 use rustverse_ai::beta::{AgentChange, Branch, Revision, branch_revisions, revisions};
 use serde_json::json;
 use std::{
-    collections::{BTreeMap, HashSet},
+    collections::{BTreeMap, HashMap, HashSet},
+    sync::{Arc, Mutex, Weak},
     time::Duration,
 };
 use teloxide::prelude::*;
+use tokio::sync::{Mutex as AsyncMutex, Semaphore, oneshot, watch};
+
+const PARALLEL_REPORTS: usize = 3;
 
 pub(crate) struct BetaPages {
     pub(crate) client: reqwest::Client,
-    generation: tokio::sync::Mutex<()>,
+    slots: Semaphore,
+    agents: Mutex<HashMap<u64, Weak<AsyncMutex<()>>>>,
     manual_limit: usize,
 }
 
@@ -27,13 +34,32 @@ impl BetaPages {
                 .connect_timeout(Duration::from_secs(15))
                 .timeout(Duration::from_secs(180))
                 .build()?,
-            generation: Default::default(),
+            slots: Semaphore::new(PARALLEL_REPORTS),
+            agents: Default::default(),
             manual_limit: match std::env::var("BETA_MAX_NEW_REPORTS") {
                 Ok(value) => value.parse().context("invalid BETA_MAX_NEW_REPORTS")?,
                 Err(std::env::VarError::NotPresent) => 10,
                 Err(error) => return Err(error.into()),
             },
         })
+    }
+
+    // Jobs from commands and the scheduler share the same report cache.
+    // Wait for a matching character before reserving a generation slot.
+    async fn lock_agent(&self, id: u64) -> tokio::sync::OwnedMutexGuard<()> {
+        let lock = {
+            let mut agents = self.agents.lock().unwrap();
+            agents.retain(|_, lock| lock.strong_count() > 0);
+            match agents.get(&id).and_then(Weak::upgrade) {
+                Some(lock) => lock,
+                None => {
+                    let lock = Arc::new(AsyncMutex::new(()));
+                    agents.insert(id, Arc::downgrade(&lock));
+                    lock
+                }
+            }
+        };
+        lock.lock_owned().await
     }
 }
 
@@ -72,69 +98,48 @@ async fn report(
     rev: &Revision,
     agent: &AgentChange,
     model: &str,
-    status: Option<&mut AgentRun<'_>>,
+    progress: Option<watch::Sender<PromptProgress>>,
 ) -> Result<String> {
     if let Some(text) = cached_report(state, rev, agent, model).await? {
         return Ok(text);
     }
-    let source = if status.is_some() {
+    let source = if progress.is_some() {
         "telegram"
     } else {
         "scheduler"
     };
-    let generate = |progress| async move {
-        let _guard = state.beta.generation.lock().await;
-        if let Some(text) = cached_report(state, rev, agent, model).await? {
-            return Ok(text);
-        }
-        let key = rustverse_ai::api_key()?;
-        let span = rustverse_ai::telemetry::diff_span(
-            source,
+    let _guard = state.beta.lock_agent(agent.id).await;
+    if let Some(text) = cached_report(state, rev, agent, model).await? {
+        return Ok(text);
+    }
+    let _slot = state.beta.slots.acquire().await?;
+    let key = rustverse_ai::api_key()?;
+    let span =
+        rustverse_ai::telemetry::diff_span(source, model, &rev.previous, &rev.current, agent.id);
+    let text = rustverse_ai::telemetry::observe(
+        span,
+        rustverse_ai::beta::report_with_progress(
+            &state.beta.client,
+            rev,
+            agent,
+            &key,
             model,
+            progress,
+        ),
+    )
+    .await?;
+    state
+        .db
+        .save_beta_report(
             &rev.previous,
             &rev.current,
             agent.id,
-        );
-        let text = rustverse_ai::telemetry::observe(
-            span,
-            rustverse_ai::beta::report_with_progress(
-                &state.beta.client,
-                rev,
-                agent,
-                &key,
-                model,
-                progress,
-            ),
+            model,
+            &report_version(agent),
+            &text,
         )
         .await?;
-        state
-            .db
-            .save_beta_report(
-                &rev.previous,
-                &rev.current,
-                agent.id,
-                model,
-                &report_version(agent),
-                &text,
-            )
-            .await?;
-        Ok(text)
-    };
-    if let Some(status) = status {
-        status
-            .track(
-                diff_status(
-                    Some(&rev.previous),
-                    Some(&rev.current),
-                    DiffStage::Report,
-                    Some(&agent.name),
-                ),
-                |tx| generate(Some(tx)),
-            )
-            .await
-    } else {
-        generate(None).await
-    }
+    Ok(text)
 }
 
 #[derive(Clone, Copy, serde::Serialize)]
@@ -192,6 +197,32 @@ async fn send_report_part(
     }
 }
 
+// Run preparation alongside Telegram delivery. Each receiver owns its position
+// in the revision, so a faster character cannot overtake an earlier one.
+fn prepare_reports<T>(
+    jobs: Vec<impl Future<Output = T>>,
+) -> (impl Future<Output = Result<()>>, Vec<oneshot::Receiver<T>>) {
+    let (jobs, reports): (Vec<_>, Vec<_>) = jobs
+        .into_iter()
+        .map(|job| {
+            let (ready, report) = oneshot::channel();
+            (
+                async move {
+                    let _ = ready.send(job.await);
+                },
+                report,
+            )
+        })
+        .unzip();
+    let prepare = async move {
+        stream::iter(jobs)
+            .for_each_concurrent(PARALLEL_REPORTS, |job| job)
+            .await;
+        Ok(())
+    };
+    (prepare, reports)
+}
+
 async fn send_reports(
     bot: &Bot,
     state: &BotState,
@@ -209,6 +240,8 @@ async fn send_reports(
         HashSet::new()
     };
     let sender = BotTemplateSender::new(bot, &state.templates);
+    let mut jobs = Vec::new();
+    let mut deliveries = Vec::new();
     for agent in &row.agents {
         let mut outstanding = agent
             .changed_members()
@@ -219,56 +252,102 @@ async fn send_reports(
         let ids: Vec<_> = std::iter::once(first.id)
             .chain(outstanding.map(|m| m.id))
             .collect();
-        let pending = if automatic {
-            state
-                .db
-                .pending_beta_text(chat.0, &row.current, first.id)
-                .await?
-        } else {
-            None
-        };
-        let parts = match pending {
-            Some(remaining) => remaining,
-            None => {
-                let text = report(state, row, agent, model, status.as_deref_mut()).await?;
-                let source = state.templates.render("beta_source", &json!({
-                    "comparison": !automatic,
-                    "hotfix": row.previous.rsplit_once('_').map(|p| p.0) == row.current.rsplit_once('_').map(|p| p.0),
-                    "release": row.current.starts_with("release_"),
-                    "url": rustverse_ai::beta::diff_url(row, first)?.as_str(),
-                }))?;
-                telegram_html::chunks("", &format!("{text}\n\n{}", source.text), MESSAGE_LIMIT)
+        let (tx, progress) = watch::channel(PromptProgress::default());
+        deliveries.push((agent, ids, progress));
+        jobs.push(prepare_report_parts(
+            state,
+            row,
+            agent,
+            first,
+            model,
+            chat,
+            (!automatic).then_some(tx),
+        ));
+    }
+    let (prepare, reports) = prepare_reports(jobs);
+    let deliver = async {
+        for ((agent, ids, progress), result) in deliveries.into_iter().zip(reports) {
+            let next = async { result.await.context("Report generation stopped")? };
+            let parts = match status.as_deref_mut() {
+                Some(run) => {
+                    run.track_progress(
+                        diff_status(
+                            Some(&row.previous),
+                            Some(&row.current),
+                            DiffStage::Report,
+                            Some(&agent.name),
+                        ),
+                        progress,
+                        next,
+                    )
+                    .await?
+                }
+                None => next.await?,
+            };
+            if let Some(status) = status.as_deref_mut() {
+                status
+                    .show(&diff_status(
+                        Some(&row.previous),
+                        Some(&row.current),
+                        DiffStage::Send,
+                        Some(&agent.name),
+                    ))
+                    .await?;
             }
-        };
-        if let Some(status) = status.as_deref_mut() {
-            status
-                .show(&diff_status(
-                    Some(&row.previous),
-                    Some(&row.current),
-                    DiffStage::Send,
-                    Some(&agent.name),
-                ))
-                .await?;
-        }
-        for (i, part) in parts.iter().enumerate() {
-            send_report_part(&sender, chat, thread, part, settings).await?;
-            if automatic {
-                let remaining = &parts[i + 1..];
-                if remaining.is_empty() {
-                    state
-                        .db
-                        .mark_beta_delivered(chat.0, &row.current, &ids)
-                        .await?;
-                } else {
-                    state
-                        .db
-                        .save_pending_beta_text(chat.0, &row.current, first.id, remaining)
-                        .await?;
+            for (i, part) in parts.iter().enumerate() {
+                send_report_part(&sender, chat, thread, part, settings).await?;
+                if automatic {
+                    let remaining = &parts[i + 1..];
+                    if remaining.is_empty() {
+                        state
+                            .db
+                            .mark_beta_delivered(chat.0, &row.current, &ids)
+                            .await?;
+                    } else {
+                        state
+                            .db
+                            .save_pending_beta_text(chat.0, &row.current, ids[0], remaining)
+                            .await?;
+                    }
                 }
             }
         }
-    }
+        anyhow::Ok(())
+    };
+    tokio::try_join!(prepare, deliver)?;
     Ok(())
+}
+
+async fn prepare_report_parts(
+    state: &BotState,
+    row: &Revision,
+    agent: &AgentChange,
+    first: &AgentChange,
+    model: &str,
+    chat: ChatId,
+    progress: Option<watch::Sender<PromptProgress>>,
+) -> Result<Vec<String>> {
+    let automatic = progress.is_none();
+    if automatic
+        && let Some(remaining) = state
+            .db
+            .pending_beta_text(chat.0, &row.current, first.id)
+            .await?
+    {
+        return Ok(remaining);
+    }
+    let text = report(state, row, agent, model, progress).await?;
+    let source = state.templates.render("beta_source", &json!({
+        "comparison": !automatic,
+        "hotfix": row.previous.rsplit_once('_').map(|p| p.0) == row.current.rsplit_once('_').map(|p| p.0),
+        "release": row.current.starts_with("release_"),
+        "url": rustverse_ai::beta::diff_url(row, first)?.as_str(),
+    }))?;
+    Ok(telegram_html::chunks(
+        "",
+        &format!("{text}\n\n{}", source.text),
+        MESSAGE_LIMIT,
+    ))
 }
 
 pub async fn diff_command(
@@ -628,6 +707,56 @@ async fn deliver_revision(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn independent_reports_overlap_and_results_keep_revision_order() {
+        let (started, mut starts) = tokio::sync::mpsc::unbounded_channel();
+        let mut releases = Vec::new();
+        let mut jobs = Vec::new();
+        for id in 0..=PARALLEL_REPORTS {
+            let (release, gate) = oneshot::channel();
+            releases.push(Some(release));
+            let started = started.clone();
+            jobs.push(async move {
+                started.send(id).unwrap();
+                gate.await.unwrap();
+                id
+            });
+        }
+        let (prepare, mut reports) = prepare_reports(jobs);
+        let mut prepare = std::pin::pin!(prepare);
+        assert!(futures_util::poll!(&mut prepare).is_pending());
+        for id in 0..PARALLEL_REPORTS {
+            assert_eq!(starts.try_recv().unwrap(), id);
+        }
+        assert!(starts.try_recv().is_err());
+        // Finish the second character while the first is still researching.
+        releases[1].take().unwrap().send(()).unwrap();
+        assert!(futures_util::poll!(&mut prepare).is_pending());
+        assert_eq!(starts.try_recv().unwrap(), PARALLEL_REPORTS);
+        assert!(matches!(
+            reports[0].try_recv(),
+            Err(oneshot::error::TryRecvError::Empty)
+        ));
+        for release in releases.into_iter().flatten() {
+            release.send(()).unwrap();
+        }
+        prepare.await.unwrap();
+        for (id, report) in reports.into_iter().enumerate() {
+            assert_eq!(report.await.unwrap(), id);
+        }
+    }
+
+    #[tokio::test]
+    async fn only_reports_for_the_same_character_wait_for_each_other() {
+        let pages = BetaPages::new().unwrap();
+        let first = pages.lock_agent(1).await;
+        let mut duplicate = std::pin::pin!(pages.lock_agent(1));
+        assert!(futures_util::poll!(&mut duplicate).is_pending());
+        assert!(futures_util::poll!(std::pin::pin!(pages.lock_agent(2))).is_ready());
+        drop(first);
+        assert!(futures_util::poll!(&mut duplicate).is_ready());
+    }
 
     #[test]
     fn text_report_keeps_the_release_source_link() {
