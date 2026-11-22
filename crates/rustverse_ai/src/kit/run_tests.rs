@@ -159,22 +159,14 @@ impl HttpClientExt for Fixture {
                     "semantic_review"
                 } else {
                     let attempt = self.edit_attempts.fetch_add(1, Ordering::Relaxed);
-                    assert_eq!(
-                        body["model"],
-                        if attempt < 2 {
-                            "gpt-6.1-terra"
-                        } else {
-                            "gpt-6.2-sol"
-                        }
-                    );
-                    assert_eq!(
-                        body["reasoning"]["effort"],
-                        match attempt {
-                            0 => "medium",
-                            1 => "xhigh",
-                            _ => "high",
-                        }
-                    );
+                    let route = match attempt {
+                        0 => TERRA_HIGH,
+                        1 => SOL_MEDIUM,
+                        _ => SOL_HIGH,
+                    };
+                    let (model, effort) = route.split_once('@').unwrap();
+                    assert_eq!(body["model"], model);
+                    assert_eq!(body["reasoning"]["effort"], effort);
                     if step >= 2
                         && self.editing_replies[step - 1]
                             .is_some_and(|s| s.starts_with("DIFFERENT"))
@@ -652,7 +644,7 @@ async fn check_answer(editing_replies: &[Option<&'static str>], expected: &str) 
     check_review(
         editing_replies,
         &[(expected, Some(VERIFIED))],
-        &[TERRA_MEDIUM],
+        &[TERRA_HIGH],
         Some(expected),
     )
     .await;
@@ -660,6 +652,8 @@ async fn check_answer(editing_replies: &[Option<&'static str>], expected: &str) 
 
 const TERRA_MEDIUM: &str = "gpt-6.1-terra@medium";
 const TERRA_XHIGH: &str = "gpt-6.1-terra@xhigh";
+const TERRA_HIGH: &str = "gpt-6.1-terra@high";
+const SOL_MEDIUM: &str = "gpt-6.2-sol@medium";
 const SOL_HIGH: &str = "gpt-6.2-sol@high";
 
 #[tokio::test]
@@ -667,7 +661,7 @@ async fn fact_checker_reviews_the_exact_patch_and_stops_if_a_rejected_text_retur
     check_review(
         &[Some(EDITED), Some("SAME")],
         &[(EDITED, Some(CORRECTION)), (CORRECTED, Some(VERIFIED))],
-        &[TERRA_MEDIUM, TERRA_MEDIUM],
+        &[TERRA_HIGH, TERRA_HIGH],
         Some(CORRECTED),
     )
     .await;
@@ -681,14 +675,14 @@ async fn fact_checker_reviews_the_exact_patch_and_stops_if_a_rejected_text_retur
             (CORRECTED, Some(undo)),
             (CORRECTED, Some(undo)),
         ],
-        &[TERRA_MEDIUM, TERRA_MEDIUM, TERRA_XHIGH, SOL_HIGH],
+        &[TERRA_HIGH, TERRA_HIGH, SOL_MEDIUM, SOL_HIGH],
         None,
     )
     .await;
     check_review(
         &[Some(FINAL)],
         &[(FINAL, None), (FINAL, None), (FINAL, None)],
-        &[TERRA_MEDIUM, TERRA_XHIGH, SOL_HIGH],
+        &[TERRA_HIGH, SOL_MEDIUM, SOL_HIGH],
         None,
     )
     .await;
@@ -699,7 +693,7 @@ async fn fact_checker_reviews_the_exact_patch_and_stops_if_a_rejected_text_retur
             (CORRECTED, Some(undo)),
             (CORRECTED, Some(VERIFIED)),
         ],
-        &[TERRA_MEDIUM, TERRA_MEDIUM, TERRA_XHIGH],
+        &[TERRA_HIGH, TERRA_HIGH, SOL_MEDIUM],
         Some(CORRECTED),
     )
     .await;
@@ -711,7 +705,7 @@ async fn fact_checker_reviews_the_exact_patch_and_stops_if_a_rejected_text_retur
             (CORRECTED, Some(partial_undo)),
             (CORRECTED, Some(VERIFIED)),
         ],
-        &[TERRA_MEDIUM, TERRA_MEDIUM, TERRA_XHIGH],
+        &[TERRA_HIGH, TERRA_HIGH, SOL_MEDIUM],
         Some(CORRECTED),
     )
     .await;
@@ -725,7 +719,7 @@ async fn fact_checker_reviews_the_exact_patch_and_stops_if_a_rejected_text_retur
             (CORRECTED, Some(next)),
             (&updated, Some(VERIFIED)),
         ],
-        &[TERRA_MEDIUM, TERRA_MEDIUM, TERRA_XHIGH],
+        &[TERRA_HIGH, TERRA_HIGH, SOL_MEDIUM],
         Some(&updated),
     )
     .await;
@@ -762,7 +756,7 @@ async fn auto_routes_research_and_recovers_from_an_invalid_router_reply() {
             Some((reply, selected)),
             &[Some(FINAL)],
             &[(FINAL, Some(VERIFIED))],
-            &[TERRA_MEDIUM],
+            &[TERRA_HIGH],
             Some(FINAL),
         )
         .await;
@@ -793,7 +787,7 @@ async fn decisions_trace_keeps_the_session_usage_choice_and_fallback() {
             Some((choice, selected)),
             &[Some(FINAL)],
             &[(FINAL, Some(VERIFIED))],
-            &[TERRA_MEDIUM],
+            &[TERRA_HIGH],
             Some(FINAL),
         )
         .instrument(root)
