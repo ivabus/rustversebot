@@ -103,7 +103,7 @@ pub(crate) async fn launch(
     let bot = bot.clone();
     let state = state.clone();
     let span = tracing::info_span!(target: "rustverse::ai", "telegram.command",
-        otel.name = command, model = %model, source = "telegram",
+        otel.name = command, langfuse.observation.type = "span", selected_model = %model, source = "telegram",
         image_count = tracing::field::Empty, history_image_count = tracing::field::Empty,
         langfuse.observation.input = tracing::field::Empty, langfuse.observation.output = tracing::field::Empty,
         otel.status_code = tracing::field::Empty);

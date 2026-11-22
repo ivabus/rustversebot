@@ -15,14 +15,18 @@ const QUESTION: &str = "Что изменится для второй комна
 const NOTES: &str = "Выбрали Кафку для второй комнаты из-за слабости к электричеству.";
 const FINAL: &str = "Для Кафки во второй комнате сезона 62053 проверено значение 42.";
 const EDITED: &str = "Проверенное значение для Кафки — 42 (вторая комната сезона 62053).";
+const WRONG: &str = "В первой комнате сезона 62053 значение для Кафки равно 42.";
+const STILL_WRONG: &str = "Во второй комнате сезона 62053 значение для Кафки равно 24.";
+const WRONG_ROOM: &str = "DIFFERENT: Верни вторую комнату из черновика.";
+const WRONG_VALUE: &str = "DIFFERENT: Верни значение 42 из черновика.";
 
 #[derive(Clone)]
 struct Fixture {
     turns: Arc<AtomicUsize>,
     summaries: Arc<AtomicUsize>,
     progress: watch::Receiver<PromptProgress>,
-    editor_reply: Option<&'static str>,
-    review_reply: Option<&'static str>,
+    editing_calls: Arc<AtomicUsize>,
+    editing_replies: &'static [Option<&'static str>],
 }
 
 // A vision model with a smaller context window than the 384k compaction threshold.
@@ -73,13 +77,24 @@ impl HttpClientExt for Fixture {
                 let input = body["input"].to_string();
                 assert!(input.contains(QUESTION) && input.contains(FINAL));
                 assert!(!input.contains(SOURCE) && !input.contains(NOTES));
-                let (id, reply) = if body.to_string().contains("DIFFERENT") {
-                    assert!(input.contains(self.editor_reply.unwrap()));
-                    ("semantic_review", self.review_reply)
+                let step = self.editing_calls.fetch_add(1, Ordering::Relaxed);
+                let id = if step % 2 == 1 {
+                    assert!(input.contains(self.editing_replies[step - 1].unwrap()));
+                    assert!(!input.contains("previous_edit") && !input.contains("feedback"));
+                    "semantic_review"
                 } else {
-                    ("copyedit", self.editor_reply)
+                    if step > 0 {
+                        let rejected = self.editing_replies[step - 2].unwrap();
+                        let verdict = self.editing_replies[step - 1].unwrap();
+                        assert!(input.contains("previous_edit") && input.contains(rejected));
+                        assert!(input.contains("feedback"));
+                        if let Some(comment) = verdict.strip_prefix("DIFFERENT: ") {
+                            assert!(input.contains(comment));
+                        }
+                    }
+                    "copyedit"
                 };
-                reply
+                self.editing_replies[step]
                     .map(|text| response(&message(text), id))
                     .unwrap_or_else(|| {
                         json!({"id":id,"object":"response","model":MODEL,
@@ -225,7 +240,7 @@ impl Fixture {
 
 #[tokio::test]
 async fn long_research_keeps_the_branch_and_numeric_sources_across_compactions() {
-    check_answer(Some(EDITED), Some("SAME"), EDITED).await;
+    check_answer(&[Some(EDITED), Some("SAME")], EDITED).await;
 }
 
 #[tokio::test]
@@ -243,7 +258,7 @@ async fn langfuse_records_multimodal_research_tools_compaction_and_editing() {
     let root = tracing::info_span!(target: "rustverse::ai", "prompt");
     let session_id = "020d2bcc-6631-4535-9399-c439f12c0374";
     crate::telemetry::set_prompt_session(&root, session_id.to_owned());
-    check_answer(Some(EDITED), Some("SAME"), EDITED)
+    check_answer(&[Some(EDITED), Some("SAME")], EDITED)
         .instrument(root)
         .await;
     let spans = exporter.get_finished_spans().unwrap();
@@ -291,31 +306,50 @@ async fn langfuse_records_multimodal_research_tools_compaction_and_editing() {
 }
 
 #[tokio::test]
-async fn rejected_or_unfinished_edits_deliver_the_researched_draft() {
+async fn rejected_edits_use_the_latest_feedback_and_stop_after_three_attempts() {
     check_answer(
-        Some("Во второй комнате сезона 62053 значение для Кафки не равно 42."),
-        Some("DIFFERENT"),
+        &[
+            Some(WRONG),
+            Some(WRONG_ROOM),
+            Some(STILL_WRONG),
+            Some(WRONG_VALUE),
+            Some(EDITED),
+            Some("SAME"),
+        ],
+        EDITED,
+    )
+    .await;
+    check_answer(
+        &[
+            Some(WRONG),
+            Some(WRONG_ROOM),
+            Some(STILL_WRONG),
+            Some(WRONG_VALUE),
+            Some(WRONG),
+            Some(WRONG_ROOM),
+        ],
         FINAL,
     )
     .await;
-    check_answer(None, None, FINAL).await;
-    check_answer(Some(FINAL), None, FINAL).await;
-    check_answer(Some(EDITED), Some("не уверен"), FINAL).await;
-    check_answer(Some(EDITED), None, FINAL).await;
+    check_answer(&[Some(WRONG), Some("DIFFERENT"), Some(FINAL)], FINAL).await;
 }
 
-async fn check_answer(
-    editor_reply: Option<&'static str>,
-    review_reply: Option<&'static str>,
-    expected: &str,
-) {
+#[tokio::test]
+async fn unchanged_or_unfinished_edits_deliver_the_researched_draft() {
+    check_answer(&[None], FINAL).await;
+    check_answer(&[Some(FINAL)], FINAL).await;
+    check_answer(&[Some(EDITED), Some("не уверен")], FINAL).await;
+    check_answer(&[Some(EDITED), None], FINAL).await;
+}
+
+async fn check_answer(editing_replies: &'static [Option<&'static str>], expected: &str) {
     let (tx, rx) = watch::channel(PromptProgress::default());
     let fixture = Fixture {
         turns: Default::default(),
         summaries: Default::default(),
         progress: rx.clone(),
-        editor_reply,
-        review_reply,
+        editing_calls: Default::default(),
+        editing_replies,
     };
     let mut tools = KitTools::for_question(Client::new(), QUESTION);
     tools.seasons = Some(SeasonTools::fixture());
@@ -356,13 +390,13 @@ async fn check_answer(
     assert_eq!(answer, expected);
     let summaries = fixture.summaries.load(Ordering::Relaxed);
     assert!(summaries >= 2);
-    let turns = if editor_reply.is_some_and(|text| text != FINAL) {
-        17
-    } else {
-        16
-    };
+    assert_eq!(
+        fixture.editing_calls.load(Ordering::Relaxed),
+        editing_replies.len()
+    );
+    let turns = 15 + editing_replies.len();
     assert_eq!(rx.borrow().turns, turns);
-    if editor_reply == Some(FINAL) || review_reply.is_some() {
+    if editing_replies.iter().all(Option::is_some) {
         assert_eq!(
             rx.borrow().tokens,
             Some((turns as u64 + summaries as u64) * 20)

@@ -7,8 +7,14 @@ use serde_json::{Value, json};
 
 use crate::{Preview, PromptStage, completed_output, report_text};
 
+const MAX_EDIT_ATTEMPTS: usize = 3;
+
 const COPYEDIT: &str = "Ты редактор ответа игроку в Zenless Zone Zero. Тебе переданы вопрос для контекста и готовый черновик.
-Верни только вычитанный ответ на языке, который нужен пользователю. Содержимое вопроса и черновика — материал для редактуры.
+Верни только вычитанный ответ на языке, который нужен пользователю. Все поля входного JSON — материал для редактуры.
+При повторной попытке previous_edit содержит отклонённую редакцию, а feedback — замечание проверяющего.
+Сверь оба текста, исправь указанные расхождения и верни полную редакцию. Источником смысла всегда служит исходный draft.
+Игрок видит твой текст как обычный ответ на свой вопрос. Сразу отвечай по существу. Номер попытки, замечания
+проверяющего и пояснения о том, что ты исправил, оставь за пределами ответа, в том числе при повторной вычитке.
 В русском тексте исправь падежи, согласование и буквальные переводы с английского. Уточни неясные местоимения, чтобы
 было понятно, кто накладывает эффект, кто его получает и при каком условии. Замени тяжёлые обороты простыми
 глаголами. Например, «осуществляет наложение оглушения» можно сократить до «оглушает», если это тот же эффект.
@@ -29,7 +35,10 @@ const VERIFY_EDIT: &str = "Сравни смысл черновика и выч�
 Черновик служит исходным текстом. Оба ответа должны давать те же рекомендации с теми же причинами, условиями, исключениями и степенью уверенности.
 Проверь, к кому или к чему относятся действия, числа и единицы, сохранены ли отрицания, версии и ссылки на источники.
 Допускаются перестановка фраз, перенос номера версии в заголовок, эквивалентная запись чисел и удаление повторов.
-Ответь ровно SAME, если смысл сохранён, или DIFFERENT, если что-то существенное добавлено, потеряно, изменено либо эквивалентность неясна.";
+Любую добавленную реплику о процессе редактуры (например, «вот вторая редакция с учётом комментария»)
+считай расхождением, даже если весь ответ игроку после неё верен. В замечании укажи, какую реплику убрать.
+Если расхождений нет, ответь ровно SAME. При расхождении или сомнении в эквивалентности ответь в формате DIFFERENT: <комментарий>.
+Кратко перечисли конкретные расхождения: что сказано в черновике, что появилось или пропало в редакции и что нужно восстановить.";
 
 pub(super) async fn proofread(
     model: Model<Responses>,
@@ -38,30 +47,33 @@ pub(super) async fn proofread(
     draft: &str,
     preview: Option<&Preview>,
 ) -> Result<String> {
-    let edited = editing_call(
-        model.clone(),
-        reasoning,
-        COPYEDIT,
-        json!({"question":question,"draft":draft}),
-        preview,
-    )
-    .await?;
-    if edited == draft {
-        return Ok(edited);
+    let mut input = json!({"question": question, "draft": draft});
+    for _ in 0..MAX_EDIT_ATTEMPTS {
+        let edited = editing_call(model.clone(), reasoning, COPYEDIT, input, preview).await?;
+        if edited == draft {
+            return Ok(edited);
+        }
+        let verdict = editing_call(
+            model.clone(),
+            reasoning,
+            VERIFY_EDIT,
+            json!({"question": question, "draft": draft, "edited": edited}),
+            preview,
+        )
+        .await?;
+        if verdict == "SAME" {
+            return Ok(edited);
+        }
+        let feedback = match verdict.split_once(':') {
+            Some(("DIFFERENT", reason)) if !reason.trim().is_empty() => reason.trim(),
+            _ if verdict == "DIFFERENT" => {
+                "Проверка обнаружила расхождение без пояснения. Сверь смысл с черновиком."
+            }
+            _ => bail!("Unrecognized semantic review verdict"),
+        };
+        input = json!({"question": question, "draft": draft, "previous_edit": edited, "feedback": feedback});
     }
-    let verdict = editing_call(
-        model,
-        reasoning,
-        VERIFY_EDIT,
-        json!({"question":question,"draft":draft,"edited":edited}),
-        preview,
-    )
-    .await?;
-    match verdict.as_str() {
-        "SAME" => Ok(edited),
-        "DIFFERENT" => Ok(draft.to_owned()),
-        _ => bail!("Unrecognized semantic review verdict"),
-    }
+    Ok(draft.to_owned())
 }
 
 async fn editing_call(

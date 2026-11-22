@@ -166,7 +166,8 @@ pub fn diff_span(
     current: &str,
     agent_id: u64,
 ) -> Span {
-    tracing::info_span!(target: "rustverse::ai", "diff.generate", source, model, previous, current,
+    tracing::info_span!(target: "rustverse::ai", "diff.generate", langfuse.observation.type = "span",
+        source, selected_model = model, previous, current,
         agent_id, otel.status_code = tracing::field::Empty)
 }
 
@@ -236,5 +237,8 @@ mod tests {
         assert_eq!(request.headers()["content-type"], "application/x-protobuf");
         let payload = String::from_utf8_lossy(request.body());
         assert!(payload.contains("diff.generate") && payload.contains("scheduler"));
+        assert!(
+            payload.contains("langfuse.observation.type") && payload.contains("selected_model")
+        );
     }
 }
