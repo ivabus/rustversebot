@@ -26,6 +26,20 @@ pub(super) struct Provider {
 }
 
 impl Provider {
+    pub fn endpoint(
+        &self,
+        model: &str,
+        progress: Option<tokio::sync::watch::Sender<crate::PromptProgress>>,
+    ) -> rig_core::Model<rig_core::providers::openai::responses_api::wire::Responses> {
+        let wire = rig_core::providers::openai::responses_api::wire::Responses::new(
+            self.config.clone(),
+            model,
+        )
+        .with_strict_tools();
+        let http = ReportHttp::new(self.client.clone(), InputBudget::new(model, progress));
+        rig_core::Model::new(wire, rig_core::http_client::DynHttpClient::new(http))
+    }
+
     pub fn new(key: &str) -> anyhow::Result<Self> {
         let client = reqwest::Client::builder()
             .connect_timeout(Duration::from_secs(15))

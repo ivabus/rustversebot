@@ -470,7 +470,10 @@ impl ChatAgent for Diff {
     }
 
     async fn execute(&self, status: &mut AgentRun<'_>, state: &BotState) -> Result<Outcome> {
-        let model = status.model().cache_key();
+        let model = status
+            .model()
+            .parse::<rustverse_ai::ModelSelection>()?
+            .cache_key();
         let chat = status.address().chat;
         let bot = status.bot().clone();
         let mut rows = revisions(

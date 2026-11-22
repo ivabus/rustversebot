@@ -10,7 +10,7 @@ use crate::{
     templates::TemplateEngine,
 };
 use anyhow::{Context, Result};
-use rustverse_ai::{ModelSelection, PromptProgress, PromptStage};
+use rustverse_ai::{PromptProgress, PromptStage};
 use serde_json::{Value, json};
 use std::{future::Future, sync::Arc};
 use teloxide::{prelude::*, types::User};
@@ -67,7 +67,7 @@ pub(crate) trait ChatAgent: Send + Sync + 'static {
 pub(crate) struct AgentRun<'a> {
     output: LiveOutput<'a>,
     target: LiveMessage,
-    model: ModelSelection,
+    model: String,
     totals: PromptProgress,
     last: String,
     retry_at: Option<Instant>,
@@ -86,10 +86,13 @@ pub(crate) async fn launch(
     else {
         return Ok(());
     };
-    let model = state.ai_model().await?;
     let totals = PromptProgress::default();
     let initial = agent.initial_status();
-    let rendered = initial.render(&state.templates, &model.to_string(), &totals)?;
+    let model = match initial {
+        Status::Question { .. } => state.research_setting().await?,
+        Status::Activity { .. } => state.ai_model().await?.to_string(),
+    };
+    let rendered = initial.render(&state.templates, &model, &totals)?;
     let last = rendered.text.clone();
     let target = LiveOutput {
         bot,
@@ -135,13 +138,12 @@ impl AgentRun<'_> {
     pub fn address(&self) -> MessageAddress {
         self.output.address
     }
-    pub fn model(&self) -> &ModelSelection {
+    pub fn model(&self) -> &str {
         &self.model
     }
 
     pub async fn show(&mut self, status: &Status<'_>) -> Result<()> {
-        let rendered =
-            status.render(self.output.templates, &self.model.to_string(), &self.totals)?;
+        let rendered = status.render(self.output.templates, &self.model, &self.totals)?;
         if rendered.text != self.last
             && self
                 .output
@@ -162,7 +164,7 @@ impl AgentRun<'_> {
     ) -> Result<T> {
         self.show(&status).await?;
         let (tx, rx) = watch::channel(PromptProgress::default());
-        let model = self.model.to_string();
+        let model = &self.model;
         let (result, ()) = tokio::join!(
             generate(tx),
             self.output.updates(
@@ -174,12 +176,19 @@ impl AgentRun<'_> {
                     let mut progress = p.clone();
                     add_usage(&mut progress, &self.totals);
                     Ok(status
-                        .render(self.output.templates, &model, &progress)?
+                        .render(
+                            self.output.templates,
+                            progress.research_model.as_deref().unwrap_or(model),
+                            &progress,
+                        )?
                         .text)
                 }
             )
         );
         add_usage(&mut self.totals, &rx.borrow());
+        if let Some(selected) = &rx.borrow().research_model {
+            self.model.clone_from(selected);
+        }
         result
     }
 
@@ -237,13 +246,7 @@ impl AgentRun<'_> {
             anyhow::bail!("expected question for text answer")
         };
         let (text, parent, author, references, image_ids) = answer;
-        let parts = messages(
-            templates,
-            &self.model.to_string(),
-            &self.totals,
-            question,
-            Some(&text),
-        )?;
+        let parts = messages(templates, &self.model, &self.totals, question, Some(&text))?;
         let turn = crate::db::DeliveredTurn {
             session_id,
             question,

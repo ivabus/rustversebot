@@ -22,6 +22,8 @@ pub enum PromptStage {
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct PromptProgress {
     pub stage: PromptStage,
+    #[serde(skip)]
+    pub research_model: Option<String>,
     pub turns: usize,
     #[serde(skip)]
     pub usage_reports: usize,
@@ -40,6 +42,7 @@ impl Default for PromptProgress {
     fn default() -> Self {
         Self {
             stage: PromptStage::Preparing,
+            research_model: None,
             turns: 0,
             usage_reports: 0,
             tools: 0,
@@ -61,11 +64,11 @@ impl AgentHook for Preview {
     async fn on_completion_call(
         &self,
         _: &HookContext,
-        event: CompletionCallEvent<'_>,
+        _: CompletionCallEvent<'_>,
     ) -> CompletionCallAction {
         if let Self::Progress(tx) = self {
             tx.send_modify(|p| {
-                p.turns = event.turn;
+                p.turns += 1;
                 p.stage = PromptStage::Preparing;
                 p.text.clear();
             });

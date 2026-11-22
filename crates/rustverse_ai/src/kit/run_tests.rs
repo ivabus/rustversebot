@@ -25,13 +25,17 @@ const CORRECTED: &str = "Проверенное значение для Кафк
 
 #[derive(Clone)]
 struct Fixture {
+    question: &'static str,
+    route: Option<(&'static str, &'static str)>,
     turns: Arc<AtomicUsize>,
     summaries: Arc<AtomicUsize>,
     progress: watch::Receiver<PromptProgress>,
     editing_calls: Arc<AtomicUsize>,
+    edit_attempts: Arc<AtomicUsize>,
     editing_replies: Vec<Option<&'static str>>,
     fact_calls: Arc<AtomicUsize>,
     fact_replies: Vec<(String, Option<&'static str>)>,
+    fact_routes: Vec<&'static str>,
 }
 
 // A vision model with a smaller context window than the 384k compaction threshold.
@@ -70,19 +74,42 @@ impl HttpClientExt for Fixture {
         request: Request<Bytes>,
     ) -> impl Future<Output = http_client::Result<Response<LazyBody>>> + Send + 'static {
         let body: Value = serde_json::from_slice(request.body()).unwrap();
-        assert_eq!(body["model"], MODEL);
         let reply = match request.uri().path() {
             "/v1/responses/input_tokens" => json!({"input_tokens":tokens(&body)}),
+            "/v1/responses"
+                if body.pointer("/text/format/name") == Some(&json!("research_tier")) =>
+            {
+                let (reply, _) = self.route.expect("explicit model must bypass routing");
+                assert_eq!(body["model"], "gpt-6-luna");
+                assert_eq!(body["reasoning"]["effort"], "low");
+                let input = body["input"].to_string();
+                assert!(
+                    input.contains(self.question)
+                        && input.contains(NOTES)
+                        && input.contains("/9j/")
+                );
+                response(&message(reply), "router")
+            }
             "/v1/responses" if self.progress.borrow().stage == PromptStage::FactChecking => {
                 let step = self.fact_calls.fetch_add(1, Ordering::Relaxed);
                 let (expected, reply) = &self.fact_replies[step];
+                let retried = self.fact_replies[..step]
+                    .iter()
+                    .filter(|(answer, _)| answer == expected)
+                    .count();
+                let (slug, effort) = self.fact_routes[step].split_once('@').unwrap();
+                assert_eq!(body["model"], slug);
+                assert_eq!(body["reasoning"]["effort"], effort);
                 assert_eq!(body["text"]["format"]["strict"], true);
                 let input = body["input"].as_array().unwrap();
                 let user = input.last().unwrap();
                 let payload: Value =
                     serde_json::from_str(user["content"][0]["text"].as_str().unwrap()).unwrap();
-                assert_eq!(payload["question"], QUESTION);
+                assert_eq!(payload["question"], self.question);
                 assert_eq!(payload["answer"], expected.as_str());
+                if retried > 0 {
+                    assert!(payload.get("review_context").is_some());
+                }
                 assert_eq!(user["content"][2]["type"], "input_image");
                 let history = body["input"].to_string();
                 assert!(
@@ -99,15 +126,43 @@ impl HttpClientExt for Fixture {
                 assert_eq!(body["store"], false);
                 let input = body["input"].to_string();
                 assert_eq!(self.fact_calls.load(Ordering::Relaxed), 0);
-                assert!(input.contains(QUESTION) && input.contains(FINAL));
+                assert!(input.contains(self.question) && input.contains(FINAL));
                 assert!(!input.contains(SOURCE) && !input.contains(NOTES));
                 let step = self.editing_calls.fetch_add(1, Ordering::Relaxed);
-                let id = if step % 2 == 1 {
+                let payload: Value = serde_json::from_str(
+                    body["input"].as_array().unwrap().last().unwrap()["content"][0]["text"]
+                        .as_str()
+                        .unwrap(),
+                )
+                .unwrap();
+                let id = if payload.get("edited").is_some() {
+                    assert_eq!(body["model"], "gpt-6-luna");
+                    assert_eq!(body["reasoning"]["effort"], "high");
                     assert!(input.contains(self.editing_replies[step - 1].unwrap()));
                     assert!(!input.contains("previous_edit") && !input.contains("feedback"));
                     "semantic_review"
                 } else {
-                    if step > 0 {
+                    let attempt = self.edit_attempts.fetch_add(1, Ordering::Relaxed);
+                    assert_eq!(
+                        body["model"],
+                        if attempt < 2 {
+                            "gpt-6.1-terra"
+                        } else {
+                            "gpt-6.2-sol"
+                        }
+                    );
+                    assert_eq!(
+                        body["reasoning"]["effort"],
+                        match attempt {
+                            0 => "medium",
+                            1 => "xhigh",
+                            _ => "high",
+                        }
+                    );
+                    if step >= 2
+                        && self.editing_replies[step - 1]
+                            .is_some_and(|s| s.starts_with("DIFFERENT"))
+                    {
                         let rejected = self.editing_replies[step - 2].unwrap();
                         let verdict = self.editing_replies[step - 1].unwrap();
                         assert!(input.contains("previous_edit") && input.contains(rejected));
@@ -127,7 +182,10 @@ impl HttpClientExt for Fixture {
                     })
             }
             "/v1/responses" => {
-                assert!(tokens(&body) < INPUT_LIMIT && body.get("tools").is_none());
+                assert!(body.get("tools").is_none());
+                if body["model"] == MODEL {
+                    assert!(tokens(&body) < INPUT_LIMIT);
+                }
                 let previous = self.summaries.fetch_add(1, Ordering::Relaxed);
                 assert_eq!(self.progress.borrow().stage, PromptStage::Compacting);
                 let data = body["input"].as_str().unwrap();
@@ -164,8 +222,18 @@ impl HttpClientExt for Fixture {
     ) -> http_client::Result<StreamingResponse> {
         assert_eq!(request.uri().path(), "/v1/responses");
         let body: Value = serde_json::from_slice(request.body()).unwrap();
-        assert_eq!(body["model"], MODEL);
-        assert!(tokens(&body) < INPUT_LIMIT);
+        if let Some((_, selected)) = self.route {
+            let (model, effort) = selected.split_once('@').unwrap();
+            assert_eq!(body["model"], model);
+            assert_eq!(body["reasoning"]["effort"], effort);
+            assert_eq!(
+                self.progress.borrow().research_model.as_deref(),
+                Some(selected)
+            );
+        } else {
+            assert_eq!(body["model"], MODEL);
+            assert!(tokens(&body) < INPUT_LIMIT);
+        }
         let frames = self.frames(&body);
         let stream: http_client::BoxedStream =
             Box::pin(futures_util::stream::iter([Ok(frames.into())]));
@@ -182,7 +250,7 @@ impl Fixture {
         assert!(tools.iter().any(|t| t["name"] == "list_revision_timeline"));
         let n = self.turns.fetch_add(1, Ordering::Relaxed) + 1;
         let input = body["input"].to_string();
-        assert!(input.contains(QUESTION));
+        assert!(input.contains(self.question));
         let question = body["input"]
             .as_array()
             .unwrap()
@@ -557,26 +625,32 @@ async fn rejected_edits_use_the_latest_feedback_and_stop_after_ten_attempts() {
 
 #[tokio::test]
 async fn unchanged_or_unfinished_edits_deliver_the_researched_draft() {
-    check_answer(&[None], FINAL).await;
+    check_answer(&[None, None, None], FINAL).await;
     check_answer(&[Some(FINAL)], FINAL).await;
-    check_answer(&[Some(EDITED), Some("не уверен")], FINAL).await;
-    check_answer(&[Some(EDITED), None], FINAL).await;
+    check_answer(&[Some(EDITED), Some("не уверен"), Some(FINAL)], FINAL).await;
+    check_answer(&[Some(EDITED), None, Some(EDITED), Some("SAME")], EDITED).await;
 }
 
 async fn check_answer(editing_replies: &[Option<&'static str>], expected: &str) {
     check_review(
         editing_replies,
         &[(expected, Some(VERIFIED))],
+        &[TERRA_MEDIUM],
         Some(expected),
     )
     .await;
 }
+
+const TERRA_MEDIUM: &str = "gpt-6.1-terra@medium";
+const TERRA_XHIGH: &str = "gpt-6.1-terra@xhigh";
+const SOL_HIGH: &str = "gpt-6.2-sol@high";
 
 #[tokio::test]
 async fn fact_checker_reviews_the_exact_patch_and_stops_if_a_rejected_text_returns() {
     check_review(
         &[Some(EDITED), Some("SAME")],
         &[(EDITED, Some(CORRECTION)), (CORRECTED, Some(VERIFIED))],
+        &[TERRA_MEDIUM, TERRA_MEDIUM],
         Some(CORRECTED),
     )
     .await;
@@ -584,26 +658,131 @@ async fn fact_checker_reviews_the_exact_patch_and_stops_if_a_rejected_text_retur
         r#"{"corrections":[{"original":"63","replacement":"42","source":"Предыдущее значение."}]}"#;
     check_review(
         &[Some(EDITED), Some("SAME")],
-        &[(EDITED, Some(CORRECTION)), (CORRECTED, Some(undo))],
+        &[
+            (EDITED, Some(CORRECTION)),
+            (CORRECTED, Some(undo)),
+            (CORRECTED, Some(undo)),
+            (CORRECTED, Some(undo)),
+        ],
+        &[TERRA_MEDIUM, TERRA_MEDIUM, TERRA_XHIGH, SOL_HIGH],
         None,
     )
     .await;
-    check_review(&[Some(FINAL)], &[(FINAL, None)], None).await;
+    check_review(
+        &[Some(FINAL)],
+        &[(FINAL, None), (FINAL, None), (FINAL, None)],
+        &[TERRA_MEDIUM, TERRA_XHIGH, SOL_HIGH],
+        None,
+    )
+    .await;
+    check_review(
+        &[Some(EDITED), Some("SAME")],
+        &[
+            (EDITED, Some(CORRECTION)),
+            (CORRECTED, Some(undo)),
+            (CORRECTED, Some(VERIFIED)),
+        ],
+        &[TERRA_MEDIUM, TERRA_MEDIUM, TERRA_XHIGH],
+        Some(CORRECTED),
+    )
+    .await;
+    let partial_undo = r#"{"corrections":[{"original":"63","replacement":"42","source":"Прежняя оценка."},{"original":"вторая комната","replacement":"первая комната","source":"Другая комната."}]}"#;
+    check_review(
+        &[Some(EDITED), Some("SAME")],
+        &[
+            (EDITED, Some(CORRECTION)),
+            (CORRECTED, Some(partial_undo)),
+            (CORRECTED, Some(VERIFIED)),
+        ],
+        &[TERRA_MEDIUM, TERRA_MEDIUM, TERRA_XHIGH],
+        Some(CORRECTED),
+    )
+    .await;
+    let next =
+        r#"{"corrections":[{"original":"63","replacement":"64","source":"Новое вычисление."}]}"#;
+    let updated = CORRECTED.replace("63", "64");
+    check_review(
+        &[Some(EDITED), Some("SAME")],
+        &[
+            (EDITED, Some(CORRECTION)),
+            (CORRECTED, Some(next)),
+            (&updated, Some(VERIFIED)),
+        ],
+        &[TERRA_MEDIUM, TERRA_MEDIUM, TERRA_XHIGH],
+        Some(&updated),
+    )
+    .await;
 }
 
 async fn check_review(
     editing_replies: &[Option<&'static str>],
     fact_replies: &[(&str, Option<&'static str>)],
+    fact_routes: &[&'static str],
+    expected: Option<&str>,
+) {
+    check_run(
+        QUESTION,
+        None,
+        editing_replies,
+        fact_replies,
+        fact_routes,
+        expected,
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn auto_routes_research_and_recovers_from_an_invalid_router_reply() {
+    for (question, reply, selected) in [
+        (
+            "Опиши майндскейпы Санбрингер",
+            r#"{"tier":"low"}"#,
+            TERRA_MEDIUM,
+        ),
+        (
+            "Подбери команду для этой комнаты",
+            r#"{"tier":"medium"}"#,
+            TERRA_XHIGH,
+        ),
+        (
+            "Вот мой билд, что заменить на скриншоте?",
+            r#"{"tier":"high"}"#,
+            SOL_HIGH,
+        ),
+        ("А если заменить сигну?", "неизвестно", TERRA_XHIGH),
+    ] {
+        check_run(
+            question,
+            Some((reply, selected)),
+            &[Some(FINAL)],
+            &[(FINAL, Some(VERIFIED))],
+            &[TERRA_MEDIUM],
+            Some(FINAL),
+        )
+        .await;
+    }
+}
+
+async fn check_run(
+    question: &'static str,
+    route: Option<(&'static str, &'static str)>,
+    editing_replies: &[Option<&'static str>],
+    fact_replies: &[(&str, Option<&'static str>)],
+    fact_routes: &[&'static str],
     expected: Option<&str>,
 ) {
     let (tx, rx) = watch::channel(PromptProgress::default());
     let fixture = Fixture {
+        question,
+        route,
         turns: Default::default(),
         summaries: Default::default(),
         progress: rx.clone(),
         editing_calls: Default::default(),
+        edit_attempts: Default::default(),
         editing_replies: editing_replies.to_vec(),
         fact_calls: Default::default(),
+        fact_routes: fact_routes.to_vec(),
         fact_replies: fact_replies
             .iter()
             .map(|(answer, reply)| (answer.to_string(), *reply))
@@ -626,11 +805,11 @@ async fn check_review(
             config: OpenAIConfig::new("mock"),
             client: DynHttpClient::new(fixture.clone()),
         },
-        MODEL,
+        if route.is_some() { "auto" } else { MODEL },
         tools,
         Some("Answer the question"),
         crate::PromptInput {
-            text: QUESTION.into(),
+            text: question.into(),
             images: vec![
                 crate::PromptImage::from_bytes(b"\xff\xd8\xff").unwrap(),
                 crate::PromptImage::from_bytes(b"\x89PNG\r\n\x1a\n").unwrap(),
@@ -646,7 +825,9 @@ async fn check_review(
     .await;
     assert_eq!(answer.as_deref().ok(), expected, "{answer:?}");
     let summaries = fixture.summaries.load(Ordering::Relaxed);
-    assert!(summaries >= 2);
+    if route.is_none() {
+        assert!(summaries >= 2);
+    }
     assert_eq!(
         fixture.editing_calls.load(Ordering::Relaxed),
         editing_replies.len()
@@ -655,7 +836,7 @@ async fn check_review(
         fixture.fact_calls.load(Ordering::Relaxed),
         fact_replies.len()
     );
-    let turns = 15 + editing_replies.len() + fact_replies.len();
+    let turns = usize::from(route.is_some()) + 15 + editing_replies.len() + fact_replies.len();
     assert_eq!(rx.borrow().turns, turns);
     if editing_replies.iter().all(Option::is_some) {
         assert_eq!(

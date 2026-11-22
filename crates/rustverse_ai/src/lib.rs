@@ -14,6 +14,7 @@ pub use kit::{SeasonReference, TurnReferences};
 mod model;
 pub use model::ModelSelection;
 mod progress;
+mod routing;
 mod seasons;
 pub mod telemetry;
 mod transport;
@@ -25,7 +26,6 @@ use std::time::Duration;
 use anyhow::{Context, Result, bail, ensure};
 use reqwest::Client;
 use rig_agent::agent::AgentBuilder;
-use rig_core::http_client::DynHttpClient;
 use serde_json::{Value, json};
 
 pub const DEFAULT_MODEL: &str = "gpt-6.2-sol";
@@ -174,6 +174,11 @@ read у большой правки указывает на значение е�
 pub async fn analyze(url: &str, api_key: &str, model: &str) -> Result<String> {
     ensure!(!api_key.trim().is_empty(), "Пустой ключ OpenAI API");
     ensure!(!model.trim().is_empty(), "Не указана модель OpenAI");
+    let model = if model == "auto" {
+        DEFAULT_MODEL
+    } else {
+        model
+    };
     let page = gachabase::Comparison::parse(url)?;
     let span = telemetry::diff_span("cli", model, &page.prev, &page.cur, page.id);
     telemetry::observe(span, analyze_comparison(page, api_key, model)).await
@@ -479,7 +484,20 @@ async fn run_agent(
     history: &[ImagePromptTurn],
     preview: Option<Preview>,
 ) -> Result<String> {
-    let selection: ModelSelection = model.parse()?;
+    let progress = match &preview {
+        Some(Preview::Progress(tx)) => Some(tx.clone()),
+        _ => None,
+    };
+    let selection: ModelSelection = if model == "auto" && question_instructions.is_some() {
+        let routed = routing::choose(&provider, &input, history, progress.as_ref()).await;
+        if let Some(tx) = &progress {
+            tx.send_modify(|p| p.research_model = Some(routed.into()));
+        }
+        tracing::Span::current().record("selected_model", routed);
+        routed.parse()?
+    } else {
+        model.parse()?
+    };
     if !input.images.is_empty() || history.iter().any(|t| !t.images.is_empty()) {
         ensure!(
             rig_core::catalog::ModelFacts::default()
@@ -489,20 +507,8 @@ async fn run_agent(
             selection.slug
         );
     }
-    let progress = match &preview {
-        Some(Preview::Progress(tx)) => Some(tx.clone()),
-        _ => None,
-    };
-    let budget = context::InputBudget::new(&selection.slug, progress);
-    let http = DynHttpClient::new(transport::ReportHttp::new(provider.client, budget));
-    let wire = rig_core::providers::openai::responses_api::wire::Responses::new(
-        provider.config,
-        selection.slug,
-    )
-    .with_strict_tools();
     let research_updates = matches!(&preview, Some(Preview::Progress(_)));
-    let endpoint = rig_core::Model::new(wire, http);
-    let builder = AgentBuilder::new(endpoint.clone());
+    let builder = AgentBuilder::new(provider.endpoint(&selection.slug, progress));
     let builder = match question_instructions {
         Some(instructions) => builder.preamble(instructions),
         None => builder.preamble(INSTRUCTIONS).append_preamble(REVIEW),
@@ -586,14 +592,7 @@ async fn run_agent(
     let span = tracing::info_span!(target: "rustverse::ai", "proofread", otel.status_code = tracing::field::Empty);
     let answer = telemetry::observe(
         span,
-        editing::proofread(
-            endpoint,
-            selection.reasoning,
-            &input,
-            draft,
-            &evidence,
-            preview.as_ref(),
-        ),
+        editing::proofread(&provider, &input, draft, &evidence, preview.as_ref()),
     )
     .await?;
     if let Some(preview) = preview {

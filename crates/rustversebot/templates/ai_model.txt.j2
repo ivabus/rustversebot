@@ -1,5 +1,6 @@
-{% if updated %}Для новых запросов и отчётов выбрана модель {{ updated }}.{% else %}{% if current %}Текущая модель: {{ current }}.
+{% if updated == "auto" %}Для новых вопросов включён автоматический выбор модели.{% elif updated %}Для новых запросов и отчётов выбрана модель {{ updated }}.{% else %}{% if current %}Выбор модели для вопросов: {{ current }}.
 {% elif error %}{{ error }}.
-{% endif %}/model <model_slug>@<reasoning>
+{% endif %}/model auto — выбирать модель по сложности вопроса
+/model <model_slug>@<reasoning>
 Пример: /model gpt-6.2-sol@medium
 Уровни: default, none, minimal, low, medium, high, xhigh, max. Доступные уровни зависят от модели.{% endif %}

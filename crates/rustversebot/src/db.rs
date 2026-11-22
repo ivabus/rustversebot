@@ -416,12 +416,17 @@ impl Db {
             .await
     }
 
-    pub async fn set_ai_model(&self, model: &rustverse_ai::ModelSelection) -> anyhow::Result<()> {
+    pub async fn set_ai_model(&self, setting: &str) -> anyhow::Result<()> {
+        let setting = if setting == "auto" {
+            setting.to_owned()
+        } else {
+            setting.parse::<rustverse_ai::ModelSelection>()?.to_string()
+        };
         self.connection()?
             .execute(
                 "INSERT INTO ai_model(id,setting) VALUES(1,?1)
             ON CONFLICT(id) DO UPDATE SET setting=excluded.setting",
-                [model.to_string()],
+                [setting],
             )
             .await?;
         Ok(())
@@ -1444,22 +1449,20 @@ mod tests {
         let url = format!("file:{}", dir.path().join("model.db").display());
         let db = Db::connect(&url).await.unwrap();
         assert_eq!(db.model_override().await.unwrap(), None);
-        db.set_ai_model(&"gpt-6.2-sol@medium".parse().unwrap())
-            .await
-            .unwrap();
+        db.set_ai_model("gpt-6.2-sol@medium").await.unwrap();
         drop(db);
         let db = Db::connect(&url).await.unwrap();
         assert_eq!(
             db.model_override().await.unwrap().as_deref(),
             Some("gpt-6.2-sol@medium")
         );
-        db.set_ai_model(&"gpt-6.2-sol@default".parse().unwrap())
-            .await
-            .unwrap();
+        db.set_ai_model("gpt-6.2-sol@default").await.unwrap();
         assert_eq!(
             db.model_override().await.unwrap().as_deref(),
             Some("gpt-6.2-sol@default")
         );
+        db.set_ai_model("auto").await.unwrap();
+        assert_eq!(db.model_override().await.unwrap().as_deref(), Some("auto"));
     }
 
     #[tokio::test]

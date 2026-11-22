@@ -46,7 +46,7 @@ enum Command {
     BetaDiff(String),
     /// Задать вопрос о ZZZ текстом или в подписи к скриншотам.
     Prompt(String),
-    /// Выбрать модель ИИ и уровень reasoning (для администратора).
+    /// Выбрать модель ИИ или включить /model auto (для администратора).
     Model(String),
     /// Сравнить версии беты или релиза по данным GachaBase.
     Diff(String),
@@ -110,14 +110,25 @@ pub struct BotState {
 }
 
 impl BotState {
-    pub(crate) async fn ai_model(&self) -> anyhow::Result<rustverse_ai::ModelSelection> {
-        self.db
+    pub(crate) async fn research_setting(&self) -> anyhow::Result<String> {
+        Ok(self
+            .db
             .model_override()
             .await?
-            .unwrap_or_else(|| {
-                std::env::var("OPENAI_MODEL").unwrap_or_else(|_| rustverse_ai::DEFAULT_MODEL.into())
-            })
-            .parse()
+            .or_else(|| std::env::var("OPENAI_MODEL").ok())
+            .unwrap_or_else(|| "auto".into()))
+    }
+
+    pub(crate) async fn ai_model(&self) -> anyhow::Result<rustverse_ai::ModelSelection> {
+        let setting = self.research_setting().await?;
+        if setting == "auto" {
+            return std::env::var("OPENAI_MODEL")
+                .ok()
+                .filter(|s| s != "auto")
+                .unwrap_or_else(|| rustverse_ai::DEFAULT_MODEL.into())
+                .parse();
+        }
+        setting.parse()
     }
 }
 

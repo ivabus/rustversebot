@@ -97,11 +97,14 @@ pub async fn manage(
             (Action::Model, _) => {
                 let setting = args.trim();
                 if setting.is_empty() {
-                    data = json!({"current":state.ai_model().await?.to_string()});
+                    data = json!({"current":state.research_setting().await?});
+                } else if setting == "auto" {
+                    state.db.set_ai_model(setting).await?;
+                    data = json!({"updated":"auto"});
                 } else if setting.contains('@') {
                     match setting.parse::<rustverse_ai::ModelSelection>() {
                         Ok(model) => {
-                            state.db.set_ai_model(&model).await?;
+                            state.db.set_ai_model(&model.to_string()).await?;
                             data = json!({"updated":model.to_string()});
                         }
                         Err(error) => data = json!({"error":error.to_string()}),

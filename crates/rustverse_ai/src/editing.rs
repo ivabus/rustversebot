@@ -5,8 +5,12 @@ use std::collections::HashSet;
 use anyhow::{Context, Result, bail, ensure};
 use rig_agent::agent::AgentBuilder;
 use rig_core::message::Message;
-use rig_core::{Model, completion::Reasoning, providers::openai::responses_api::wire::Responses};
-use serde::Deserialize;
+use rig_core::{
+    Model,
+    completion::{Effort, Reasoning},
+    providers::openai::responses_api::wire::Responses,
+};
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 
 use crate::{Preview, PromptInput, PromptStage, completed_output, report_text, user_message};
@@ -61,14 +65,16 @@ const FACT_CHECK: &str = "Проверь факты в поле answer по во
 Для данных инструмента укажи идентификатор или ревизию и соответствующее значение или условие. Для слов или фото игрока укажи конкретную реплику или видимую деталь.
 За один проход перечисли все обнаруженные фактические ошибки. Объединяй пересекающиеся исправления в одну замену.
 Оценивай условный расчёт с учётом оговорок во всём абзаце. Если условия уже выражены и вывод верен,
-оставь формулировку. Текст replacement попадёт в ответ игроку дословно.";
+оставь формулировку. Текст replacement попадёт в ответ игроку дословно.
+Если передан review_context, проверь спорные правки по исходным данным. Прежние вердикты могут ошибаться.
+При неоднозначности источника сохрани подтверждённое условие и явно обозначь, какая деталь остаётся неизвестной.";
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 struct FactReview {
     corrections: Vec<Correction>,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 struct Correction {
     original: String,
     replacement: String,
@@ -76,12 +82,21 @@ struct Correction {
 }
 
 impl FactReview {
-    fn apply(self, answer: &str) -> Result<Option<String>> {
+    fn reverses(&self, prior: &Self) -> bool {
+        self.corrections.iter().any(|new| {
+            prior
+                .corrections
+                .iter()
+                .any(|old| new.original == old.replacement && new.replacement == old.original)
+        })
+    }
+
+    fn apply(&self, answer: &str) -> Result<Option<String>> {
         if self.corrections.is_empty() {
             return Ok(None);
         }
         let mut edits = Vec::new();
-        for correction in self.corrections {
+        for correction in &self.corrections {
             ensure!(
                 !correction.original.trim().is_empty()
                     && !correction.source.trim().is_empty()
@@ -95,7 +110,10 @@ impl FactReview {
                 answer.rfind(&correction.original) == Some(at),
                 "Фактчек сослался на неоднозначную фразу"
             );
-            edits.push((at..at + correction.original.len(), correction.replacement));
+            edits.push((
+                at..at + correction.original.len(),
+                correction.replacement.as_str(),
+            ));
         }
         edits.sort_unstable_by_key(|(range, _)| range.start);
         let mut corrected = answer.to_owned();
@@ -103,7 +121,7 @@ impl FactReview {
         for (range, replacement) in edits.into_iter().rev() {
             ensure!(range.end <= end, "Поправки фактчека пересекаются");
             end = range.start;
-            corrected.replace_range(range, &replacement);
+            corrected.replace_range(range, replacement);
         }
         ensure!(
             !corrected.trim().is_empty() && corrected != answer,
@@ -114,9 +132,29 @@ impl FactReview {
 }
 
 struct Editor<'a> {
-    model: Model<Responses>,
-    reasoning: Option<Reasoning>,
+    terra: Model<Responses>,
+    sol: Model<Responses>,
+    luna: Model<Responses>,
     preview: Option<&'a Preview>,
+}
+
+#[derive(Clone, Copy, Default, PartialEq)]
+enum Tier {
+    #[default]
+    TerraMedium,
+    TerraXHigh,
+    SolHigh,
+}
+
+impl Tier {
+    fn promote(&mut self) -> bool {
+        *self = match self {
+            Self::TerraMedium => Self::TerraXHigh,
+            Self::TerraXHigh => Self::SolHigh,
+            Self::SolHigh => return false,
+        };
+        true
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -127,16 +165,20 @@ enum ReviewStep {
 }
 
 pub(super) async fn proofread(
-    model: Model<Responses>,
-    reasoning: Option<Reasoning>,
+    provider: &crate::transport::Provider,
     question: &PromptInput,
     draft: String,
     evidence: &[Message],
     preview: Option<&Preview>,
 ) -> Result<String> {
+    let progress = match preview {
+        Some(Preview::Progress(tx)) => Some(tx.clone()),
+        _ => None,
+    };
     let editor = Editor {
-        model,
-        reasoning,
+        terra: provider.endpoint("gpt-6.1-terra", progress.clone()),
+        sol: provider.endpoint("gpt-6.2-sol", progress.clone()),
+        luna: provider.endpoint("gpt-6-luna", progress),
         preview,
     };
     let mut answer = editor
@@ -147,26 +189,53 @@ pub(super) async fn proofread(
             draft
         });
     let mut rejected = HashSet::new();
+    let mut tier = Tier::default();
+    let mut previous = None;
+    let mut review_context: Option<serde_json::Value> = None;
     for _ in 0..MAX_FACT_CHECKS {
         let span = tracing::info_span!(target: "rustverse::ai", "fact_check", otel.status_code = tracing::field::Empty);
-        let correction = crate::telemetry::observe(span, async {
-            let input = json!({"question":question.text, "answer":answer});
+        let review = crate::telemetry::observe(span, async {
+            let mut input = json!({"question":question.text, "answer":answer});
+            if let Some(context) = &review_context {
+                input["review_context"] = context.clone();
+            }
             let message = user_message(&input.to_string(), &question.images);
             let reply = editor
-                .call(ReviewStep::FactCheck, message, evidence)
+                .call(ReviewStep::FactCheck, tier, message, evidence)
                 .await?;
-            serde_json::from_str::<FactReview>(&reply)?.apply(&answer)
+            let review: FactReview = serde_json::from_str(&reply)?;
+            let corrected = review.apply(&answer)?;
+            Ok((review, corrected))
         })
-        .await
-        .context("Не удалось проверить факты в ответе")?;
-        let Some(corrected) = correction else {
-            return Ok(answer);
+        .await;
+        let (review, corrected) = match review {
+            Ok((_, None)) => return Ok(answer),
+            Ok((review, Some(corrected))) => (review, corrected),
+            Err(err) if tier.promote() => {
+                review_context.get_or_insert_with(|| json!({}))["retry_reason"] =
+                    json!(err.to_string());
+                continue;
+            }
+            Err(err) => return Err(err).context("Не удалось проверить факты в ответе"),
         };
+        if rejected.contains(&corrected)
+            || previous
+                .as_ref()
+                .is_some_and(|prior| review.reverses(prior))
+        {
+            ensure!(tier.promote(), "Фактчек повторяет спорную правку");
+            review_context = Some(
+                json!({"conflict":"Поправка отменяет прошлое исправление или возвращает отклонённый текст",
+                "last_applied":previous, "disputed":review}),
+            );
+            continue;
+        }
+        if previous.is_some() {
+            tier.promote();
+        }
+        previous = Some(review);
+        review_context = None;
         rejected.insert(answer);
-        ensure!(
-            !rejected.contains(&corrected),
-            "Фактчек вернулся к уже отклонённому тексту"
-        );
         answer = corrected;
     }
     bail!("Не удалось подтвердить факты после {MAX_FACT_CHECKS} проверок")
@@ -175,20 +244,32 @@ pub(super) async fn proofread(
 impl Editor<'_> {
     async fn copyedit(&self, question: &str, draft: &str) -> Result<String> {
         let mut input = json!({"question": question, "draft": draft});
+        let mut tier = Tier::default();
         for _ in 0..MAX_EDIT_ATTEMPTS {
-            let edited = self
-                .call(ReviewStep::Copyedit, input.to_string(), &[])
-                .await?;
+            let edited = match self
+                .call(ReviewStep::Copyedit, tier, input.to_string(), &[])
+                .await
+            {
+                Ok(edited) => edited,
+                Err(_) if tier.promote() => continue,
+                Err(err) => return Err(err),
+            };
             if edited == draft {
                 return Ok(edited);
             }
             let verdict = self
                 .call(
                     ReviewStep::Compare,
+                    tier,
                     json!({"question": question, "draft": draft, "edited": edited}).to_string(),
                     &[],
                 )
-                .await?;
+                .await;
+            let verdict = match verdict {
+                Ok(verdict) => verdict,
+                Err(_) if tier.promote() => continue,
+                Err(err) => return Err(err),
+            };
             if verdict == "SAME" {
                 return Ok(edited);
             }
@@ -197,8 +278,10 @@ impl Editor<'_> {
                 _ if verdict == "DIFFERENT" => {
                     "Проверка обнаружила расхождение без пояснения. Сверь смысл с черновиком."
                 }
+                _ if tier.promote() => continue,
                 _ => bail!("Unrecognized semantic review verdict"),
             };
+            tier.promote();
             input = json!({"question": question, "draft": draft, "previous_edit": edited, "feedback": feedback});
         }
         Ok(draft.to_owned())
@@ -207,6 +290,7 @@ impl Editor<'_> {
     async fn call(
         &self,
         step: ReviewStep,
+        tier: Tier,
         input: impl Into<Message>,
         history: &[Message],
     ) -> Result<String> {
@@ -231,13 +315,17 @@ impl Editor<'_> {
                     "required":["original","replacement","source"]}}
             }}}});
         }
-        let mut editor = AgentBuilder::new(self.model.clone())
+        let (model, effort) = match (step, tier) {
+            (ReviewStep::Compare, _) => (&self.luna, Effort::High),
+            (_, Tier::TerraMedium) => (&self.terra, Effort::Medium),
+            (_, Tier::TerraXHigh) => (&self.terra, Effort::XHigh),
+            (_, Tier::SolHigh) => (&self.sol, Effort::High),
+        };
+        let editor = AgentBuilder::new(model.clone())
             .record_content_telemetry(crate::telemetry::content_enabled())
             .preamble(instructions)
+            .reasoning(Reasoning::Effort(effort))
             .additional_params(params);
-        if let Some(reasoning) = self.reasoning {
-            editor = editor.reasoning(reasoning);
-        }
         let response = editor
             .build()
             .prompt(input.into())
