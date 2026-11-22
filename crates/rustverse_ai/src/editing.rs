@@ -1,5 +1,7 @@
 //! Copyedit the answer, preserve its meaning, then verify its claims against the research.
 
+use std::collections::HashSet;
+
 use anyhow::{Context, Result, bail, ensure};
 use rig_agent::agent::AgentBuilder;
 use rig_core::message::Message;
@@ -57,7 +59,9 @@ const FACT_CHECK: &str = "Проверь факты в поле answer по во
 Верни JSON с массивом corrections; пустой массив означает, что исправлений не требуется. Для каждой правки укажи original — точную уникальную цитату
 из answer, replacement — минимальную исправленную формулировку на языке ответа, source — конкретный источник и основание правки.
 Для данных инструмента укажи идентификатор или ревизию и соответствующее значение или условие. Для слов или фото игрока укажи конкретную реплику или видимую деталь.
-Объединяй пересекающиеся исправления в одну замену.";
+За один проход перечисли все обнаруженные фактические ошибки. Объединяй пересекающиеся исправления в одну замену.
+Оценивай условный расчёт с учётом оговорок во всём абзаце. Если условия уже выражены и вывод верен,
+оставь формулировку. Текст replacement попадёт в ответ игроку дословно.";
 
 #[derive(Deserialize)]
 struct FactReview {
@@ -126,7 +130,7 @@ pub(super) async fn proofread(
     model: Model<Responses>,
     reasoning: Option<Reasoning>,
     question: &PromptInput,
-    mut draft: String,
+    draft: String,
     evidence: &[Message],
     preview: Option<&Preview>,
 ) -> Result<String> {
@@ -135,29 +139,35 @@ pub(super) async fn proofread(
         reasoning,
         preview,
     };
+    let mut answer = editor
+        .copyedit(&question.text, &draft)
+        .await
+        .unwrap_or_else(|_| {
+            log::warn!("Copyediting failed; fact-checking the current draft");
+            draft
+        });
+    let mut rejected = HashSet::new();
     for _ in 0..MAX_FACT_CHECKS {
-        let edited = editor
-            .copyedit(&question.text, &draft)
-            .await
-            .unwrap_or_else(|_| {
-                log::warn!("Copyediting failed; fact-checking the current draft");
-                draft.clone()
-            });
         let span = tracing::info_span!(target: "rustverse::ai", "fact_check", otel.status_code = tracing::field::Empty);
         let correction = crate::telemetry::observe(span, async {
-            let input = json!({"question":question.text, "answer":edited});
+            let input = json!({"question":question.text, "answer":answer});
             let message = user_message(&input.to_string(), &question.images);
             let reply = editor
                 .call(ReviewStep::FactCheck, message, evidence)
                 .await?;
-            serde_json::from_str::<FactReview>(&reply)?.apply(&edited)
+            serde_json::from_str::<FactReview>(&reply)?.apply(&answer)
         })
         .await
         .context("Не удалось проверить факты в ответе")?;
-        match correction {
-            None => return Ok(edited),
-            Some(corrected) => draft = corrected,
-        }
+        let Some(corrected) = correction else {
+            return Ok(answer);
+        };
+        rejected.insert(answer);
+        ensure!(
+            !rejected.contains(&corrected),
+            "Фактчек вернулся к уже отклонённому тексту"
+        );
+        answer = corrected;
     }
     bail!("Не удалось подтвердить факты после {MAX_FACT_CHECKS} проверок")
 }

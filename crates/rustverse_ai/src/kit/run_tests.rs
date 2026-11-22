@@ -22,7 +22,6 @@ const WRONG_VALUE: &str = "DIFFERENT: Верни значение 42 из чер
 const VERIFIED: &str = r#"{"corrections":[]}"#;
 const CORRECTION: &str = r#"{"corrections":[{"original":"42","replacement":"63","source":"Последний compute вернул 63 для утроенного значения."}]}"#;
 const CORRECTED: &str = "Проверенное значение для Кафки — 63 (вторая комната сезона 62053).";
-const CORRECTED_EDIT: &str = "Для Кафки во второй комнате сезона 62053 проверено значение 63.";
 
 #[derive(Clone)]
 struct Fixture {
@@ -99,11 +98,8 @@ impl HttpClientExt for Fixture {
                 );
                 assert_eq!(body["store"], false);
                 let input = body["input"].to_string();
-                let restart = self.fact_calls.load(Ordering::Relaxed) > 0;
-                assert!(
-                    input.contains(QUESTION)
-                        && input.contains(if restart { CORRECTED } else { FINAL })
-                );
+                assert_eq!(self.fact_calls.load(Ordering::Relaxed), 0);
+                assert!(input.contains(QUESTION) && input.contains(FINAL));
                 assert!(!input.contains(SOURCE) && !input.contains(NOTES));
                 let step = self.editing_calls.fetch_add(1, Ordering::Relaxed);
                 let id = if step % 2 == 1 {
@@ -111,9 +107,7 @@ impl HttpClientExt for Fixture {
                     assert!(!input.contains("previous_edit") && !input.contains("feedback"));
                     "semantic_review"
                 } else {
-                    if restart {
-                        assert!(!input.contains("previous_edit") && !input.contains("feedback"));
-                    } else if step > 0 {
+                    if step > 0 {
                         let rejected = self.editing_replies[step - 2].unwrap();
                         let verdict = self.editing_replies[step - 1].unwrap();
                         assert!(input.contains("previous_edit") && input.contains(rejected));
@@ -579,16 +573,19 @@ async fn check_answer(editing_replies: &[Option<&'static str>], expected: &str) 
 }
 
 #[tokio::test]
-async fn factual_correction_becomes_the_draft_of_a_new_full_review() {
+async fn fact_checker_reviews_the_exact_patch_and_stops_if_a_rejected_text_returns() {
     check_review(
-        &[
-            Some(EDITED),
-            Some("SAME"),
-            Some(CORRECTED_EDIT),
-            Some("SAME"),
-        ],
-        &[(EDITED, Some(CORRECTION)), (CORRECTED_EDIT, Some(VERIFIED))],
-        Some(CORRECTED_EDIT),
+        &[Some(EDITED), Some("SAME")],
+        &[(EDITED, Some(CORRECTION)), (CORRECTED, Some(VERIFIED))],
+        Some(CORRECTED),
+    )
+    .await;
+    let undo =
+        r#"{"corrections":[{"original":"63","replacement":"42","source":"Предыдущее значение."}]}"#;
+    check_review(
+        &[Some(EDITED), Some("SAME")],
+        &[(EDITED, Some(CORRECTION)), (CORRECTED, Some(undo))],
+        None,
     )
     .await;
     check_review(&[Some(FINAL)], &[(FINAL, None)], None).await;
