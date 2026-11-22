@@ -51,6 +51,7 @@ pub(super) async fn proofread(
         });
     }
     let mut editor = AgentBuilder::new(model)
+        .record_content_telemetry(crate::telemetry::content_enabled())
         .preamble(COPYEDIT)
         .additional_params(json!({"store":false}));
     if let Some(reasoning) = reasoning {

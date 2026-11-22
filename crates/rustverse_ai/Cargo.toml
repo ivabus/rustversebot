@@ -21,10 +21,20 @@ rig-core = { version = "0.47", default-features = false }
 rig-agent = { version = "0.47", default-features = false }
 rig-reqwest = { version = "0.47", default-features = false, features = ["native-tls"] }
 log = "0.4"
+opentelemetry = { version = "0.33", default-features = false, features = ["trace"] }
+# The blocking exporter runs on the SDK's batch worker and shares Rig's reqwest native TLS.
+opentelemetry-otlp = { version = "0.33", default-features = false, features = ["http-proto", "reqwest-blocking-client"] }
+opentelemetry_sdk = { version = "0.33", default-features = false, features = ["trace", "internal-logs"] }
+tracing = "0.1"
+tracing-opentelemetry = { version = "0.34", default-features = false }
+tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "native-tls"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "time"] }
 
 [dev-dependencies]
+async-trait = "0.1"
 futures-util = "0.3"
+opentelemetry-http = "0.33"
+opentelemetry_sdk = { version = "0.33", default-features = false, features = ["testing"] }

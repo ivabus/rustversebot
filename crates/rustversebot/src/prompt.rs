@@ -154,6 +154,11 @@ impl ChatAgent for Question {
                     });
                 }
                 history.reverse();
+                tracing::Span::current().record("image_count", input.images.len());
+                tracing::Span::current().record(
+                    "history_image_count",
+                    history.iter().map(|turn| turn.images.len()).sum::<usize>(),
+                );
                 rustverse_ai::prompt_with_images(
                     &state.beta.client,
                     &key,

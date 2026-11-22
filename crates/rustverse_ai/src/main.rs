@@ -14,6 +14,7 @@ struct Args {
 #[tokio::main]
 async fn main() -> Result<()> {
     let args = Args::parse();
+    let _langfuse = rustverse_ai::telemetry::init("rustverse-ai")?;
     let key = rustverse_ai::api_key()?;
     println!(
         "{}",

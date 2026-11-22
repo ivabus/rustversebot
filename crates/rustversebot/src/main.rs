@@ -124,6 +124,7 @@ impl BotState {
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     env_logger::init();
+    let _langfuse = rustverse_ai::telemetry::init("rustversebot")?;
     log::info!("Starting ZZZ Endgame Tracker Bot");
 
     let admin_id = std::env::var("BOT_ADMIN_ID")

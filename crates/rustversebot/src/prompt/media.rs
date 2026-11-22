@@ -212,6 +212,7 @@ async fn dispatch(
     }
 }
 
+#[tracing::instrument(target = "rustverse::ai", name = "download_images", skip_all, fields(count = ids.len()))]
 pub(super) async fn download(
     bot: &Bot,
     ids: &[String],

@@ -223,6 +223,58 @@ async fn long_research_keeps_the_branch_and_numeric_sources_across_compactions()
 }
 
 #[tokio::test]
+async fn langfuse_records_multimodal_research_tools_compaction_and_editing() {
+    use opentelemetry_sdk::trace::{InMemorySpanExporter, SdkTracerProvider};
+    use tracing::Instrument;
+
+    let exporter = InMemorySpanExporter::default();
+    let provider = SdkTracerProvider::builder()
+        .with_simple_exporter(exporter.clone())
+        .build();
+    let _guard = tracing::subscriber::set_default(crate::telemetry::subscriber(&provider));
+    check_answer(Some(EDITED), EDITED)
+        .instrument(tracing::info_span!(target: "rustverse::ai", "prompt"))
+        .await;
+    let spans = exporter.get_finished_spans().unwrap();
+    let root = spans.iter().find(|s| s.name == "prompt").unwrap();
+    assert!(
+        spans
+            .iter()
+            .all(|s| s.span_context.trace_id() == root.span_context.trace_id())
+    );
+    for name in ["chat", "execute_tool", "compact_context", "proofread"] {
+        assert!(spans.iter().any(|s| s.name == name), "missing {name}");
+    }
+    let editor = spans.iter().find(|s| s.name == "proofread").unwrap();
+    assert!(
+        spans
+            .iter()
+            .any(|s| s.name == "chat" && s.parent_span_id == editor.span_context.span_id())
+    );
+    for (operation, field, expected) in [
+        ("chat", "gen_ai.system_instructions", "Answer the question"),
+        ("chat", "gen_ai.input.messages", QUESTION),
+        ("chat", "gen_ai.input.messages", "/9j/"),
+        ("chat", "gen_ai.input.messages", "iVBORw0KGgo="),
+        ("chat", "gen_ai.output.messages", FINAL),
+        ("chat", "gen_ai.output.messages", EDITED),
+        ("chat", "gen_ai.usage.input_tokens", "18"),
+        ("execute_tool", "gen_ai.tool.call.arguments", "x0 * 2.0"),
+        ("execute_tool", "gen_ai.tool.call.result", "42"),
+        ("compact_context", "langfuse.observation.input", NOTES),
+        ("compact_context", "langfuse.observation.output", NOTES),
+    ] {
+        assert!(
+            spans.iter().any(|s| s.name == operation
+                && s.attributes
+                    .iter()
+                    .any(|kv| kv.key.as_str() == field && kv.value.as_str().contains(expected))),
+            "missing {field} on {operation}"
+        );
+    }
+}
+
+#[tokio::test]
 async fn rejected_or_unfinished_edits_deliver_the_researched_draft() {
     check_answer(
         Some("Во второй комнате сезона 62053 значение для Кафки — 43."),

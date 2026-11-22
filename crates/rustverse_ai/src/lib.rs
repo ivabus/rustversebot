@@ -15,6 +15,7 @@ mod model;
 pub use model::ModelSelection;
 mod progress;
 mod seasons;
+pub mod telemetry;
 mod transport;
 use progress::Preview;
 pub use progress::{PromptProgress, PromptStage};
@@ -163,6 +164,15 @@ pub async fn analyze(url: &str, api_key: &str, model: &str) -> Result<String> {
     ensure!(!api_key.trim().is_empty(), "Пустой ключ OpenAI API");
     ensure!(!model.trim().is_empty(), "Не указана модель OpenAI");
     let page = gachabase::Comparison::parse(url)?;
+    let span = telemetry::diff_span("cli", model, &page.prev, &page.cur, page.id);
+    telemetry::observe(span, analyze_comparison(page, api_key, model)).await
+}
+
+async fn analyze_comparison(
+    page: gachabase::Comparison,
+    api_key: &str,
+    model: &str,
+) -> Result<String> {
     let client = Client::builder()
         .connect_timeout(Duration::from_secs(15))
         .timeout(Duration::from_secs(180))
@@ -466,6 +476,7 @@ async fn run_agent(
         None => builder.preamble(INSTRUCTIONS).append_preamble(REVIEW),
     };
     let mut builder = builder
+        .record_content_telemetry(telemetry::content_enabled())
         .append_preamble(TUTORIAL_GUIDANCE)
         .append_preamble(OUTPUT_FORMAT)
         .dynamic_tools(tools.into_tools(research_updates))
@@ -529,13 +540,15 @@ async fn run_agent(
     if question_instructions.is_none() {
         return Ok(draft);
     }
-    let answer = editing::proofread(
+    let answer = telemetry::observe(
+        tracing::info_span!(target: "rustverse::ai", "proofread", otel.status_code = tracing::field::Empty),
+        editing::proofread(
         endpoint,
         selection.reasoning,
         &input.text,
         &draft,
         preview.as_ref(),
-    )
+    ))
     .await
     .unwrap_or_else(|_| {
         log::warn!("Proofreading did not produce a usable edit; delivering the completed draft");

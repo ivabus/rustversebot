@@ -79,19 +79,34 @@ async fn report(
     if let Some(text) = cached_report(state, rev, agent, model).await? {
         return Ok(text);
     }
+    let source = if status.is_some() {
+        "telegram"
+    } else {
+        "scheduler"
+    };
     let generate = |progress| async move {
         let _guard = state.beta.generation.lock().await;
         if let Some(text) = cached_report(state, rev, agent, model).await? {
             return Ok(text);
         }
         let key = rustverse_ai::api_key()?;
-        let text = rustverse_ai::beta::report_with_progress(
-            &state.beta.client,
-            rev,
-            agent,
-            &key,
+        let span = rustverse_ai::telemetry::diff_span(
+            source,
             model,
-            progress,
+            &rev.previous,
+            &rev.current,
+            agent.id,
+        );
+        let text = rustverse_ai::telemetry::observe(
+            span,
+            rustverse_ai::beta::report_with_progress(
+                &state.beta.client,
+                rev,
+                agent,
+                &key,
+                model,
+                progress,
+            ),
         )
         .await?;
         state

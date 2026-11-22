@@ -208,9 +208,19 @@ impl InputBudget {
                 }
                 end /= 2;
             };
-            let response = api.post("", &body).await?;
+            let span = tracing::info_span!(target: "rustverse::ai", "compact_context",
+                gen_ai.operation.name = "chat", gen_ai.request.model = api.model,
+                gen_ai.system_instructions = SUMMARY,
+                langfuse.observation.input = body["input"].as_str(),
+                langfuse.observation.output = tracing::field::Empty,
+                gen_ai.usage.input_tokens = tracing::field::Empty,
+                gen_ai.usage.output_tokens = tracing::field::Empty,
+                otel.status_code = tracing::field::Empty);
+            let response = crate::telemetry::observe(span.clone(), api.post("", &body)).await?;
+            let raw = &response["usage"];
+            span.record("gen_ai.usage.input_tokens", raw["input_tokens"].as_u64());
+            span.record("gen_ai.usage.output_tokens", raw["output_tokens"].as_u64());
             if let Some(progress) = &self.progress {
-                let raw = &response["usage"];
                 let mut usage = Usage::new();
                 usage.input_tokens = raw["input_tokens"].as_u64();
                 usage.output_tokens = raw["output_tokens"].as_u64();
@@ -224,6 +234,7 @@ impl InputBudget {
                 progress.send_modify(|p| p.record_usage(usage));
             }
             *notes = report_text(completed_output(&response)?)?;
+            span.record("langfuse.observation.output", notes.as_str());
             remaining = &remaining[end..];
         }
         Ok(())

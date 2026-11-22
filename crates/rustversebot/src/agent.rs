@@ -99,6 +99,10 @@ pub(crate) async fn launch(
     .await?;
     let bot = bot.clone();
     let state = state.clone();
+    let span = tracing::info_span!(target: "rustverse::ai", "telegram.command",
+        otel.name = command, model = %model, source = "telegram",
+        image_count = tracing::field::Empty, history_image_count = tracing::field::Empty,
+        otel.status_code = tracing::field::Empty);
     slot.send(Box::pin(async move {
         let mut run = AgentRun {
             output: LiveOutput {
@@ -112,7 +116,7 @@ pub(crate) async fn launch(
             last,
             retry_at: None,
         };
-        let outcome = agent.execute(&mut run, &state).await;
+        let outcome = rustverse_ai::telemetry::observe(span, agent.execute(&mut run, &state)).await;
         run.finish(agent.initial_status(), outcome, &state.db).await
     }));
     Ok(())
