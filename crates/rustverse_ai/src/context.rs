@@ -34,6 +34,24 @@ fn protected(item: &Value, index: usize, question: Option<usize>) -> bool {
     Some(index) == question || matches!(item["role"].as_str(), Some("system" | "developer"))
 }
 
+// Rig emits a separate user message per content part. Reassemble an image and
+// its caption so token counting and checkpoint protection see the whole turn.
+fn group_user_images(items: Vec<Value>) -> Vec<Value> {
+    let mut turns: Vec<Value> = Vec::with_capacity(items.len());
+    for mut item in items {
+        if item["role"] == "user"
+            && item["content"][0]["type"] == "input_image"
+            && let Some(last) = turns.last_mut().filter(|v| v["role"] == "user")
+            && let Some(parts) = last["content"].as_array_mut()
+        {
+            parts.append(item["content"].as_array_mut().unwrap());
+        } else {
+            turns.push(item);
+        }
+    }
+    turns
+}
+
 impl Checkpoint {
     fn input(&self, all: &[Value], question: Option<usize>) -> Vec<Value> {
         let mut kept: Vec<_> = all[..self.end]
@@ -233,7 +251,7 @@ impl InputBudget {
         };
         let input = body["input"].take();
         let all = match input {
-            Value::Array(v) => v,
+            Value::Array(v) => group_user_images(v),
             Value::String(s) => vec![json!({"role":"user","content":s})],
             _ => anyhow::bail!("Missing Responses input"),
         };
@@ -287,7 +305,15 @@ impl InputBudget {
                     continue;
                 }
                 remember(item, &mut refs);
-                text.push_str(&serde_json::to_string(item)?);
+                // Completed visual turns are summarized from their caption and answer.
+                // Base64 is neither a useful transcript nor a visual input to the summarizer.
+                let mut transcript = item.clone();
+                if let Some(parts) = transcript["content"].as_array_mut() {
+                    for part in parts.iter_mut().filter(|p| p["type"] == "input_image") {
+                        *part = json!({"type":"input_text","text":"[изображение игрока]"});
+                    }
+                }
+                text.push_str(&serde_json::to_string(&transcript)?);
                 text.push('\n');
             }
             self.summarize(&api, &mut notes, &text).await?;

@@ -2717,6 +2717,7 @@ name = "rustverse_ai"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "base64 0.22.1",
  "chrono",
  "clap",
  "futures-util",
@@ -2758,6 +2759,7 @@ dependencies = [
  "bytes",
  "chrono",
  "env_logger",
+ "futures-util",
  "libsql",
  "log",
  "minijinja",

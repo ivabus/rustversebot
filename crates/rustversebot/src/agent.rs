@@ -45,6 +45,7 @@ impl Status<'_> {
 pub(crate) enum Outcome {
     Answer {
         text: String,
+        image_ids: Vec<String>,
         parent: Option<i32>,
         author: Option<i64>,
         references: rustverse_ai::TurnReferences,
@@ -199,12 +200,13 @@ impl AgentRun<'_> {
             }
             Ok(Outcome::Answer {
                 text,
+                image_ids,
                 parent,
                 author,
                 references,
             }) => {
                 self.totals.stage = PromptStage::Complete;
-                (text, parent, author, references)
+                (text, parent, author, references, image_ids)
             }
             Err(error) => {
                 let message =
@@ -214,13 +216,13 @@ impl AgentRun<'_> {
                     return Ok(());
                 }
                 self.totals.stage = PromptStage::Failed;
-                (message.text, None, None, Default::default())
+                (message.text, None, None, Default::default(), vec![])
             }
         };
         let Status::Question(question) = status else {
             anyhow::bail!("expected question for text answer")
         };
-        let (text, parent, author, references) = answer;
+        let (text, parent, author, references, image_ids) = answer;
         let parts = messages(
             templates,
             &self.model.to_string(),
@@ -231,6 +233,7 @@ impl AgentRun<'_> {
         )?;
         let turn = crate::db::DeliveredTurn {
             question,
+            image_ids: &image_ids,
             answer: &text,
             author,
             references,

@@ -1,5 +1,7 @@
 use super::*;
-use crate::{Preview, PromptProgress, PromptStage, PromptTurn, run_agent, seasons::SeasonTools};
+use crate::{
+    ImagePromptTurn, Preview, PromptProgress, PromptStage, run_agent, seasons::SeasonTools,
+};
 use rig_core::http_client::{
     self, Bytes, DynHttpClient, HttpClientExt, LazyBody, MultipartForm, Request, Response,
     StreamingResponse,
@@ -22,9 +24,12 @@ struct Fixture {
     editor_reply: Option<&'static str>,
 }
 
-// Simulate large tool outputs in the small model's 6144-token input budget.
+// A vision model with a smaller context window than the 384k compaction threshold.
+const MODEL: &str = "gpt-4o";
+const INPUT_LIMIT: usize = 128_000 - 8192;
+
 fn tokens(body: &Value) -> usize {
-    320 + 1500
+    6400 + 30_000
         * body["input"]
             .as_array()
             .into_iter()
@@ -45,7 +50,7 @@ fn call(n: usize, name: &str, mut args: Value) -> Value {
 }
 
 fn response(item: &Value, id: &str) -> Value {
-    json!({"id":id,"object":"response","status":"completed","model":"gpt-4","output":[item],
+    json!({"id":id,"object":"response","status":"completed","model":MODEL,"output":[item],
         "usage":{"input_tokens":18,"output_tokens":2,"total_tokens":20}})
 }
 
@@ -70,16 +75,17 @@ impl HttpClientExt for Fixture {
                     .editor_reply
                     .map(|text| response(&message(text), "copyedit"));
                 reply.unwrap_or_else(|| {
-                    json!({"id":"copyedit","object":"response","model":"gpt-4",
+                    json!({"id":"copyedit","object":"response","model":MODEL,
                     "status":"incomplete","incomplete_details":{"reason":"max_output_tokens"},
                     "usage":{"input_tokens":18,"output_tokens":2,"total_tokens":20},"output":[]})
                 })
             }
             "/v1/responses" => {
-                assert!(tokens(&body) < 6144 && body.get("tools").is_none());
+                assert!(tokens(&body) < INPUT_LIMIT && body.get("tools").is_none());
                 let previous = self.summaries.fetch_add(1, Ordering::Relaxed);
                 assert_eq!(self.progress.borrow().stage, PromptStage::Compacting);
                 let data = body["input"].as_str().unwrap();
+                assert!(!data.contains("base64"));
                 assert!(data.contains(NOTES));
                 if previous == 0 {
                     assert!(data.contains("62053"));
@@ -112,7 +118,7 @@ impl HttpClientExt for Fixture {
     ) -> http_client::Result<StreamingResponse> {
         assert_eq!(request.uri().path(), "/v1/responses");
         let body: Value = serde_json::from_slice(request.body()).unwrap();
-        assert!(tokens(&body) < 6144);
+        assert!(tokens(&body) < INPUT_LIMIT);
         let frames = self.frames(&body);
         let stream: http_client::BoxedStream =
             Box::pin(futures_util::stream::iter([Ok(frames.into())]));
@@ -128,6 +134,21 @@ impl Fixture {
         let n = self.turns.fetch_add(1, Ordering::Relaxed) + 1;
         let input = body["input"].to_string();
         assert!(input.contains(QUESTION));
+        let question = body["input"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .rfind(|v| v["role"] == "user")
+            .unwrap();
+        assert_eq!(question["content"][1]["type"], "input_image", "{question}");
+        assert_eq!(
+            question["content"][1]["image_url"],
+            "data:image/jpeg;base64,/9j/"
+        );
+        assert_eq!(
+            question["content"][2]["image_url"],
+            "data:image/png;base64,iVBORw0KGgo="
+        );
         assert!(input.contains(NOTES));
         if n > 2 {
             assert!(input.contains("62053"));
@@ -234,13 +255,20 @@ async fn check_answer(editor_reply: Option<&'static str>, expected: &str) {
             config: OpenAIConfig::new("mock"),
             client: DynHttpClient::new(fixture.clone()),
         },
-        "gpt-4",
+        MODEL,
         tools,
         Some("Answer the question"),
-        QUESTION.into(),
-        &[PromptTurn {
+        crate::PromptInput {
+            text: QUESTION.into(),
+            images: vec![
+                crate::PromptImage::from_bytes(b"\xff\xd8\xff").unwrap(),
+                crate::PromptImage::from_bytes(b"\x89PNG\r\n\x1a\n").unwrap(),
+            ],
+        },
+        &[ImagePromptTurn {
             question: "Кого выбрать?".into(),
             answer: NOTES.into(),
+            images: vec![crate::PromptImage::from_bytes(b"\xff\xd8\xff").unwrap()],
         }],
         Some(Preview::Progress(tx)),
     )

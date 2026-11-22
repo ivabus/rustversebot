@@ -44,7 +44,7 @@ enum Command {
     Endgame(String),
     /// Изменения агентов за последнюю бету: /betadiff [prev cur].
     BetaDiff(String),
-    /// Спросить о Zenless Zone Zero по данным GachaBase: /prompt <вопрос>.
+    /// Задать вопрос о ZZZ текстом или в подписи к скриншотам.
     Prompt(String),
     /// Выбрать модель ИИ и уровень reasoning (для администратора).
     Model(String),
@@ -203,6 +203,11 @@ async fn main() -> anyhow::Result<()> {
     let handler = dptree::entry()
         .branch(
             Update::filter_message()
+                .filter(prompt::media::is_media)
+                .endpoint(prompt::media::receive),
+        )
+        .branch(
+            Update::filter_message()
                 .filter(handlers::is_missing_detail_command)
                 .endpoint(handlers::missing_detail_command_handler),
         )
@@ -224,7 +229,11 @@ async fn main() -> anyhow::Result<()> {
         .branch(Update::filter_callback_query().endpoint(handlers::callback_handler));
 
     let mut dispatcher = Dispatcher::builder(bot, handler)
-        .dependencies(dptree::deps![state])
+        .dependencies(dptree::deps![
+            state,
+            prompt::media::Albums::default(),
+            shutdown_tx.subscribe()
+        ])
         .build();
     let dispatcher = dispatcher.dispatch();
     tokio::pin!(dispatcher);

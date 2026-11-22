@@ -196,7 +196,7 @@ async fn write_report(
         model,
         tools,
         None,
-        input,
+        input.into(),
         &[],
         progress.map(Preview::Progress),
     )
@@ -215,7 +215,7 @@ pub async fn prompt(
         client,
         key,
         model,
-        question,
+        question.into(),
         &[],
         preview.map(Preview::Text),
     )
@@ -228,6 +228,65 @@ pub async fn prompt(
 pub struct PromptTurn {
     pub question: String,
     pub answer: String,
+}
+
+/// An exchange with ordered attachments, either resolved images or stored file IDs.
+#[derive(Debug, PartialEq)]
+pub struct ImagePromptTurn<I = PromptImage> {
+    pub question: String,
+    pub answer: String,
+    pub images: Vec<I>,
+}
+
+#[derive(Debug, PartialEq)]
+pub struct PromptImage(rig_core::message::Image);
+
+impl PromptImage {
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self> {
+        use base64::{Engine, engine::general_purpose::STANDARD};
+        let format = rig_core::message::ImageMediaType::sniff(bytes)
+            .context("Не удалось распознать изображение. Пришлите фото, JPEG, PNG или WebP.")?;
+        ensure!(
+            matches!(
+                format,
+                rig_core::message::ImageMediaType::JPEG
+                    | rig_core::message::ImageMediaType::PNG
+                    | rig_core::message::ImageMediaType::WEBP
+            ),
+            "Пришлите изображение в формате JPEG, PNG или WebP."
+        );
+        Ok(Self(rig_core::message::Image {
+            data: rig_core::message::DocumentSourceKind::Base64(STANDARD.encode(bytes)),
+            media_type: Some(format),
+            ..Default::default()
+        }))
+    }
+}
+
+#[derive(Default)]
+pub struct PromptInput {
+    pub text: String,
+    pub images: Vec<PromptImage>,
+}
+
+impl<T: Into<String>> From<T> for PromptInput {
+    fn from(text: T) -> Self {
+        Self {
+            text: text.into(),
+            images: vec![],
+        }
+    }
+}
+
+fn user_message(text: &str, images: &[PromptImage]) -> rig_core::message::Message {
+    use rig_core::message::{Message, UserContent};
+    let mut content = vec![UserContent::Text(text.into())];
+    content.extend(
+        images
+            .iter()
+            .map(|image| UserContent::Image(image.0.clone())),
+    );
+    Message::User { content }
 }
 
 /// Stream partial text, model turns, tool invocations and confirmed token usage.
@@ -270,6 +329,25 @@ pub async fn continue_prompt_with_references(
     history: &[PromptTurn],
     progress: tokio::sync::watch::Sender<PromptProgress>,
 ) -> Result<QuestionAnswer> {
+    let history = history
+        .iter()
+        .map(|turn| ImagePromptTurn {
+            question: turn.question.clone(),
+            answer: turn.answer.clone(),
+            images: vec![],
+        })
+        .collect::<Vec<_>>();
+    prompt_with_images(client, key, model, question.into(), &history, progress).await
+}
+
+pub async fn prompt_with_images(
+    client: &Client,
+    key: &str,
+    model: &str,
+    question: PromptInput,
+    history: &[ImagePromptTurn],
+    progress: tokio::sync::watch::Sender<PromptProgress>,
+) -> Result<QuestionAnswer> {
     question_run(
         client,
         key,
@@ -285,14 +363,18 @@ async fn question_run(
     client: &Client,
     key: &str,
     model: &str,
-    question: &str,
-    history: &[PromptTurn],
+    question: PromptInput,
+    history: &[ImagePromptTurn],
     preview: Option<Preview>,
 ) -> Result<QuestionAnswer> {
-    ensure!(!question.trim().is_empty(), "Пустой запрос");
+    ensure!(
+        !question.text.trim().is_empty() || !question.images.is_empty(),
+        "Пустой запрос"
+    );
     let instructions = "Ты помощник по Zenless Zone Zero. Отвечай на языке вопроса.
-В /prompt ты получаешь и отправляешь только текст. Не проси фото или файлы и не обещай прислать вложение.
-Если для персонального подбора действительно нужен ростер, попроси перечислить доступных агентов текстом.
+Игрок может приложить одно или несколько изображений. Учитывай все скриншоты в порядке отправки и отвечай текстом.
+Для персонального подбора используй видимый ростер. Если важная деталь неразборчива, попроси уточнить её текстом или прислать крупный план.
+Если игрок прислал только изображения, учитывай предыдущий вопрос. Если цель остаётся неясной, уточни её.
 Для общего вопроса о командах сразу дай рекомендацию по известным условиям.
 Для выделений, ссылок, цитат и кода используй обычный Markdown. Бот преобразует его в Telegram HTML.
 Для игровых фактов сверяй сведения и ревизию в GachaBase. Сезонные данные доступны через инструменты Nanoka.
@@ -319,14 +401,14 @@ async fn question_run(
 Для Sheer DMG используй Sheer Force и Кзащиты = 1. Аномалии и Хаос считай отдельными событиями по правилам эффекта;
 для обычной аномалии учитывай ATK, коэффициент эффекта, знание аномалии (AP / 100), коэффициент уровня и доли накопления агентов.
 Крит для аномалии учитывай только при явной механике, которая его разрешает.";
-    let tools = kit::KitTools::for_question(client.clone(), question);
+    let tools = kit::KitTools::for_question(client.clone(), &question.text);
     let references = tools.references.clone();
     let text = run_agent(
         transport::Provider::new(key)?,
         model,
         tools,
         Some(instructions),
-        question.to_owned(),
+        question,
         history,
         preview,
     )
@@ -342,11 +424,20 @@ async fn run_agent(
     model: &str,
     tools: kit::KitTools,
     question_instructions: Option<&str>,
-    input: String,
-    history: &[PromptTurn],
+    input: PromptInput,
+    history: &[ImagePromptTurn],
     preview: Option<Preview>,
 ) -> Result<String> {
     let selection: ModelSelection = model.parse()?;
+    if !input.images.is_empty() || history.iter().any(|t| !t.images.is_empty()) {
+        ensure!(
+            rig_core::catalog::ModelFacts::default()
+                .for_model("openai", &selection.slug)
+                .is_none_or(|spec| spec.input.image),
+            "Модель {} не поддерживает изображения.",
+            selection.slug
+        );
+    }
     let progress = match &preview {
         Some(Preview::Progress(tx)) => Some(tx.clone()),
         _ => None,
@@ -387,11 +478,14 @@ async fn run_agent(
     }
     let history = history.iter().flat_map(|turn| {
         [
-            rig_core::message::Message::user(&turn.question),
+            user_message(&turn.question, &turn.images),
             rig_core::message::Message::assistant(&turn.answer),
         ]
     });
-    let runner = builder.build().prompt(input.as_str()).history(history);
+    let runner = builder
+        .build()
+        .prompt(user_message(&input.text, &input.images))
+        .history(history);
     let result = if streaming {
         let (result, events) = runner.run_channel();
         drop(events);
@@ -429,7 +523,7 @@ async fn run_agent(
     let answer = editing::proofread(
         endpoint,
         selection.reasoning,
-        &input,
+        &input.text,
         &draft,
         preview.as_ref(),
     )

@@ -12,6 +12,7 @@ path = "src/main.rs"
 nanoka = { path = "../nanoka", default-features = false }
 chrono = "0.4"
 anyhow = "1"
+base64 = "0.22"
 md5 = "0.7"
 clap = { version = "4", features = ["derive", "env"] }
 regex = "1"

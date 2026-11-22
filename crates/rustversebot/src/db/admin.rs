@@ -181,7 +181,8 @@ mod tests {
         let db = Db::new_test().await.unwrap();
         db.connection
             .execute_batch(
-                "DROP TABLE chat_features; DROP INDEX prompt_turns_parent; PRAGMA user_version=13;",
+                "DROP TABLE chat_features; DROP INDEX prompt_turns_parent;
+                 ALTER TABLE prompt_turns DROP COLUMN image_ids; PRAGMA user_version=13;",
             )
             .await
             .unwrap();

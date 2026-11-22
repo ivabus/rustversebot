@@ -6,6 +6,7 @@ use crate::{
 };
 use anyhow::Result;
 use teloxide::prelude::*;
+pub(crate) mod media;
 
 pub async fn command(
     bot: &Bot,
@@ -13,19 +14,36 @@ pub async fn command(
     question: &str,
     state: &std::sync::Arc<BotState>,
 ) -> Result<()> {
+    let images = msg
+        .reply_to_message()
+        .filter(|reply| reply.chat.id == msg.chat.id)
+        .and_then(media::image_id)
+        .map(str::to_owned)
+        .into_iter()
+        .collect();
+    start(bot, msg, question, state, images).await
+}
+
+async fn start(
+    bot: &Bot,
+    msg: &Message,
+    question: &str,
+    state: &std::sync::Arc<BotState>,
+    images: Vec<String>,
+) -> Result<()> {
     if !crate::agent_access::check_chat(bot, msg.into(), crate::db::AiFeature::Prompt, state)
         .await?
     {
         return Ok(());
     }
-    if question.trim().is_empty() {
+    if question.trim().is_empty() && images.is_empty() {
         BotTemplateSender::new(bot, &state.templates)
             .send_to_thread(msg.chat.id, topic(msg), "prompt_usage", &())
             .await?;
         return Ok(());
     }
     let session = replied_session(msg, &state.db).await?.unwrap_or_default();
-    answer(bot, msg, question, state, session).await
+    answer(bot, msg, question, state, session, images).await
 }
 
 pub fn is_follow_up(msg: Message) -> bool {
@@ -49,17 +67,21 @@ async fn replied_session(msg: &Message, db: &crate::db::Db) -> Result<Option<Pro
 }
 
 pub async fn follow_up(bot: Bot, msg: Message, state: std::sync::Arc<BotState>) -> Result<()> {
-    if let Some(session) = replied_session(&msg, &state.db).await?
-        && let Some(question) = msg.text()
-        && crate::agent_access::check_chat(
-            &bot,
-            (&msg).into(),
-            crate::db::AiFeature::Prompt,
-            &state,
-        )
-        .await?
+    continue_reply(&bot, &msg, msg.text().unwrap_or_default(), &state, vec![]).await
+}
+
+async fn continue_reply(
+    bot: &Bot,
+    msg: &Message,
+    question: &str,
+    state: &std::sync::Arc<BotState>,
+    images: Vec<String>,
+) -> Result<()> {
+    if let Some(session) = replied_session(msg, &state.db).await?
+        && crate::agent_access::check_chat(bot, msg.into(), crate::db::AiFeature::Prompt, state)
+            .await?
     {
-        answer(&bot, &msg, question, &state, session).await?;
+        answer(bot, msg, question, state, session, images).await?;
     }
     Ok(())
 }
@@ -70,6 +92,7 @@ async fn answer(
     question: &str,
     state: &std::sync::Arc<BotState>,
     session: PromptSession,
+    images: Vec<String>,
 ) -> Result<()> {
     agent::launch(
         bot,
@@ -79,7 +102,12 @@ async fn answer(
         state,
         Question {
             author: crate::agent_access::sender(msg).and_then(|u| i64::try_from(u.id.0).ok()),
-            text: question.to_owned(),
+            text: if question.trim().is_empty() {
+                "Изображения без подписи".into()
+            } else {
+                question.to_owned()
+            },
+            images,
             session,
         },
     )
@@ -89,6 +117,7 @@ async fn answer(
 struct Question {
     author: Option<i64>,
     text: String,
+    images: Vec<String>,
     session: PromptSession,
 }
 
@@ -99,15 +128,38 @@ impl ChatAgent for Question {
 
     async fn execute(&self, run: &mut AgentRun<'_>, state: &BotState) -> Result<Outcome> {
         let model = run.model().to_string();
+        let bot = run.bot().clone();
         let answer = run
             .track(self.initial_status(), |tx| async move {
                 let key = rustverse_ai::api_key()?;
-                rustverse_ai::continue_prompt_with_references(
+                let mut remaining = media::IMAGE_BUDGET;
+                let input = rustverse_ai::PromptInput {
+                    text: self.text.clone(),
+                    images: media::download(&bot, &self.images, &mut remaining).await?,
+                };
+                let mut history = Vec::with_capacity(self.session.turns.len());
+                for turn in self.session.turns.iter().rev() {
+                    let mut question = turn.question.clone();
+                    let images = match media::download(&bot, &turn.images, &mut remaining).await {
+                        Ok(images) => images,
+                        Err(_) => {
+                            question.push_str(" [Изображения этой реплики недоступны]");
+                            vec![]
+                        }
+                    };
+                    history.push(rustverse_ai::ImagePromptTurn {
+                        question,
+                        answer: turn.answer.clone(),
+                        images,
+                    });
+                }
+                history.reverse();
+                rustverse_ai::prompt_with_images(
                     &state.beta.client,
                     &key,
                     &model,
-                    &self.text,
-                    &self.session.turns,
+                    input,
+                    &history,
                     tx,
                 )
                 .await
@@ -115,6 +167,7 @@ impl ChatAgent for Question {
             .await?;
         Ok(Outcome::Answer {
             text: answer.text,
+            image_ids: self.images.clone(),
             references: answer.references,
             author: self.author,
             parent: self.session.last_answer,

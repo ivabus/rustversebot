@@ -6,11 +6,12 @@ use std::collections::HashMap;
 mod admin;
 pub(crate) use admin::AiFeature;
 
-const SCHEMA_VERSION: i64 = 14;
+const SCHEMA_VERSION: i64 = 15;
 
 #[derive(Default)]
 pub struct DeliveredTurn<'a> {
     pub question: &'a str,
+    pub image_ids: &'a [String],
     pub answer: &'a str,
     pub author: Option<i64>,
     pub references: rustverse_ai::TurnReferences,
@@ -19,7 +20,7 @@ pub struct DeliveredTurn<'a> {
 #[derive(Default)]
 pub struct PromptSession {
     pub last_answer: Option<i32>,
-    pub turns: Vec<rustverse_ai::PromptTurn>,
+    pub turns: Vec<rustverse_ai::ImagePromptTurn<String>>,
 }
 
 #[derive(Serialize)]
@@ -331,6 +332,14 @@ impl Db {
                  PRAGMA user_version=14;",
             ).await.context("applying migration 14")?;
         }
+        if version < 15 {
+            tx.execute_batch(
+                "ALTER TABLE prompt_turns ADD COLUMN image_ids TEXT NOT NULL DEFAULT '[]';
+                PRAGMA user_version=15;",
+            )
+            .await
+            .context("applying migration 15")?;
+        }
         tx.commit().await.context("committing migrations")?;
         Ok(())
     }
@@ -381,15 +390,15 @@ impl Db {
         participant: Option<i64>,
     ) -> anyhow::Result<Option<PromptSession>> {
         let mut rows=self.connection()?.query(
-            "WITH RECURSIVE history(message_id,parent_id,question,answer,author,lookup_refs,depth) AS (
-                SELECT message_id,parent_id,question,answer,author,lookup_refs,0 FROM prompt_turns
+            "WITH RECURSIVE history(message_id,parent_id,question,answer,author,lookup_refs,image_ids,depth) AS (
+                SELECT message_id,parent_id,question,answer,author,lookup_refs,image_ids,0 FROM prompt_turns
                 WHERE chat_id=?1 AND topic_id IS ?2 AND expires_at>unixepoch()
                   AND message_id=COALESCE((SELECT first_id FROM prompt_parts WHERE chat_id=?1 AND message_id=?3),?3)
                 UNION ALL
-                SELECT p.message_id,p.parent_id,p.question,p.answer,p.author,p.lookup_refs,h.depth+1
+                SELECT p.message_id,p.parent_id,p.question,p.answer,p.author,p.lookup_refs,p.image_ids,h.depth+1
                 FROM history h JOIN prompt_turns p ON p.chat_id=?1 AND p.message_id=h.parent_id
                 WHERE p.topic_id IS ?2 AND p.expires_at>unixepoch()
-             ) SELECT message_id,question,answer,author,lookup_refs FROM history ORDER BY depth DESC",
+             ) SELECT message_id,question,answer,author,lookup_refs,image_ids FROM history ORDER BY depth DESC",
             params![chat,topic,reply_to]).await?;
         let mut session = PromptSession::default();
         while let Some(row) = rows.next().await? {
@@ -407,9 +416,11 @@ impl Db {
             if let Some(refs) = row.get::<Option<String>>(4)? {
                 answer.push_str(&format!("\n\nПроверенные источники этой реплики: {refs}"));
             }
-            session
-                .turns
-                .push(rustverse_ai::PromptTurn { question, answer });
+            session.turns.push(rustverse_ai::ImagePromptTurn {
+                question,
+                answer,
+                images: serde_json::from_str(&row.get::<String>(5)?)?,
+            });
         }
         Ok(session.last_answer.map(|_| session))
     }
@@ -427,9 +438,9 @@ impl Db {
             .transpose()?;
         self.connection()?
             .execute(
-                "INSERT INTO prompt_turns(chat_id,topic_id,message_id,parent_id,question,answer,author,lookup_refs)
-             VALUES(?1,?2,?3,?4,?5,?6,?7,?8) ON CONFLICT(chat_id,message_id) DO NOTHING",
-                params![chat, topic, message, parent, turn.question, turn.answer, turn.author, refs],
+                "INSERT INTO prompt_turns(chat_id,topic_id,message_id,parent_id,question,answer,author,lookup_refs,image_ids)
+             VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9) ON CONFLICT(chat_id,message_id) DO NOTHING",
+                params![chat, topic, message, parent, turn.question, turn.answer, turn.author, refs, serde_json::to_string(turn.image_ids)?],
             )
             .await?;
         Ok(())
@@ -1383,6 +1394,32 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn v14_text_sessions_accept_image_replies_after_migration() {
+        let db = Db::new_test().await.unwrap();
+        db.connection.execute_batch("ALTER TABLE prompt_turns DROP COLUMN image_ids;
+            PRAGMA user_version=14;
+            INSERT INTO prompt_turns(chat_id,message_id,question,answer) VALUES(1,1,'before','answer');").await.unwrap();
+        db.migrate().await.unwrap();
+        db.save_prompt_turn(
+            1,
+            None,
+            2,
+            Some(1),
+            &DeliveredTurn {
+                question: "after",
+                answer: "new",
+                image_ids: &["file".into()],
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        let history = db.prompt_session(1, None, 2, None).await.unwrap().unwrap();
+        assert!(history.turns[0].images.is_empty());
+        assert_eq!(history.turns[1].images, ["file"]);
+    }
+
+    #[tokio::test]
     async fn prompt_replies_recover_the_selected_branch_across_restart_and_expire_each_turn() {
         let dir = tempfile::tempdir().unwrap();
         let url = format!("file:{}", dir.path().join("prompts.db").display());
@@ -1547,6 +1584,7 @@ mod tests {
                 answer: "Комната 2",
                 author: Some(21),
                 references: save(62053),
+                image_ids: &["first".into(), "second".into()],
             },
         )
         .await
@@ -1561,6 +1599,7 @@ mod tests {
                 answer: "Новый сезон",
                 author: Some(22),
                 references: save(62054),
+                ..Default::default()
             },
         )
         .await
@@ -1586,6 +1625,8 @@ mod tests {
             .unwrap();
         assert!(branch.turns[0].question.starts_with("[Другой участник]"));
         assert!(branch.turns[0].answer.contains("62053"));
+        assert_eq!(branch.turns[0].images, ["first", "second"]);
+        assert!(branch.turns[1].images.is_empty());
         assert!(branch.turns.iter().all(|t| !t.answer.contains("62054")));
         let other = db
             .prompt_session(-1, Some(8), 101, Some(22))
