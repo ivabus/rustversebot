@@ -62,7 +62,9 @@ pub fn api_key() -> Result<String> {
 // Append question-specific updates after the established preamble and progress instructions.
 const ENDGAME_GUIDANCE: &str = "На просьбу об обзоре («расскажи о текущем штурме», «что в Шиюй сейчас?») открой get_endgame_season
 для нужного режима и сезона. Опиши комнаты по порядку: кто противник, какие у него уязвимости, какие эффекты комнаты
-и усиления важны для боя. В штурме отдели обычные комнаты от сложного этажа, если он есть.
+и усиления важны для боя. Для сравнения нескольких сезонов или режимов запрашивай известные страницы вместе
+через get_endgame_seasons. При частичном ответе проверяй каждый результат отдельно.
+В штурме отдели обычные комнаты от сложного этажа, если он есть.
 Пороги рангов и правила повторного использования агентов указывай в обзоре только по прямому вопросу о них.
 Описывай действия, которые приносят очки в конкретной комнате, если это помогает понять механику боя.
 Если из условий комнаты следует подходящий архетип команды, можешь кратко назвать его и объяснить почему.
@@ -495,8 +497,9 @@ async fn run_agent(
         Some(instructions) => builder.preamble(instructions),
         None => builder.preamble(INSTRUCTIONS).append_preamble(REVIEW),
     };
+    let tracing_enabled = telemetry::content_enabled();
     let mut builder = builder
-        .record_content_telemetry(telemetry::content_enabled())
+        .record_content_telemetry(tracing_enabled)
         .append_preamble(TUTORIAL_GUIDANCE)
         .append_preamble(OUTPUT_FORMAT)
         .dynamic_tools(tools.into_tools(research_updates))
@@ -513,6 +516,9 @@ async fn run_agent(
         builder = builder.reasoning(reasoning);
     }
     let streaming = preview.is_some();
+    if tracing_enabled {
+        builder = builder.add_hook(telemetry::GenerationTrace::default());
+    }
     if let Some(preview) = preview.clone() {
         builder = builder.add_hook(preview);
     }

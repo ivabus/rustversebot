@@ -16,9 +16,12 @@ use serde_json::{Value, json};
 
 use crate::kit::ToolSpec;
 
-pub(crate) fn definitions() -> [ToolSpec; 2] {
+const MAX_SEASON_REQUESTS: usize = 8;
+
+pub(crate) fn definitions() -> [ToolSpec; 3] {
     let mode = json!({"type":"string","enum":["shiyu_defense","deadly_assault"]});
     let offset = json!({"type":["integer","null"],"minimum":0,"description":"Start with null. Continue with next_offset."});
+    let detail = json!({"type":"object","additionalProperties":false,"properties":{"mode":mode,"season":{"type":"string","description":"current, next, or a five/six-digit season ID"},"offset":offset,"selector":{"type":["string","null"],"description":"Null for the full page, or an exact /zones/... JSON pointer."}},"required":["mode","season","offset","selector"]});
     [
         ToolSpec {
             name: "list_endgame_seasons",
@@ -28,7 +31,12 @@ pub(crate) fn definitions() -> [ToolSpec; 2] {
         ToolSpec {
             name: "get_endgame_season",
             description: "Read season rooms, monster IDs, stats and buffs. Deadly Assault has separate normal and hard floors: agents used in normal rooms are available again on hard. For boss mechanics read the monster ID in GachaBase category=enemies. Use current or next for a fresh relative question, or an exact ID for a follow-up. Pages cover all floors and zones. Use /zones pointers on the same page for a focused read or compute.",
-            parameters: json!({"type":"object","additionalProperties":false,"properties":{"mode":mode,"season":{"type":"string","description":"current, next, or a five/six-digit season ID"},"offset":offset,"selector":{"type":["string","null"],"description":"Null for the full page, or an exact /zones/... JSON pointer."}},"required":["mode","season","offset","selector"]}),
+            parameters: detail.clone(),
+        },
+        ToolSpec {
+            name: "get_endgame_seasons",
+            description: "Read multiple independent season pages in one call. Use for comparisons across modes or rotations. Each result corresponds to one request in input order and has the same fields, pagination, source and team rules as get_endgame_season, or an individual error.",
+            parameters: json!({"type":"object","additionalProperties":false,"properties":{"requests":{"type":"array","minItems":1,"maxItems":MAX_SEASON_REQUESTS,"items":detail}},"required":["requests"]}),
         },
     ]
 }
@@ -146,28 +154,83 @@ impl SeasonTools {
         })
     }
 
-    pub async fn call(&mut self, name: &str, args: Value) -> Result<Value> {
+    pub async fn call(
+        &mut self,
+        name: &str,
+        args: Value,
+        sources: &mut HashMap<String, Value>,
+    ) -> Result<Value> {
+        let now = Utc::now();
+        if name == "get_endgame_seasons" {
+            #[derive(Deserialize)]
+            #[serde(deny_unknown_fields)]
+            struct Batch {
+                requests: Vec<Value>,
+            }
+            let batch: Batch = serde_json::from_value(args)?;
+            ensure!(
+                (1..=MAX_SEASON_REQUESTS).contains(&batch.requests.len()),
+                "Expected 1 to {MAX_SEASON_REQUESTS} season requests"
+            );
+            let mut results = Vec::with_capacity(batch.requests.len());
+            for request in batch.requests {
+                let result = self
+                    .read_page(request.clone(), now, sources)
+                    .await
+                    .unwrap_or_else(|err| json!({"request":request,"error":err.to_string()}));
+                results.push(result);
+            }
+            return Ok(json!({"results":results}));
+        }
+        if name == "get_endgame_season" {
+            return self.read_page(args, now, sources).await;
+        }
         #[derive(Deserialize)]
         #[serde(deny_unknown_fields)]
         struct Query {
             mode: Option<String>,
-            season: Option<String>,
             offset: Option<usize>,
         }
         let q: Query = serde_json::from_value(args)?;
         let ty = q.mode.as_deref().map(mode).transpose()?;
         let offset = q.offset.unwrap_or(0);
-        let now = Utc::now();
-        if name == "list_endgame_seasons" {
-            return self.list(ty, offset, now).await;
+        self.list(ty, offset, now).await
+    }
+
+    async fn read_page(
+        &mut self,
+        args: Value,
+        now: DateTime<Utc>,
+        sources: &mut HashMap<String, Value>,
+    ) -> Result<Value> {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Page {
+            mode: String,
+            season: String,
+            offset: Option<usize>,
+            selector: Option<String>,
         }
-        self.detail(
-            ty.context("Missing mode")?,
-            &q.season.context("Missing season")?,
-            offset,
-            now,
-        )
-        .await
+        let q: Page = serde_json::from_value(args)?;
+        let mut result = self
+            .detail(mode(&q.mode)?, &q.season, q.offset.unwrap_or_default(), now)
+            .await?;
+        if let Some(source) = result["source"].as_str() {
+            sources
+                .entry(source.to_owned())
+                .or_insert_with(|| result.clone());
+            if let Some(path) = q.selector {
+                ensure!(
+                    path.starts_with("/zones/"),
+                    "Expected a pointer into the zones of this page"
+                );
+                let value = result.pointer(&path).context("Unknown zone field")?.clone();
+                result.as_object_mut().unwrap().remove("zones");
+                result["path"] = json!(path);
+                result["value"] = value;
+            }
+        }
+        Ok(result)
     }
 
     async fn list(

@@ -1,4 +1,4 @@
-//! Local arithmetic over numeric fields from this run's immutable GachaBase views.
+//! Local arithmetic over numeric fields from this run's immutable source views.
 use std::collections::HashMap;
 
 use anyhow::{Context, Result, bail, ensure};
@@ -9,6 +9,8 @@ use serde_json::{Value, json};
 #[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 struct Binding {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    name: Option<String>,
     source: String,
     path: String,
 }
@@ -24,7 +26,7 @@ const MAX_VALUES: usize = 512;
 
 pub(crate) struct Prepared {
     request: Calculation,
-    values: Vec<Numbers>,
+    values: Vec<(String, Numbers)>,
 }
 
 enum Numbers {
@@ -46,6 +48,50 @@ fn number(value: &Value) -> Result<f64> {
     value.as_f64().context("Expected a numeric field")
 }
 
+impl Binding {
+    fn resolve(&self, sources: &HashMap<String, Value>, count: &mut usize) -> Result<Numbers> {
+        let entry = sources
+            .get(&self.source)
+            .context("Unknown source in this run")?;
+        ensure!(
+            self.path.starts_with('/') && self.path.len() <= 384,
+            "Expected a JSON pointer"
+        );
+        let value = if let Some((prefix, suffix)) = self.path.split_once("/*/") {
+            let rows = entry
+                .pointer(prefix)
+                .and_then(Value::as_array)
+                .context("Expected an array before /*/")?;
+            *count += rows.len();
+            ensure!(*count <= MAX_VALUES, "Too many numeric inputs");
+            let ptr = format!("/{suffix}");
+            let numbers = rows
+                .iter()
+                .enumerate()
+                .map(|(i, r)| {
+                    number(
+                        r.pointer(&ptr)
+                            .with_context(|| format!("Missing field in row {i}"))?,
+                    )
+                })
+                .collect::<Result<Vec<_>>>()?;
+            Numbers::Array(numbers)
+        } else {
+            let v = entry.pointer(&self.path).context("Missing numeric input")?;
+            if let Some(items) = v.as_array() {
+                *count += items.len();
+                ensure!(*count <= MAX_VALUES, "Too many numeric inputs");
+                Numbers::Array(items.iter().map(number).collect::<Result<Vec<_>>>()?)
+            } else {
+                *count += 1;
+                ensure!(*count <= MAX_VALUES, "Too many numeric inputs");
+                Numbers::Scalar(number(v)?)
+            }
+        };
+        Ok(value)
+    }
+}
+
 impl Calculation {
     pub fn prepare(self, sources: &HashMap<String, Value>) -> Result<Prepared> {
         ensure!(
@@ -53,44 +99,27 @@ impl Calculation {
             "Calculation too large"
         );
         let mut count = 0;
-        let mut values = Vec::new();
-        for binding in &self.bindings {
-            let entry = sources
-                .get(&binding.source)
-                .context("Unknown source in this run")?;
+        let mut values = Vec::with_capacity(self.bindings.len());
+        for (i, binding) in self.bindings.iter().enumerate() {
+            let name = binding.name.clone().unwrap_or_else(|| format!("x{i}"));
+            // Rhai applies the same identifier and reserved-word rules to function pointers.
             ensure!(
-                binding.path.starts_with('/') && binding.path.len() <= 384,
-                "Expected a JSON pointer"
+                name.len() <= 64 && rhai::FnPtr::new(name.as_str()).is_ok(),
+                "Invalid variable name for bindings[{i}]: {name}"
             );
-            let value = if let Some((prefix, suffix)) = binding.path.split_once("/*/") {
-                let rows = entry
-                    .pointer(prefix)
-                    .and_then(Value::as_array)
-                    .context("Expected an array before /*/")?;
-                count += rows.len();
-                ensure!(count <= MAX_VALUES, "Too many numeric inputs");
-                let ptr = format!("/{suffix}");
-                let numbers = rows
-                    .iter()
-                    .map(|r| number(r.pointer(&ptr).context("Missing field in array")?))
-                    .collect::<Result<Vec<_>>>()?;
-                Numbers::Array(numbers)
-            } else {
-                let v = entry
-                    .pointer(&binding.path)
-                    .context("Missing numeric input")?;
-                if let Some(items) = v.as_array() {
-                    count += items.len();
-                    ensure!(count <= MAX_VALUES, "Too many numeric inputs");
-                    Numbers::Array(items.iter().map(number).collect::<Result<Vec<_>>>()?)
-                } else {
-                    count += 1;
-                    Numbers::Scalar(number(v)?)
-                }
-            };
-            values.push(value);
+            ensure!(
+                !values.iter().any(|(existing, _)| existing == &name),
+                "Duplicate variable name for bindings[{i}]: {name}"
+            );
+            let value = binding.resolve(sources, &mut count).map_err(|err| {
+                anyhow::anyhow!(
+                    "bindings[{i}] {name} ({} at {}): {err}",
+                    binding.source,
+                    binding.path
+                )
+            })?;
+            values.push((name, value));
         }
-        ensure!(count <= MAX_VALUES, "Too many numeric inputs");
         Ok(Prepared {
             request: self,
             values,
@@ -127,14 +156,14 @@ impl Prepared {
             },
         );
         let mut scope = Scope::new();
-        for (i, value) in self.values.into_iter().enumerate() {
+        for (name, value) in self.values {
             let input = match value {
                 Numbers::Array(array) => {
                     Dynamic::from_array(array.into_iter().map(Dynamic::from_float).collect())
                 }
                 Numbers::Scalar(n) => Dynamic::from_float(n),
             };
-            scope.push_constant(format!("x{i}"), input);
+            scope.push_constant(name, input);
         }
         let result = engine
             .eval_with_scope::<Dynamic>(&mut scope, &self.request.script)
@@ -156,5 +185,62 @@ impl Prepared {
             finite(result)?
         };
         Ok(json!({"result":result,"inputs":self.request.bindings}))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn calculate(script: &str, bindings: Value) -> Result<Value> {
+        let sources = HashMap::from([
+            ("previous".into(), json!({"hit":20})),
+            ("current".into(), json!({"hits":[6,19],"zero":0})),
+        ]);
+        serde_json::from_value::<Calculation>(json!({"script":script,"bindings":bindings}))?
+            .prepare(&sources)?
+            .run()
+    }
+
+    #[test]
+    fn named_inputs_keep_their_sources_and_work_in_any_order() {
+        let before = json!({"name":"before","source":"previous","path":"/hit"});
+        let hits = json!({"name":"hits","source":"current","path":"/hits"});
+        for bindings in [json!([before, hits]), json!([hits, before])] {
+            let answer = calculate("sum(hits) - before", bindings.clone()).unwrap();
+            assert_eq!(answer, json!({"result":5.0,"inputs":bindings}));
+        }
+        let bindings = json!([hits,{"source":"previous","path":"/hit"}]);
+        assert_eq!(
+            calculate("x1 - sum(hits)", bindings).unwrap()["result"],
+            -5.0
+        );
+    }
+
+    #[test]
+    fn invalid_inputs_identify_what_to_fix() {
+        let binding = |name: &str, path: &str| json!({"name":name,"source":"current","path":path});
+        for name in ["", "let", "a + b"] {
+            assert!(
+                calculate("1", json!([binding(name, "/zero")]))
+                    .unwrap_err()
+                    .to_string()
+                    .contains("Invalid variable name")
+            );
+        }
+        let err = calculate(
+            "x1",
+            json!([binding("x1","/hits"),{"source":"current","path":"/zero"}]),
+        )
+        .unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("Duplicate variable name for bindings[1]: x1")
+        );
+        let err = calculate("before", json!([binding("before", "/absent")])).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("before (current at /absent): Missing numeric input")
+        );
     }
 }

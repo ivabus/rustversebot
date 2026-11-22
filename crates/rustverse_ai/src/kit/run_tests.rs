@@ -153,7 +153,7 @@ impl HttpClientExt for Fixture {
 
 impl Fixture {
     fn frames(&self, body: &Value) -> String {
-        assert_eq!(body["tools"].as_array().unwrap().len(), 6);
+        assert_eq!(body["tools"].as_array().unwrap().len(), 7);
         let n = self.turns.fetch_add(1, Ordering::Relaxed) + 1;
         let input = body["input"].to_string();
         assert!(input.contains(QUESTION));
@@ -189,8 +189,11 @@ impl Fixture {
                 assert!(input.contains("deadly_assault") && input.contains("shiyu_defense"));
                 call(
                     n,
-                    "get_endgame_season",
-                    json!({"mode":"shiyu_defense","season":"current","offset":null}),
+                    "get_endgame_seasons",
+                    json!({"requests":[
+                        {"mode":"shiyu_defense","season":"current","offset":null,"selector":null},
+                        {"mode":"deadly_assault","season":"69999","offset":null,"selector":null}
+                    ]}),
                 )
             }
             3 => {
@@ -202,10 +205,15 @@ impl Fixture {
             "version":"beta_1.0.0_2","offset":null,"core_level":null,"skill_level":null}),
                 )
             }
-            4..=14 => call(
+            4 => call(
                 n,
                 "compute",
-                json!({"script":"x0 * 2.0","bindings":[{"source":SOURCE,"path":"/damage"}]}),
+                json!({"script":"x0","bindings":[{"source":"missing","path":"/damage"}]}),
+            ),
+            5..=14 => call(
+                n,
+                "compute",
+                json!({"script":"damage * 2.0","bindings":[{"name":"damage","source":SOURCE,"path":"/damage"}]}),
             ),
             15 => {
                 assert!(input.contains("42.0"));
@@ -213,29 +221,100 @@ impl Fixture {
             }
             _ => panic!("unexpected extra turn"),
         };
-        let id = &item["id"];
-        let events = if item["type"] == "function_call" {
-            let mut empty = item.clone();
-            empty["arguments"] = json!("");
-            vec![
-                json!({"type":"response.output_item.added","output_index":0,"item":empty}),
-                json!({"type":"response.function_call_arguments.delta","output_index":0,"item_id":id,"delta":item["arguments"]}),
-            ]
-        } else {
-            vec![
-                json!({"type":"response.output_item.added","output_index":0,"item":{"type":"message","role":"assistant","id":id,"content":[]}}),
-                json!({"type":"response.output_text.delta","output_index":0,"content_index":0,"item_id":id,"delta":FINAL}),
-            ]
-        };
+        let mut completed = response(&item, &format!("r{n}"));
+        let output = completed["output"].as_array_mut().unwrap();
+        if n == 4 {
+            output.push(call(
+                104,
+                "get_endgame_season",
+                json!({"mode":"deadly_assault","season":"69999","offset":null,"selector":null}),
+            ));
+        }
+        let mut events = Vec::new();
+        for (index, item) in output.iter().enumerate() {
+            let id = &item["id"];
+            if item["type"] == "function_call" {
+                let mut empty = item.clone();
+                empty["arguments"] = json!("");
+                events.push(
+                    json!({"type":"response.output_item.added","output_index":index,"item":empty}),
+                );
+                events.push(json!({"type":"response.function_call_arguments.delta","output_index":index,"item_id":id,"delta":item["arguments"]}));
+            } else {
+                events.push(json!({"type":"response.output_item.added","output_index":index,"item":{"type":"message","role":"assistant","id":id,"content":[]}}));
+                events.push(json!({"type":"response.output_text.delta","output_index":index,"content_index":0,"item_id":id,"delta":FINAL}));
+            }
+            events
+                .push(json!({"type":"response.output_item.done","output_index":index,"item":item}));
+        }
+        events.push(json!({"type":"response.completed","response":completed}));
         events
             .into_iter()
-            .chain([
-                json!({"type":"response.output_item.done","output_index":0,"item":item}),
-                json!({"type":"response.completed","response":response(&item,&format!("r{n}"))}),
-            ])
             .map(|v| format!("data: {v}\n\n"))
             .collect()
     }
+}
+
+#[tokio::test]
+async fn batch_seasons_keep_order_references_and_full_compute_sources() {
+    let mut kit = KitTools::for_question(Client::new(), QUESTION);
+    kit.seasons = Some(SeasonTools::fixture());
+    let kit = Mutex::new(kit);
+    let path = "/zones/0/zone/monster_level";
+    let page = json!({"mode":"shiyu_defense","season":"62053","offset":0,"selector":path});
+    let batch = KitTools::dispatch(
+        &kit,
+        "get_endgame_seasons",
+        json!({"requests":[
+            {"mode":"shiyu_defense","season":"current","selector":"/zones/bad"},
+            {"mode":"deadly_assault","season":"69999"},
+            page,
+            {"mode":"shiyu_defense","season":"current","offset":1}
+        ]}),
+    )
+    .await
+    .unwrap();
+    let rows = batch["results"].as_array().unwrap();
+    assert_eq!(rows.len(), 4);
+    assert!(rows[0].get("error").is_some());
+    assert_eq!(rows[1]["status"], "unavailable");
+    assert_eq!(rows[2]["value"], 60);
+    assert_eq!(rows[3]["offset"], 1);
+    let computed = KitTools::dispatch(
+        &kit,
+        "compute",
+        json!({"script":"x0+1.0","bindings":[{"source":rows[2]["source"],"path":path}]}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(computed["result"], 61.0);
+    for count in [0, 9] {
+        assert!(
+            KitTools::dispatch(
+                &kit,
+                "get_endgame_seasons",
+                json!({"requests":vec![page.clone();count]})
+            )
+            .await
+            .is_err()
+        );
+    }
+    let refs = kit.lock().await.references.lock().await.clone();
+    assert_eq!(refs.seasons.len(), 2);
+    assert!(
+        refs.seasons
+            .iter()
+            .any(|s| s.page == 1 && s.requested == "current")
+    );
+    assert!(
+        refs.seasons
+            .iter()
+            .any(|s| s.page == 0 && s.path.as_deref() == Some(path))
+    );
+    let single = KitTools::dispatch(&kit, "get_endgame_season", page)
+        .await
+        .unwrap();
+    assert_eq!(rows[2], single);
 }
 
 #[tokio::test]
@@ -277,6 +356,65 @@ async fn langfuse_records_multimodal_research_tools_compaction_and_editing() {
         assert!(spans.iter().any(|s| s.name == name), "missing {name}");
     }
     let editor = spans.iter().find(|s| s.name == "proofread").unwrap();
+    let attribute = |s: &opentelemetry_sdk::trace::SpanData, key: &str| {
+        s.attributes
+            .iter()
+            .find(|kv| kv.key.as_str() == key)
+            .map(|kv| kv.value.to_string())
+    };
+    let ttft = "langfuse.observation.completion_start_time";
+    for chat in spans.iter().filter(|s| s.name == "chat") {
+        if chat.parent_span_id == editor.span_context.span_id() {
+            assert!(attribute(chat, ttft).is_none());
+        } else {
+            let first = chrono::DateTime::parse_from_rfc3339(&attribute(chat, ttft).unwrap())
+                .unwrap()
+                .to_utc();
+            assert!(
+                (chat.start_time..=chat.end_time).contains(&std::time::SystemTime::from(first))
+            );
+        }
+    }
+    let tools: Vec<_> = spans.iter().filter(|s| s.name == "execute_tool").collect();
+    assert_eq!(tools.len(), 15);
+    for tool in tools {
+        let id = attribute(tool, "gen_ai.tool.call.id").unwrap();
+        let generation_id = attribute(tool, "langfuse.observation.metadata.generation_id").unwrap();
+        let generation = spans
+            .iter()
+            .find(|s| s.name == "chat" && s.span_context.span_id().to_string() == generation_id)
+            .unwrap();
+        assert!(
+            tool.links
+                .iter()
+                .any(|l| l.span_context == generation.span_context)
+        );
+        assert!(
+            attribute(generation, "gen_ai.output.messages")
+                .unwrap()
+                .contains(&format!("\"{id}\""))
+        );
+        assert_eq!(
+            attribute(tool, "gen_ai.tool.call.outcome").as_deref(),
+            Some("success")
+        );
+        let status = match attribute(tool, "gen_ai.tool.name").unwrap().as_str() {
+            "get_endgame_seasons" => "partial",
+            "get_endgame_season" => "unavailable",
+            "compute"
+                if attribute(tool, "gen_ai.tool.call.arguments")
+                    .unwrap()
+                    .contains("missing") =>
+            {
+                "error"
+            }
+            _ => "success",
+        };
+        assert_eq!(
+            attribute(tool, "langfuse.observation.metadata.result_status").as_deref(),
+            Some(status)
+        );
+    }
     assert!(
         spans
             .iter()
@@ -290,7 +428,7 @@ async fn langfuse_records_multimodal_research_tools_compaction_and_editing() {
         ("chat", "gen_ai.output.messages", FINAL),
         ("chat", "gen_ai.output.messages", EDITED),
         ("chat", "gen_ai.usage.input_tokens", "18"),
-        ("execute_tool", "gen_ai.tool.call.arguments", "x0 * 2.0"),
+        ("execute_tool", "gen_ai.tool.call.arguments", "damage * 2.0"),
         ("execute_tool", "gen_ai.tool.call.result", "42"),
         ("compact_context", "langfuse.observation.input", NOTES),
         ("compact_context", "langfuse.observation.output", NOTES),

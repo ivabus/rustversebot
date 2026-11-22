@@ -111,18 +111,20 @@ fn remember(item: &Value, refs: &mut BTreeSet<String>) {
             .as_str()
             .and_then(|s| serde_json::from_str::<Value>(s).ok())
     {
-        if let Some(source) = data["source"].as_str() {
-            let path = data["path"]
-                .as_str()
-                .or_else(|| data["result"]["path"].as_str())
-                .unwrap_or("");
-            refs.insert(format!("{source} {path}").trim_end().into());
-        }
-        if let Some(version) = data["version"].as_str() {
-            refs.insert(version.to_owned());
-        }
-        if let (Some(mode), Some(id)) = (data["mode"].as_str(), data["season_id"].as_u64()) {
-            refs.insert(format!("{mode} {id}"));
+        for data in crate::kit::lookup_results(&data) {
+            if let Some(source) = data["source"].as_str() {
+                let path = data["path"]
+                    .as_str()
+                    .or_else(|| data["result"]["path"].as_str())
+                    .unwrap_or("");
+                refs.insert(format!("{source} {path}").trim_end().into());
+            }
+            if let Some(version) = data["version"].as_str() {
+                refs.insert(version.to_owned());
+            }
+            if let (Some(mode), Some(id)) = (data["mode"].as_str(), data["season_id"].as_u64()) {
+                refs.insert(format!("{mode} {id}"));
+            }
         }
     }
     if item["type"] == "function_call"

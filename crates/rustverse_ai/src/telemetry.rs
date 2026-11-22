@@ -22,6 +22,9 @@ use tracing::{Instrument, Span, Subscriber};
 use tracing_opentelemetry::OpenTelemetrySpanExt;
 use tracing_subscriber::{Layer, filter::filter_fn, prelude::*};
 
+mod tools;
+pub(crate) use tools::GenerationTrace;
+
 pub struct Langfuse(SdkTracerProvider);
 
 impl Drop for Langfuse {

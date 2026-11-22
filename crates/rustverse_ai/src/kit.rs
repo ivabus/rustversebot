@@ -34,6 +34,10 @@ pub(crate) fn definitions() -> Vec<ToolSpec> {
     let language = json!({"type":"string","enum":["en","cn"]});
     let offset = json!({"type":["integer","null"],"minimum":0,"description":"Start at 0 or null. Copy next_offset to continue."});
     let version = json!({"type":["string","null"],"description":"Exact revision or branch ('release' or 'beta'). For current live endgame use 'release', then its returned revision. Null reuses the pinned revision or defaults to the newest across both branches for questions. Reports start at cur."});
+    let reference = json!({"type":"object","additionalProperties":false,"properties":{"source":{"type":"string"},"path":{"type":"string"}},"required":["source","path"]});
+    let mut named = reference.clone();
+    named["properties"]["name"] = json!({"type":"string","description":"Unique Rhai variable name, e.g. before or hits. Up to 64 bytes."});
+    named["required"] = json!(["name", "source", "path"]);
     vec![
         ToolSpec {
             name: "list_recent_revisions",
@@ -59,8 +63,8 @@ pub(crate) fn definitions() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "compute",
-            description: "Run a short Rhai calculation over numeric data from this run. Bindings become x0, x1, ... (floats or arrays of floats). Use a source returned by a read or the initial diff; path is a JSON pointer, with /*/ to select one number per row. Example for two arrays: let a = sum(x0); let b = sum(x1); [a, b, 100.0 * (b - a) / a]. Return a number or flat numeric array. Use 1.0 for fractional arithmetic. Use only when arithmetic is needed.",
-            parameters: json!({"type":"object","additionalProperties":false,"properties":{"script":{"type":"string"},"bindings":{"type":"array","items":{"type":"object","additionalProperties":false,"properties":{"source":{"type":"string"},"path":{"type":"string"}},"required":["source","path"]}}},"required":["script","bindings"]}),
+            description: "Calculate with verified numeric fields. Each binding takes an exact source from a read or initial diff, a JSON pointer, and an optional name. Use /*/ for one number per array row. Use names directly in the Rhai script, e.g. sum(hits) or after - before. Unnamed bindings use x0, x1, ... by position. Bound numbers are floats; use 1.0 for fractional arithmetic. Return a finite number or a flat array of up to 64 numbers.",
+            parameters: json!({"type":"object","additionalProperties":false,"properties":{"script":{"type":"string","description":"Rhai expression or short script, up to 2048 bytes."},"bindings":{"type":"array","maxItems":12,"items":{"anyOf":[named,reference]}}},"required":["script","bindings"]}),
         },
     ]
 }
@@ -103,28 +107,38 @@ pub struct TurnReferences {
     pub entries: BTreeSet<String>,
 }
 
+/// A single tool output or the ordered pages of a batch, including during compaction.
+pub(crate) fn lookup_results(result: &Value) -> &[Value] {
+    result["results"]
+        .as_array()
+        .map_or_else(|| std::slice::from_ref(result), Vec::as_slice)
+}
+
 impl TurnReferences {
     pub fn is_empty(&self) -> bool {
         self.seasons.is_empty() && self.revisions.is_empty() && self.entries.is_empty()
     }
 
     fn record(&mut self, name: &str, result: &Value) {
-        if name == "get_endgame_season"
-            && let (Some(mode), Some(id)) = (result["mode"].as_str(), result["season_id"].as_u64())
-        {
-            self.seasons.insert(SeasonReference {
-                mode: mode.into(),
-                season_id: id,
-                requested: result["requested_season"].as_str().unwrap_or(mode).into(),
-                page: result["offset"].as_u64().unwrap_or_default() as usize,
-                path: result["path"].as_str().map(str::to_owned),
-            });
-        }
-        if let Some(version) = result["version"].as_str() {
-            self.revisions.insert(version.into());
-        }
-        if let Some(source) = result["source"].as_str() {
-            self.entries.insert(source.into());
+        for result in lookup_results(result) {
+            if matches!(name, "get_endgame_season" | "get_endgame_seasons")
+                && let (Some(mode), Some(id)) =
+                    (result["mode"].as_str(), result["season_id"].as_u64())
+            {
+                self.seasons.insert(SeasonReference {
+                    mode: mode.into(),
+                    season_id: id,
+                    requested: result["requested_season"].as_str().unwrap_or(mode).into(),
+                    page: result["offset"].as_u64().unwrap_or_default() as usize,
+                    path: result["path"].as_str().map(str::to_owned),
+                });
+            }
+            if let Some(version) = result["version"].as_str() {
+                self.revisions.insert(version.into());
+            }
+            if let Some(source) = result["source"].as_str() {
+                self.entries.insert(source.into());
+            }
         }
     }
 }
@@ -280,33 +294,12 @@ impl KitTools {
 
     async fn call(&mut self, name: &str, args: Value) -> Result<Value> {
         match name {
-            "list_endgame_seasons" | "get_endgame_season" => {
-                let mut args = args;
-                let path = args
-                    .as_object_mut()
-                    .and_then(|args| args.remove("selector"));
-                let mut result = self
-                    .seasons
+            "list_endgame_seasons" | "get_endgame_season" | "get_endgame_seasons" => {
+                self.seasons
                     .as_mut()
                     .context("Season tools unavailable")?
-                    .call(name, args)
-                    .await?;
-                if let Some(source) = result["source"].as_str() {
-                    self.sources
-                        .entry(source.to_owned())
-                        .or_insert_with(|| result.clone());
-                    if let Some(path) = path.as_ref().and_then(Value::as_str) {
-                        ensure!(
-                            path.starts_with("/zones/"),
-                            "Expected a pointer into the zones of this page"
-                        );
-                        let value = result.pointer(path).context("Unknown zone field")?.clone();
-                        result.as_object_mut().unwrap().remove("zones");
-                        result["path"] = json!(path);
-                        result["value"] = value;
-                    }
-                }
-                Ok(result)
+                    .call(name, args, &mut self.sources)
+                    .await
             }
             "list_recent_revisions" => {
                 ensure!(args == json!({}), "Expected empty arguments");
