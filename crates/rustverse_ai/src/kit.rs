@@ -131,7 +131,6 @@ impl TurnReferences {
 
 pub(crate) struct KitTools {
     pub references: Arc<Mutex<TurnReferences>>,
-    pub(crate) players: Option<Arc<dyn crate::players::ChatPlayerData>>,
     client: Client,
     indexes: HashMap<(Category, Language, String), Index>,
     sources: HashMap<String, Value>,
@@ -146,7 +145,6 @@ impl KitTools {
         Self {
             client,
             references: Default::default(),
-            players: None,
             indexes: HashMap::new(),
             sources: HashMap::new(),
             seasons: None,
@@ -226,9 +224,6 @@ impl KitTools {
         if self.seasons.is_some() {
             specs.extend(crate::seasons::definitions());
         }
-        if self.players.is_some() {
-            specs.extend(crate::players::definitions());
-        }
         let shared = Arc::new(Mutex::new(self));
         specs
             .into_iter()
@@ -285,17 +280,6 @@ impl KitTools {
 
     async fn call(&mut self, name: &str, args: Value) -> Result<Value> {
         match name {
-            "get_player_profile" | "get_player_runs" => {
-                let players = self
-                    .players
-                    .as_ref()
-                    .context("Chat player tools unavailable")?;
-                if name == "get_player_profile" {
-                    players.profile(serde_json::from_value(args)?).await
-                } else {
-                    players.runs(serde_json::from_value(args)?).await
-                }
-            }
             "list_endgame_seasons" | "get_endgame_season" => {
                 let mut args = args;
                 let path = args
@@ -592,83 +576,6 @@ mod tests {
     use super::*;
 
     const PAGE: &str = "https://zzz.gachabase.net/diff/agents/1601/sunbringer?prev=beta_3.4.5_20694646&cur=beta_3.4.5_20699967";
-
-    #[tokio::test]
-    async fn chat_player_tools_are_lazy_separate_and_scoped_by_the_adapter() {
-        use crate::players::{ChatPlayerData, PlayerQuery, RunQuery};
-        use std::sync::atomic::{AtomicUsize, Ordering};
-        #[derive(Default)]
-        struct Probe(AtomicUsize);
-        #[async_trait::async_trait]
-        impl ChatPlayerData for Probe {
-            async fn profile(&self, q: PlayerQuery) -> Result<Value> {
-                self.0.fetch_add(1, Ordering::SeqCst);
-                Ok(json!({"player":q.player,"used_only":q.used_only}))
-            }
-            async fn runs(&self, q: RunQuery) -> Result<Value> {
-                self.0.fetch_add(1, Ordering::SeqCst);
-                Ok(json!(q.mode.as_str()))
-            }
-        }
-        let question = || KitTools::for_question(Client::new(), "Подбери мне команду");
-        for spec in crate::players::definitions() {
-            let name = ToolName::new(spec.name).unwrap();
-            assert!(
-                question()
-                    .into_tools(true)
-                    .iter()
-                    .all(|t| t.name() != &name)
-            );
-            assert!(
-                KitTools::new(Client::new())
-                    .into_tools(false)
-                    .iter()
-                    .all(|t| t.name() != &name)
-            );
-        }
-        let probe = Arc::new(Probe::default());
-        let mut kit = question();
-        kit.players = Some(probe.clone());
-        let tools = kit.into_tools(true);
-        let tool = |n| {
-            tools
-                .iter()
-                .find(|t| t.name() == &ToolName::new(n).unwrap())
-                .unwrap()
-        };
-        assert_eq!(probe.0.load(Ordering::SeqCst), 0);
-        let profile = tool("get_player_profile");
-        let forged = profile
-            .run(json!({"player":null,"chat_id":42}))
-            .await
-            .unwrap();
-        assert!(forged.as_json().unwrap().get("error").is_some());
-        assert_eq!(probe.0.load(Ordering::SeqCst), 0);
-        assert_eq!(
-            profile
-                .run(json!({"player":"Samurai","used_only":false,"research_status":null}))
-                .await
-                .unwrap()
-                .as_json(),
-            Some(&json!({"player":"Samurai","used_only":false}))
-        );
-        let own_history = profile
-            .run(json!({"player":null,"used_only":true}))
-            .await
-            .unwrap();
-        assert_eq!(
-            own_history.as_json(),
-            Some(&json!({"player":null,"used_only":true}))
-        );
-        let runs = tool("get_player_runs")
-            .run(
-                json!({"player":null,"mode":"deadly_assault","season_start":null,"before_id":null}),
-            )
-            .await
-            .unwrap();
-        assert_eq!(runs.as_json(), Some(&json!("deadly_assault")));
-        assert_eq!(probe.0.load(Ordering::SeqCst), 3);
-    }
 
     #[tokio::test]
     async fn enemy_search_and_combat_description_use_the_requested_release() {

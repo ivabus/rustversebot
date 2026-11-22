@@ -94,16 +94,14 @@ async fn answer(
     session: PromptSession,
     images: Vec<String>,
 ) -> Result<()> {
-    let sender = crate::agent_access::sender(msg);
     agent::launch(
         bot,
         msg.into(),
-        sender,
+        crate::agent_access::sender(msg),
         "prompt",
         state,
         Question {
-            display_name: sender.map(|u| u.full_name()).unwrap_or_default(),
-            author: sender.and_then(|u| i64::try_from(u.id.0).ok()),
+            author: crate::agent_access::sender(msg).and_then(|u| i64::try_from(u.id.0).ok()),
             text: if question.trim().is_empty() {
                 "Изображения без подписи".into()
             } else {
@@ -117,7 +115,6 @@ async fn answer(
 }
 
 struct Question {
-    display_name: String,
     author: Option<i64>,
     text: String,
     images: Vec<String>,
@@ -135,7 +132,6 @@ impl ChatAgent for Question {
     async fn execute(&self, run: &mut AgentRun<'_>, state: &BotState) -> Result<Outcome> {
         let model = run.model().to_string();
         let bot = run.bot().clone();
-        let chat_id = run.address().chat.0;
         let answer = run
             .track(self.initial_status(), |tx| async move {
                 let key = rustverse_ai::api_key()?;
@@ -166,19 +162,12 @@ impl ChatAgent for Question {
                     "history_image_count",
                     history.iter().map(|turn| turn.images.len()).sum::<usize>(),
                 );
-                let players = self.author.map(|author| crate::db::players::ChatPlayers {
-                    db: state.db.clone(),
-                    chat: chat_id,
-                    author,
-                    display_name: self.display_name.clone(),
-                });
-                rustverse_ai::prompt_with_chat_players(
+                rustverse_ai::prompt_with_images(
                     &state.beta.client,
                     &key,
                     &model,
                     input,
                     &history,
-                    players.map(|p| std::sync::Arc::new(p) as _),
                     tx,
                 )
                 .await
