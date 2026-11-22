@@ -1,4 +1,5 @@
 //! Chat lifecycle for jobs using the rustverse_ai agent loop.
+pub(crate) mod cancel;
 mod telegram;
 use telegram::{LiveMessage, LiveOutput};
 pub(crate) use telegram::{MessageAddress, topic};
@@ -112,22 +113,55 @@ pub(crate) async fn launch(
         rustverse_ai::telemetry::set_prompt_session(&span, session_id.to_string());
         span.record("langfuse.observation.input", text);
     }
-    slot.send(Box::pin(async move {
-        let mut run = AgentRun {
-            output: LiveOutput {
-                bot: &bot,
-                templates: &state.templates,
-                address,
-            },
-            model,
+    let registration = match initial {
+        Status::Question { .. } => Some(state.prompts.register(
+            address,
             target,
-            totals,
-            last,
-            retry_at: None,
-        };
-        let outcome = rustverse_ai::telemetry::observe(span, agent.execute(&mut run, &state)).await;
-        run.finish(agent.initial_status(), outcome, &state.db).await
-    }));
+            user.context("Missing prompt author")?.id,
+        )),
+        Status::Activity { .. } => None,
+    };
+    let cancellation = registration
+        .as_ref()
+        .map(|(guard, abort, _)| (guard.id, abort.clone()));
+    slot.send(
+        cancellation,
+        Box::pin(async move {
+            let mut run = AgentRun {
+                output: LiveOutput {
+                    bot: &bot,
+                    templates: &state.templates,
+                    address,
+                },
+                model,
+                target,
+                totals,
+                last,
+                retry_at: None,
+            };
+            let generate = async {
+                let outcome =
+                    rustverse_ai::telemetry::observe(span, agent.execute(&mut run, &state)).await;
+                if let Some(at) = run.retry_at.take() {
+                    tokio::time::sleep_until(at).await;
+                }
+                outcome
+            };
+            let outcome = if let Some((guard, _, signal)) = registration {
+                let Ok(outcome) = futures_util::future::Abortable::new(generate, signal).await
+                else {
+                    return Ok(());
+                };
+                if !guard.claim() {
+                    return Ok(());
+                }
+                outcome
+            } else {
+                generate.await
+            };
+            run.finish(agent.initial_status(), outcome, &state.db).await
+        }),
+    );
     Ok(())
 }
 
@@ -198,9 +232,6 @@ impl AgentRun<'_> {
         outcome: Result<Outcome>,
         db: &crate::db::Db,
     ) -> Result<()> {
-        if let Some(at) = self.retry_at.take() {
-            tokio::time::sleep_until(at).await;
-        }
         let mut edit = match self.target {
             LiveMessage::Message(id) => Some(id),
             LiveMessage::Draft => None,

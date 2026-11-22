@@ -222,6 +222,7 @@ mod tests {
     async fn test_state() -> Arc<BotState> {
         Arc::new(BotState {
             ai_jobs: crate::ai_jobs::channel().0,
+            prompts: Default::default(),
             beta: crate::beta::BetaPages::new().unwrap(),
             db: crate::db::Db::new_test().await.unwrap(),
             templates: crate::templates::TemplateEngine::new().unwrap(),

@@ -74,21 +74,37 @@ impl HttpClientExt for Fixture {
         request: Request<Bytes>,
     ) -> impl Future<Output = http_client::Result<Response<LazyBody>>> + Send + 'static {
         let body: Value = serde_json::from_slice(request.body()).unwrap();
+        let mut status = 200;
         let reply = match request.uri().path() {
             "/v1/responses/input_tokens" => json!({"input_tokens":tokens(&body)}),
-            "/v1/responses"
-                if body.pointer("/text/format/name") == Some(&json!("research_tier")) =>
-            {
+            "/v1/decisions" => {
                 let (reply, _) = self.route.expect("explicit model must bypass routing");
                 assert_eq!(body["model"], "gpt-6-luna");
-                assert_eq!(body["reasoning"]["effort"], "low");
-                let input = body["input"].to_string();
-                assert!(
-                    input.contains(self.question)
-                        && input.contains(NOTES)
-                        && input.contains("/9j/")
-                );
-                response(&message(reply), "router")
+                assert_eq!(request.headers()["authorization"], "Bearer mock");
+                assert_eq!(body["questions"][0]["type"], "choice");
+                assert_eq!(body["questions"][0]["name"], "research_tier");
+                assert_eq!(body["questions"][0]["choices"].as_array().unwrap().len(), 3);
+                let parts = &body["input"][0]["content"];
+                let text: Value = serde_json::from_str(parts[0]["text"].as_str().unwrap()).unwrap();
+                assert_eq!(text["question"], self.question);
+                assert_eq!(text["recent"][0]["answer"], NOTES);
+                assert_eq!(parts[1]["image_url"], "data:image/jpeg;base64,/9j/");
+                assert_eq!(parts[2]["image_url"], "data:image/png;base64,iVBORw0KGgo=");
+                let answer = match reply {
+                    "refusal" => json!({"type":"refusal","name":"research_tier"}),
+                    tier => {
+                        json!({"type":"choice","name":"research_tier","choice":tier,"confidence":0.8,
+                        "probabilities":[{"value":tier,"probability":0.9}]})
+                    }
+                };
+                if reply == "http_error" {
+                    status = 403;
+                    json!({"error":{"message":"private upstream diagnostic"}})
+                } else {
+                    json!({"model":"gpt-6-luna","answers":[answer],"usage":{
+                    "input_tokens":20,"output_tokens":0,"total_tokens":20,
+                    "input_tokens_details":{"cached_tokens":5,"cache_write_tokens":2}}})
+                }
             }
             "/v1/responses" if self.progress.borrow().stage == PromptStage::FactChecking => {
                 let step = self.fact_calls.fetch_add(1, Ordering::Relaxed);
@@ -202,6 +218,7 @@ impl HttpClientExt for Fixture {
             let bytes = Bytes::from(reply.to_string());
             let body: LazyBody = Box::pin(async move { Ok(bytes) });
             Ok(Response::builder()
+                .status(status)
                 .header("content-type", "application/json")
                 .body(body)?)
         }
@@ -734,22 +751,11 @@ async fn check_review(
 #[tokio::test]
 async fn auto_routes_research_and_recovers_from_an_invalid_router_reply() {
     for (question, reply, selected) in [
-        (
-            "Опиши майндскейпы Санбрингер",
-            r#"{"tier":"low"}"#,
-            TERRA_MEDIUM,
-        ),
-        (
-            "Подбери команду для этой комнаты",
-            r#"{"tier":"medium"}"#,
-            TERRA_XHIGH,
-        ),
-        (
-            "Вот мой билд, что заменить на скриншоте?",
-            r#"{"tier":"high"}"#,
-            SOL_HIGH,
-        ),
+        ("Опиши майндскейпы Санбрингер", "low", TERRA_MEDIUM),
+        ("Подбери команду для этой комнаты", "medium", TERRA_XHIGH),
+        ("Вот мой билд, что заменить на скриншоте?", "high", SOL_HIGH),
         ("А если заменить сигну?", "неизвестно", TERRA_XHIGH),
+        ("А в этой комнате?", "refusal", TERRA_XHIGH),
     ] {
         check_run(
             question,
@@ -760,6 +766,89 @@ async fn auto_routes_research_and_recovers_from_an_invalid_router_reply() {
             Some(FINAL),
         )
         .await;
+    }
+}
+
+#[tokio::test]
+async fn decisions_trace_keeps_the_session_usage_choice_and_fallback() {
+    use opentelemetry_sdk::trace::{InMemorySpanExporter, SdkTracerProvider, SimpleSpanProcessor};
+    use tracing::Instrument;
+
+    let exporter = InMemorySpanExporter::default();
+    let otel = SdkTracerProvider::builder()
+        .with_span_processor(crate::telemetry::SessionProcessor(
+            SimpleSpanProcessor::new(exporter.clone()),
+        ))
+        .build();
+    let _guard = tracing::subscriber::set_default(crate::telemetry::subscriber(&otel));
+    for (choice, selected) in [
+        ("high", SOL_HIGH),
+        ("refusal", TERRA_XHIGH),
+        ("http_error", TERRA_XHIGH),
+    ] {
+        let root = tracing::info_span!(target: "rustverse::ai", "prompt", selected_model = tracing::field::Empty);
+        crate::telemetry::set_prompt_session(&root, choice.into());
+        check_run(
+            QUESTION,
+            Some((choice, selected)),
+            &[Some(FINAL)],
+            &[(FINAL, Some(VERIFIED))],
+            &[TERRA_MEDIUM],
+            Some(FINAL),
+        )
+        .instrument(root)
+        .await;
+        let spans = exporter.get_finished_spans().unwrap();
+        let mut session = spans.iter().filter(|s| {
+            s.attributes
+                .iter()
+                .any(|kv| kv.key.as_str() == "langfuse.session.id" && kv.value.as_str() == choice)
+        });
+        let root = session.clone().find(|s| s.name == "prompt").unwrap();
+        let route = session.find(|s| s.name == "route_question").unwrap();
+        assert_eq!(route.span_context.trace_id(), root.span_context.trace_id());
+        assert_eq!(route.parent_span_id, root.span_context.span_id());
+        let attr = |key: &str| {
+            route
+                .attributes
+                .iter()
+                .find(|kv| kv.key.as_str() == key)
+                .map(|kv| kv.value.to_string())
+                .unwrap()
+        };
+        assert_eq!(attr("langfuse.observation.type"), "generation");
+        assert_eq!(attr("gen_ai.request.model"), "gpt-6-luna");
+        assert_eq!(attr("selected_model"), selected);
+        if choice == "http_error" {
+            assert_eq!(attr("langfuse.observation.metadata.fallback"), "true");
+            assert_eq!(
+                attr("langfuse.observation.status_message"),
+                "Decisions HTTP 403"
+            );
+            assert!(
+                !route
+                    .attributes
+                    .iter()
+                    .any(|kv| kv.value.as_str().contains("private upstream diagnostic"))
+            );
+            continue;
+        }
+        assert_eq!(attr("gen_ai.usage.input_tokens"), "20");
+        assert_eq!(attr("gen_ai.usage.output_tokens"), "0");
+        assert_eq!(attr("gen_ai.usage.cache_read.input_tokens"), "5");
+        assert_eq!(attr("gen_ai.usage.cache_creation.input_tokens"), "2");
+        assert!((attr("gen_ai.usage.cost").parse::<f64>().unwrap() - 0.0000016).abs() < 1e-12);
+        assert!(attr("langfuse.observation.input").contains("input_image"));
+        assert!(attr("langfuse.observation.output").contains(choice));
+        assert_eq!(
+            attr("langfuse.observation.metadata.fallback"),
+            (choice == "refusal").to_string()
+        );
+        if choice == "refusal" {
+            assert!(attr("langfuse.observation.status_message").contains("refused"));
+        } else {
+            assert!(attr("langfuse.observation.output").contains("probabilities"));
+        }
     }
 }
 
@@ -838,7 +927,9 @@ async fn check_run(
     );
     let turns = usize::from(route.is_some()) + 15 + editing_replies.len() + fact_replies.len();
     assert_eq!(rx.borrow().turns, turns);
-    if editing_replies.iter().all(Option::is_some) {
+    if route.is_some_and(|(reply, _)| reply == "http_error") {
+        assert!(rx.borrow().tokens.is_none() && rx.borrow().cost_usd.is_none());
+    } else if editing_replies.iter().all(Option::is_some) {
         assert_eq!(
             rx.borrow().tokens,
             Some((turns as u64 + summaries as u64) * 20)

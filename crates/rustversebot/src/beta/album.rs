@@ -275,9 +275,10 @@ mod tests {
             }
         }));
         let server = tokio::spawn(axum::serve(listener, mock).into_future());
-        let (ai_jobs, mut queue) = crate::ai_jobs::channel();
+        let (ai_jobs, queue) = crate::ai_jobs::channel();
         let state = Arc::new(BotState {
             ai_jobs,
+            prompts: Default::default(),
             beta: BetaPages::new().unwrap(),
             db: crate::db::Db::new_test().await.unwrap(),
             templates: crate::templates::TemplateEngine::new().unwrap(),

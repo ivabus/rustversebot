@@ -46,6 +46,8 @@ enum Command {
     BetaDiff(String),
     /// Задать вопрос о ZZZ текстом или в подписи к скриншотам.
     Prompt(String),
+    /// Остановить запрос /prompt. Для выбора ответьте командой на вопрос или статус.
+    Stop,
     /// Выбрать модель ИИ или включить /model auto (для администратора).
     Model(String),
     /// Сравнить версии беты или релиза по данным GachaBase.
@@ -98,7 +100,8 @@ fn telegram_menu() -> Vec<teloxide::types::BotCommand> {
 
 /// Shared bot state accessible from all handlers and the scheduler.
 pub struct BotState {
-    pub(crate) ai_jobs: tokio::sync::mpsc::Sender<ai_jobs::Job>,
+    pub(crate) ai_jobs: ai_jobs::Sender,
+    pub(crate) prompts: agent::cancel::Prompts,
     pub(crate) beta: beta::BetaPages,
     pub db: db::Db,
     pub templates: templates::TemplateEngine,
@@ -162,6 +165,7 @@ async fn main() -> anyhow::Result<()> {
     let (ai_jobs, ai_queue) = ai_jobs::channel();
     let state = Arc::new(BotState {
         ai_jobs,
+        prompts: Default::default(),
         beta: beta::BetaPages::new()?,
         db,
         templates,

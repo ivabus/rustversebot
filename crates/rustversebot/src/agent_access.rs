@@ -36,8 +36,8 @@ pub async fn admit<'a>(
     user: Option<&User>,
     command: &str,
     state: &'a BotState,
-) -> Result<Option<tokio::sync::mpsc::Permit<'a, crate::ai_jobs::Job>>> {
-    let slot = state.ai_jobs.try_reserve().ok();
+) -> Result<Option<crate::ai_jobs::Permit<'a>>> {
+    let slot = state.ai_jobs.try_reserve();
     let template = if let Some(user) = user {
         let decision = state
             .db

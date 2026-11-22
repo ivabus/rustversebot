@@ -104,6 +104,7 @@ pub async fn command_handler(
             .await
         }
         Command::Prompt(question) => crate::prompt::command(&bot, &msg, &question, &state).await,
+        Command::Stop => crate::agent::cancel::stop(&bot, &msg, &state).await,
         Command::Model(args) => {
             crate::agent_access::manage(
                 &bot,

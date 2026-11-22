@@ -26,6 +26,40 @@ pub(super) struct Provider {
 }
 
 impl Provider {
+    /// Decisions has its own request schema and does not use Responses token counting.
+    pub async fn decide(&self, payload: String) -> anyhow::Result<serde_json::Value> {
+        use anyhow::{Context, ensure};
+        let mut auth = rig_core::http_client::HeaderValue::from_str(&format!(
+            "Bearer {}",
+            self.config.api_key.expose()
+        ))
+        .context("Invalid Decisions credential header")?;
+        auth.set_sensitive(true);
+        let request = Request::post(format!(
+            "{}/decisions",
+            self.config.base_url.trim_end_matches('/')
+        ))
+        .header("authorization", auth)
+        .header("content-type", "application/json")
+        .body(Bytes::from(payload))?;
+        let response = retry_rejected(|| self.client.send(request.clone()))
+            .await
+            .map_err(|err| match err.non_success_status() {
+                Some(status) => anyhow::anyhow!("Decisions HTTP {}", status.as_u16()),
+                None => anyhow::anyhow!("Decisions transport error"),
+            })?;
+        ensure!(
+            response.status().is_success(),
+            "Decisions HTTP {}",
+            response.status().as_u16()
+        );
+        let body = response
+            .into_body()
+            .await
+            .map_err(|_| anyhow::anyhow!("Incomplete Decisions response"))?;
+        serde_json::from_slice(&body).context("Invalid Decisions JSON")
+    }
+
     pub fn endpoint(
         &self,
         model: &str,
