@@ -4,16 +4,10 @@ use rustverse_images::{Template, render};
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let mut args = std::env::args().skip(1);
-    let usage = "usage: rustverse_images <template.typ> <input.json> <output.png> [season.json]\n       rustverse_images beta <report.md> <output.png>\n       rustverse_images infographic <layout.typ> <output.png>";
+    let usage = "usage: rustverse_images <template.typ> <input.json> <output.png> [season.json]\n       rustverse_images beta <report.md> <output.png>";
     let command = args.next().context(usage)?;
     let input = args.next().context(usage)?;
     let output = args.next().context(usage)?;
-    if command == "infographic" {
-        anyhow::ensure!(args.next().is_none(), "{usage}");
-        let source = tokio::fs::read_to_string(input).await?;
-        tokio::fs::write(output, rustverse_images::render_infographic(source).await?).await?;
-        return Ok(());
-    }
     if command == "beta" {
         anyhow::ensure!(args.next().is_none(), "{usage}");
         let report = tokio::fs::read_to_string(input).await?;

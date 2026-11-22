@@ -65,13 +65,10 @@ impl HttpClientExt for Fixture {
                 assert_eq!(body["store"], false);
                 let input = body["input"].to_string();
                 assert!(input.contains(QUESTION) && input.contains(FINAL));
-                assert!(!input.contains(SOURCE) && input.contains(NOTES));
-                let reply = self.editor_reply.map(|text| {
-                    response(
-                        &message(&json!({"text":text,"infographic":null}).to_string()),
-                        "copyedit",
-                    )
-                });
+                assert!(!input.contains(SOURCE) && !input.contains(NOTES));
+                let reply = self
+                    .editor_reply
+                    .map(|text| response(&message(text), "copyedit"));
                 reply.unwrap_or_else(|| {
                     json!({"id":"copyedit","object":"response","model":"gpt-4",
                     "status":"incomplete","incomplete_details":{"reason":"max_output_tokens"},
@@ -249,8 +246,7 @@ async fn check_answer(editor_reply: Option<&'static str>, expected: &str) {
     )
     .await
     .unwrap();
-    assert_eq!(answer.text, expected);
-    assert!(answer.infographic.is_none());
+    assert_eq!(answer, expected);
     let summaries = fixture.summaries.load(Ordering::Relaxed);
     assert!(summaries >= 2);
     assert_eq!(rx.borrow().turns, 16);

@@ -14,7 +14,6 @@ use std::{
 use teloxide::prelude::*;
 
 mod album;
-pub(crate) use album::send_infographic;
 use album::{Page, album_groups, send_album};
 
 pub(crate) struct BetaPages {

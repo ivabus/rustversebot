@@ -1,7 +1,5 @@
 //! Typst → SVG → PNG rendering. Each invocation owns its input files and processes.
 mod beta;
-mod infographic;
-pub use infographic::render_infographic;
 const HIRES_WIDTH: &str = "2560";
 pub use beta::beta_page;
 

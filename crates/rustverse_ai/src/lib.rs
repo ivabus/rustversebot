@@ -9,7 +9,6 @@ mod diff;
 mod editing;
 mod entry_view;
 mod gachabase;
-pub mod infographic;
 mod kit;
 pub use kit::{SeasonReference, TurnReferences};
 mod model;
@@ -202,7 +201,6 @@ async fn write_report(
         progress.map(Preview::Progress),
     )
     .await
-    .map(|answer| answer.text)
 }
 
 /// Answer a standalone question using the same read-only GachaBase tools as beta reports.
@@ -262,7 +260,6 @@ pub async fn continue_prompt(
 pub struct QuestionAnswer {
     pub text: String,
     pub references: TurnReferences,
-    pub infographic: Option<String>,
 }
 
 pub async fn continue_prompt_with_references(
@@ -294,8 +291,7 @@ async fn question_run(
 ) -> Result<QuestionAnswer> {
     ensure!(!question.trim().is_empty(), "Пустой запрос");
     let instructions = "Ты помощник по Zenless Zone Zero. Отвечай на языке вопроса.
-В этом чате тебе доступен только текст сообщений. Не проси фото, скриншоты или файлы.
-При явной просьбе об инфографике подготовь содержательный текст ответа: по нему приложение отдельно сверстает и проверит PNG.
+В /prompt ты получаешь и отправляешь только текст. Не проси фото или файлы и не обещай прислать вложение.
 Если для персонального подбора действительно нужен ростер, попроси перечислить доступных агентов текстом.
 Для общего вопроса о командах сразу дай рекомендацию по известным условиям.
 Для выделений, ссылок, цитат и кода используй обычный Markdown. Бот преобразует его в Telegram HTML.
@@ -325,7 +321,7 @@ async fn question_run(
 Крит для аномалии учитывай только при явной механике, которая его разрешает.";
     let tools = kit::KitTools::for_question(client.clone(), question);
     let references = tools.references.clone();
-    let answer = run_agent(
+    let text = run_agent(
         transport::Provider::new(key)?,
         model,
         tools,
@@ -336,8 +332,7 @@ async fn question_run(
     )
     .await?;
     Ok(QuestionAnswer {
-        text: answer.text,
-        infographic: answer.infographic,
+        text,
         references: references.lock().await.clone(),
     })
 }
@@ -350,14 +345,21 @@ async fn run_agent(
     input: String,
     history: &[PromptTurn],
     preview: Option<Preview>,
-) -> Result<editing::EditedAnswer> {
+) -> Result<String> {
     let selection: ModelSelection = model.parse()?;
     let progress = match &preview {
         Some(Preview::Progress(tx)) => Some(tx.clone()),
         _ => None,
     };
-    let endpoint = provider.endpoint(&selection, progress);
+    let budget = context::InputBudget::new(&selection.slug, progress);
+    let http = DynHttpClient::new(transport::ReportHttp::new(provider.client, budget));
+    let wire = rig_core::providers::openai::responses_api::wire::Responses::new(
+        provider.config,
+        selection.slug,
+    )
+    .with_strict_tools();
     let research_updates = matches!(&preview, Some(Preview::Progress(_)));
+    let endpoint = rig_core::Model::new(wire, http);
     let builder = AgentBuilder::new(endpoint.clone());
     let builder = match question_instructions {
         Some(instructions) => builder.preamble(instructions),
@@ -383,7 +385,6 @@ async fn run_agent(
     if let Some(preview) = preview.clone() {
         builder = builder.add_hook(preview);
     }
-    let previous = history.last();
     let history = history.iter().flat_map(|turn| {
         [
             rig_core::message::Message::user(&turn.question),
@@ -423,23 +424,22 @@ async fn run_agent(
     let draft = report_text(completed_output(&call.raw)?)?;
     drop(result);
     if question_instructions.is_none() {
-        return Ok(editing::EditedAnswer::plain(draft));
+        return Ok(draft);
     }
     let answer = editing::proofread(
         endpoint,
         selection.reasoning,
         &input,
         &draft,
-        previous,
         preview.as_ref(),
     )
     .await
     .unwrap_or_else(|_| {
         log::warn!("Proofreading did not produce a usable edit; delivering the completed draft");
-        editing::EditedAnswer::plain(draft)
+        draft
     });
     if let Some(preview) = preview {
-        let text = answer.text.chars().take(4096).collect();
+        let text = answer.chars().take(4096).collect();
         match preview {
             Preview::Text(tx) => {
                 tx.send_replace(text);

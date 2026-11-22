@@ -14,9 +14,6 @@ pub enum PromptStage {
     Researching,
     Writing,
     Editing,
-    Designing,
-    Rendering,
-    ReviewingImage,
     Complete,
     Failed,
 }
