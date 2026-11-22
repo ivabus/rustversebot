@@ -14,6 +14,7 @@ pub enum PromptStage {
     Researching,
     Writing,
     Editing,
+    FactChecking,
     Complete,
     Failed,
 }

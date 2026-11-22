@@ -34,6 +34,13 @@ pub(crate) struct Prepared {
 enum Numbers {
     Scalar(f64),
     Array(Vec<f64>),
+    Matches(Vec<NumericMatch>),
+}
+
+#[derive(Serialize)]
+struct NumericMatch {
+    path: String,
+    value: f64,
 }
 
 fn number(value: &Value) -> Result<f64> {
@@ -51,6 +58,58 @@ fn number(value: &Value) -> Result<f64> {
 }
 
 impl Binding {
+    fn expand(&self, entry: &Value, remaining: usize) -> Result<Vec<NumericMatch>> {
+        let mut nodes = vec![(String::new(), entry)];
+        for segment in self.path[1..].split('/') {
+            let pointer = format!("/{segment}");
+            let mut next = Vec::new();
+            for (path, node) in nodes {
+                if segment != "*" {
+                    let path = format!("{path}{pointer}");
+                    let child = node
+                        .pointer(&pointer)
+                        .with_context(|| format!("Missing field at {path}"))?;
+                    next.push((path, child));
+                    continue;
+                }
+                match node {
+                    Value::Array(items) => {
+                        ensure!(
+                            items.len() <= MAX_VALUES - next.len(),
+                            "Too many wildcard matches at {path}"
+                        );
+                        next.extend(
+                            items
+                                .iter()
+                                .enumerate()
+                                .map(|(i, v)| (format!("{path}/{i}"), v)),
+                        );
+                    }
+                    Value::Object(fields) => {
+                        ensure!(
+                            fields.len() <= MAX_VALUES - next.len(),
+                            "Too many wildcard matches at {path}"
+                        );
+                        next.extend(fields.iter().map(|(key, v)| {
+                            let key = key.replace('~', "~0").replace('/', "~1");
+                            (format!("{path}/{key}"), v)
+                        }));
+                    }
+                    _ => bail!("Wildcard expects an array or object at {path}"),
+                }
+            }
+            nodes = next;
+        }
+        ensure!(nodes.len() <= remaining, "Too many numeric inputs");
+        nodes
+            .into_iter()
+            .map(|(path, node)| {
+                let value = number(node).with_context(|| format!("At {path}"))?;
+                Ok(NumericMatch { path, value })
+            })
+            .collect()
+    }
+
     fn resolve(&self, sources: &HashMap<String, Value>, count: &mut usize) -> Result<Numbers> {
         let entry = sources
             .get(&self.source)
@@ -61,31 +120,10 @@ impl Binding {
             "JSON pointer is {} bytes; maximum is 384",
             self.path.len()
         );
-        let value = if let Some((prefix, suffix)) = self.path.split_once("/*/") {
-            let collection = entry.pointer(prefix).with_context(|| {
-                format!("No field at {prefix:?} before the wildcard; check the source page")
-            })?;
-            let rows = collection.as_array().with_context(|| {
-                format!("Wildcard requires an array at {prefix:?}; for an object use its exact key")
-            })?;
-            *count += rows.len();
-            ensure!(*count <= MAX_VALUES, "Too many numeric inputs");
-            let ptr = format!("/{suffix}");
-            let numbers = rows
-                .iter()
-                .enumerate()
-                .map(|(i, r)| {
-                    let field = r.pointer(&ptr).with_context(|| {
-                        if suffix.split('/').any(|segment| segment == "*") {
-                            format!("Only one array wildcard is expanded; replace later wildcards in {ptr} with exact keys or indices (row {i})")
-                        } else {
-                            format!("Missing field at {prefix}/{i}{ptr}; check the source page")
-                        }
-                    })?;
-                    number(field).with_context(|| format!("At {prefix}/{i}{ptr}"))
-                })
-                .collect::<Result<Vec<_>>>()?;
-            Numbers::Array(numbers)
+        let value = if self.path.split('/').any(|s| s == "*") {
+            let matches = self.expand(entry, MAX_VALUES - *count)?;
+            *count += matches.len();
+            Numbers::Matches(matches)
         } else {
             let v = entry.pointer(&self.path).context("Missing numeric input")?;
             if let Some(items) = v.as_array() {
@@ -149,7 +187,8 @@ impl Prepared {
         engine
             .set_max_operations(8000)
             .set_max_variables(32 + 1) // Keep the script's variable budget alongside calls.
-            .set_max_expr_depths(24)
+            .set_max_expr_depths(24, 24)
+            .set_max_call_levels(16)
             .set_max_array_size(MAX_VALUES)
             .set_max_string_size(512)
             .set_max_map_size(16);
@@ -157,6 +196,16 @@ impl Prepared {
         engine.register_iterator::<Array>();
         engine.register_iterator::<std::ops::Range<i64>>();
         engine.register_fn("len", |v: &mut Array| v.len() as i64);
+        engine.register_fn(
+            "push",
+            |items: &mut Array, item: Dynamic| -> Result<(), Box<rhai::EvalAltResult>> {
+                if items.len() >= MAX_VALUES {
+                    return Err("Array size limit exceeded".into());
+                }
+                items.push(item);
+                Ok(())
+            },
+        );
         engine.register_fn("abs", f64::abs);
         engine.register_fn("min", f64::min);
         engine.register_fn("max", f64::max);
@@ -173,14 +222,26 @@ impl Prepared {
         );
         let mut scope = Scope::new();
         history::bind(&mut engine, &mut scope, calls);
-        for (name, value) in self.values {
+        let mut inputs = Vec::with_capacity(self.values.len());
+        for ((name, value), binding) in self.values.into_iter().zip(self.request.bindings) {
+            let mut reference = json!(binding);
             let input = match value {
                 Numbers::Array(array) => {
                     Dynamic::from_array(array.into_iter().map(Dynamic::from_float).collect())
                 }
                 Numbers::Scalar(n) => Dynamic::from_float(n),
+                Numbers::Matches(matches) => {
+                    reference["matches"] = json!(matches);
+                    Dynamic::from_array(
+                        matches
+                            .into_iter()
+                            .map(|m| Dynamic::from_float(m.value))
+                            .collect(),
+                    )
+                }
             };
             scope.push_constant(name, input);
+            inputs.push(reference);
         }
         let result = engine
             .eval_with_scope::<Dynamic>(&mut scope, &self.request.script)
@@ -201,7 +262,7 @@ impl Prepared {
         } else {
             finite(result)?
         };
-        Ok(json!({"result":result,"inputs":self.request.bindings}))
+        Ok(json!({"result":result,"inputs":inputs}))
     }
 }
 
@@ -300,10 +361,14 @@ mod tests {
             "bindings":[],
             "script":r#"
                 let rooms = calls[-1].result.results[-1].rooms;
-                for id in rooms {
-                    if rooms[id].id == 7 { return [len(rooms), rooms[id].hp]; }
+                fn collect(rooms) {
+                    let rows = [];
+                    for id in rooms.keys() { rows.push(rooms[id]); }
+                    let output = [];
+                    for row in rows { output.push([row.id, row.hp]); }
+                    return output[0];
                 }
-                []
+                collect(rooms)
             "#
         }))
         .unwrap();
@@ -312,7 +377,54 @@ mod tests {
             .unwrap()
             .run(calls)
             .unwrap();
-        assert_eq!(value["result"], json!([1, 12.5]));
+        assert_eq!(value["result"], json!([7, 12.5]));
+    }
+
+    #[test]
+    fn nested_wildcards_keep_exact_source_paths_in_value_order() {
+        let sources = HashMap::from([(
+            "page".into(),
+            json!({"rows":[
+                {"a~/b":{"values":[1,2]}}, {}, {"z":{"values":[5]}}
+            ]}),
+        )]);
+        let request: Calculation = serde_json::from_value(json!({
+            "script":"x0", "bindings":[{"source":"page","path":"/rows/*/*/values/*"}]
+        }))
+        .unwrap();
+        let value = request.prepare(&sources).unwrap().run(vec![]).unwrap();
+        assert_eq!(value["result"], json!([1.0, 2.0, 5.0]));
+        assert_eq!(
+            value["inputs"][0]["matches"],
+            json!([
+                {"path":"/rows/0/a~0~1b/values/0","value":1.0},
+                {"path":"/rows/0/a~0~1b/values/1","value":2.0},
+                {"path":"/rows/2/z/values/0","value":5.0}
+            ])
+        );
+    }
+
+    #[test]
+    fn local_functions_and_collection_operations_respect_limits() {
+        for script in [
+            "fn recurse() { recurse() } recurse()",
+            "let a=[]; for n in 0..513 { a.push(n); } len(a)",
+        ] {
+            assert!(calculate(script, json!([])).is_err(), "{script}");
+        }
+        let sources = HashMap::from([("page".into(), json!([vec![1; 257], vec![2; 256]]))]);
+        let request: Calculation = serde_json::from_value(json!({
+            "script":"sum(x0)", "bindings":[{"source":"page","path":"/*/*"}]
+        }))
+        .unwrap();
+        assert!(
+            request
+                .prepare(&sources)
+                .err()
+                .unwrap()
+                .to_string()
+                .contains("Too many wildcard matches")
+        );
     }
 
     #[test]
@@ -329,12 +441,15 @@ mod tests {
             request.prepare(&sources).err().unwrap().to_string()
         };
         for (path, message) in [
-            ("/zones/*/rooms/*/hp", "replace later wildcards"),
-            ("/zones/0/rooms/*/hp", "for an object use its exact key"),
             (
-                "/zones/*/rooms/43/hp",
-                "Missing field at /zones/0/rooms/43/hp",
+                "/zones/*/rooms/*/hp",
+                "At /zones/1/rooms/42/hp: Expected a numeric field",
             ),
+            (
+                "/zones/0/rooms/42/hp/*",
+                "Wildcard expects an array or object at /zones/0/rooms/42/hp",
+            ),
+            ("/zones/*/rooms/43/hp", "Missing field at /zones/0/rooms/43"),
             (
                 "/zones/*/rooms/42/hp",
                 "At /zones/1/rooms/42/hp: Expected a numeric field",

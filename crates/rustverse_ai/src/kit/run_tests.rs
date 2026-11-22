@@ -19,6 +19,10 @@ const WRONG: &str = "В первой комнате сезона 62053 знач�
 const STILL_WRONG: &str = "Во второй комнате сезона 62053 значение для Кафки равно 24.";
 const WRONG_ROOM: &str = "DIFFERENT: Верни вторую комнату из черновика.";
 const WRONG_VALUE: &str = "DIFFERENT: Верни значение 42 из черновика.";
+const VERIFIED: &str = r#"{"corrections":[]}"#;
+const CORRECTION: &str = r#"{"corrections":[{"original":"42","replacement":"63","source":"Последний compute вернул 63 для утроенного значения."}]}"#;
+const CORRECTED: &str = "Проверенное значение для Кафки — 63 (вторая комната сезона 62053).";
+const CORRECTED_EDIT: &str = "Для Кафки во второй комнате сезона 62053 проверено значение 63.";
 
 #[derive(Clone)]
 struct Fixture {
@@ -27,6 +31,8 @@ struct Fixture {
     progress: watch::Receiver<PromptProgress>,
     editing_calls: Arc<AtomicUsize>,
     editing_replies: Vec<Option<&'static str>>,
+    fact_calls: Arc<AtomicUsize>,
+    fact_replies: Vec<(String, Option<&'static str>)>,
 }
 
 // A vision model with a smaller context window than the 384k compaction threshold.
@@ -68,6 +74,24 @@ impl HttpClientExt for Fixture {
         assert_eq!(body["model"], MODEL);
         let reply = match request.uri().path() {
             "/v1/responses/input_tokens" => json!({"input_tokens":tokens(&body)}),
+            "/v1/responses" if self.progress.borrow().stage == PromptStage::FactChecking => {
+                let step = self.fact_calls.fetch_add(1, Ordering::Relaxed);
+                let (expected, reply) = &self.fact_replies[step];
+                assert_eq!(body["text"]["format"]["strict"], true);
+                let input = body["input"].as_array().unwrap();
+                let user = input.last().unwrap();
+                let payload: Value =
+                    serde_json::from_str(user["content"][0]["text"].as_str().unwrap()).unwrap();
+                assert_eq!(payload["question"], QUESTION);
+                assert_eq!(payload["answer"], expected.as_str());
+                assert_eq!(user["content"][2]["type"], "input_image");
+                let history = body["input"].to_string();
+                assert!(
+                    history.contains(NOTES) && history.contains(SOURCE) && history.contains("63.0"),
+                    "{history}"
+                );
+                response(&message(reply.unwrap_or("invalid verdict")), "fact_check")
+            }
             "/v1/responses" if self.progress.borrow().stage == PromptStage::Editing => {
                 assert!(
                     body.get("tools")
@@ -75,7 +99,11 @@ impl HttpClientExt for Fixture {
                 );
                 assert_eq!(body["store"], false);
                 let input = body["input"].to_string();
-                assert!(input.contains(QUESTION) && input.contains(FINAL));
+                let restart = self.fact_calls.load(Ordering::Relaxed) > 0;
+                assert!(
+                    input.contains(QUESTION)
+                        && input.contains(if restart { CORRECTED } else { FINAL })
+                );
                 assert!(!input.contains(SOURCE) && !input.contains(NOTES));
                 let step = self.editing_calls.fetch_add(1, Ordering::Relaxed);
                 let id = if step % 2 == 1 {
@@ -83,7 +111,9 @@ impl HttpClientExt for Fixture {
                     assert!(!input.contains("previous_edit") && !input.contains("feedback"));
                     "semantic_review"
                 } else {
-                    if step > 0 {
+                    if restart {
+                        assert!(!input.contains("previous_edit") && !input.contains("feedback"));
+                    } else if step > 0 {
                         let rejected = self.editing_replies[step - 2].unwrap();
                         let verdict = self.editing_replies[step - 1].unwrap();
                         assert!(input.contains("previous_edit") && input.contains(rejected));
@@ -415,10 +445,18 @@ async fn langfuse_records_multimodal_research_tools_compaction_and_editing() {
             .iter()
             .all(|s| s.span_context.trace_id() == root.span_context.trace_id())
     );
-    for name in ["chat", "execute_tool", "compact_context", "proofread"] {
+    for name in [
+        "chat",
+        "execute_tool",
+        "compact_context",
+        "proofread",
+        "fact_check",
+    ] {
         assert!(spans.iter().any(|s| s.name == name), "missing {name}");
     }
     let editor = spans.iter().find(|s| s.name == "proofread").unwrap();
+    let fact_check = spans.iter().find(|s| s.name == "fact_check").unwrap();
+    assert_eq!(fact_check.parent_span_id, editor.span_context.span_id());
     let attribute = |s: &opentelemetry_sdk::trace::SpanData, key: &str| {
         s.attributes
             .iter()
@@ -427,7 +465,9 @@ async fn langfuse_records_multimodal_research_tools_compaction_and_editing() {
     };
     let ttft = "langfuse.observation.completion_start_time";
     for chat in spans.iter().filter(|s| s.name == "chat") {
-        if chat.parent_span_id == editor.span_context.span_id() {
+        if chat.parent_span_id == editor.span_context.span_id()
+            || chat.parent_span_id == fact_check.span_context.span_id()
+        {
             assert!(attribute(chat, ttft).is_none());
         } else {
             let first = chrono::DateTime::parse_from_rfc3339(&attribute(chat, ttft).unwrap())
@@ -530,6 +570,35 @@ async fn unchanged_or_unfinished_edits_deliver_the_researched_draft() {
 }
 
 async fn check_answer(editing_replies: &[Option<&'static str>], expected: &str) {
+    check_review(
+        editing_replies,
+        &[(expected, Some(VERIFIED))],
+        Some(expected),
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn factual_correction_becomes_the_draft_of_a_new_full_review() {
+    check_review(
+        &[
+            Some(EDITED),
+            Some("SAME"),
+            Some(CORRECTED_EDIT),
+            Some("SAME"),
+        ],
+        &[(EDITED, Some(CORRECTION)), (CORRECTED_EDIT, Some(VERIFIED))],
+        Some(CORRECTED_EDIT),
+    )
+    .await;
+    check_review(&[Some(FINAL)], &[(FINAL, None)], None).await;
+}
+
+async fn check_review(
+    editing_replies: &[Option<&'static str>],
+    fact_replies: &[(&str, Option<&'static str>)],
+    expected: Option<&str>,
+) {
     let (tx, rx) = watch::channel(PromptProgress::default());
     let fixture = Fixture {
         turns: Default::default(),
@@ -537,6 +606,11 @@ async fn check_answer(editing_replies: &[Option<&'static str>], expected: &str) 
         progress: rx.clone(),
         editing_calls: Default::default(),
         editing_replies: editing_replies.to_vec(),
+        fact_calls: Default::default(),
+        fact_replies: fact_replies
+            .iter()
+            .map(|(answer, reply)| (answer.to_string(), *reply))
+            .collect(),
     };
     let mut tools = KitTools::for_question(Client::new(), QUESTION);
     tools.seasons = Some(SeasonTools::fixture());
@@ -572,16 +646,19 @@ async fn check_answer(editing_replies: &[Option<&'static str>], expected: &str) 
         }],
         Some(Preview::Progress(tx)),
     )
-    .await
-    .unwrap();
-    assert_eq!(answer, expected);
+    .await;
+    assert_eq!(answer.as_deref().ok(), expected, "{answer:?}");
     let summaries = fixture.summaries.load(Ordering::Relaxed);
     assert!(summaries >= 2);
     assert_eq!(
         fixture.editing_calls.load(Ordering::Relaxed),
         editing_replies.len()
     );
-    let turns = 15 + editing_replies.len();
+    assert_eq!(
+        fixture.fact_calls.load(Ordering::Relaxed),
+        fact_replies.len()
+    );
+    let turns = 15 + editing_replies.len() + fact_replies.len();
     assert_eq!(rx.borrow().turns, turns);
     if editing_replies.iter().all(Option::is_some) {
         assert_eq!(

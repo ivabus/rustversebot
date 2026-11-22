@@ -16,7 +16,7 @@ base64 = "0.22"
 md5 = "0.7"
 clap = { version = "4", features = ["derive", "env"] }
 regex = "1"
-rhai = { version = "1.27", features = ["no_module", "no_function", "no_custom_syntax", "no_optimize", "no_time"] }
+rhai = { version = "1.27", features = ["no_module", "no_closure", "no_custom_syntax", "no_optimize", "no_time"] }
 rig-core = { version = "0.47", default-features = false }
 rig-agent = { version = "0.47", default-features = false }
 rig-reqwest = { version = "0.47", default-features = false, features = ["native-tls"] }

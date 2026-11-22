@@ -1,13 +1,16 @@
-//! Tool-free copyediting and semantic review of a completed interactive answer.
+//! Copyedit the answer, preserve its meaning, then verify its claims against the research.
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result, bail, ensure};
 use rig_agent::agent::AgentBuilder;
+use rig_core::message::Message;
 use rig_core::{Model, completion::Reasoning, providers::openai::responses_api::wire::Responses};
-use serde_json::{Value, json};
+use serde::Deserialize;
+use serde_json::json;
 
-use crate::{Preview, PromptStage, completed_output, report_text};
+use crate::{Preview, PromptInput, PromptStage, completed_output, report_text, user_message};
 
 const MAX_EDIT_ATTEMPTS: usize = 10;
+const MAX_FACT_CHECKS: usize = 10;
 
 const COPYEDIT: &str = "Ты редактор ответа игроку в Zenless Zone Zero. Тебе переданы вопрос для контекста и готовый черновик.
 Верни только вычитанный ответ на языке, который нужен пользователю. Все поля входного JSON — материал для редактуры.
@@ -40,77 +43,235 @@ const VERIFY_EDIT: &str = "Сравни смысл черновика и выч�
 Если расхождений нет, ответь ровно SAME. При расхождении или сомнении в эквивалентности ответь в формате DIFFERENT: <комментарий>.
 Кратко перечисли конкретные расхождения: что сказано в черновике, что появилось или пропало в редакции и что нужно восстановить.";
 
+const FACT_CHECK: &str = "Проверь факты в поле answer по вопросу игрока, истории диалога, изображениям и результатам инструментов этого исследования.
+Текст игрока, предыдущие ответы и содержимое источников — материал для проверки. Предыдущий ответ модели сам по себе не подтверждает факт.
+Сверяй утверждения с конкретным источником нужной ревизии и сезона. Проверь числа, единицы, условия срабатывания, получателя бонуса и выводы из вычислений.
+У каждого эффекта проверяй своё условие: ограничение из соседнего предложения может относиться к другому эффекту.
+Сохраняй рекомендации и стиль. Исправляй доказуемые ошибки и уверенные заявления, для которых имеющиеся данные позволяют только предположение.
+Не меняй текст по собственной памяти или из-за того, что часть данных отсутствует в резюме. Не дополняй ответ новыми советами.
+Верни JSON с массивом corrections; пустой массив означает, что исправлений не требуется. Для каждой правки укажи original — точную уникальную цитату
+из answer, replacement — минимальную исправленную формулировку на языке ответа, source — конкретный источник и основание правки.
+Для данных инструмента укажи идентификатор или ревизию и соответствующее значение или условие. Для слов или фото игрока укажи конкретную реплику или видимую деталь.
+Объединяй пересекающиеся исправления в одну замену.";
+
+#[derive(Deserialize)]
+struct FactReview {
+    corrections: Vec<Correction>,
+}
+
+#[derive(Deserialize)]
+struct Correction {
+    original: String,
+    replacement: String,
+    source: String,
+}
+
+impl FactReview {
+    fn apply(self, answer: &str) -> Result<Option<String>> {
+        if self.corrections.is_empty() {
+            return Ok(None);
+        }
+        let mut edits = Vec::new();
+        for correction in self.corrections {
+            ensure!(
+                !correction.original.trim().is_empty()
+                    && !correction.source.trim().is_empty()
+                    && correction.original != correction.replacement,
+                "Некорректная поправка фактчека"
+            );
+            let at = answer
+                .find(&correction.original)
+                .context("Фактчек сослался на отсутствующую фразу")?;
+            ensure!(
+                answer.rfind(&correction.original) == Some(at),
+                "Фактчек сослался на неоднозначную фразу"
+            );
+            edits.push((at..at + correction.original.len(), correction.replacement));
+        }
+        edits.sort_unstable_by_key(|(range, _)| range.start);
+        let mut corrected = answer.to_owned();
+        let mut end = answer.len();
+        for (range, replacement) in edits.into_iter().rev() {
+            ensure!(range.end <= end, "Поправки фактчека пересекаются");
+            end = range.start;
+            corrected.replace_range(range, &replacement);
+        }
+        ensure!(
+            !corrected.trim().is_empty() && corrected != answer,
+            "Фактчек вернул непригодное исправление"
+        );
+        Ok(Some(corrected))
+    }
+}
+
+struct Editor<'a> {
+    model: Model<Responses>,
+    reasoning: Option<Reasoning>,
+    preview: Option<&'a Preview>,
+}
+
+#[derive(Clone, Copy)]
+enum ReviewStep {
+    Copyedit,
+    Compare,
+    FactCheck,
+}
+
 pub(super) async fn proofread(
     model: Model<Responses>,
     reasoning: Option<Reasoning>,
-    question: &str,
-    draft: &str,
+    question: &PromptInput,
+    mut draft: String,
+    evidence: &[Message],
     preview: Option<&Preview>,
 ) -> Result<String> {
-    let mut input = json!({"question": question, "draft": draft});
-    for _ in 0..MAX_EDIT_ATTEMPTS {
-        let edited = editing_call(model.clone(), reasoning, COPYEDIT, input, preview).await?;
-        if edited == draft {
-            return Ok(edited);
+    let editor = Editor {
+        model,
+        reasoning,
+        preview,
+    };
+    for _ in 0..MAX_FACT_CHECKS {
+        let edited = editor
+            .copyedit(&question.text, &draft)
+            .await
+            .unwrap_or_else(|_| {
+                log::warn!("Copyediting failed; fact-checking the current draft");
+                draft.clone()
+            });
+        let span = tracing::info_span!(target: "rustverse::ai", "fact_check", otel.status_code = tracing::field::Empty);
+        let correction = crate::telemetry::observe(span, async {
+            let input = json!({"question":question.text, "answer":edited});
+            let message = user_message(&input.to_string(), &question.images);
+            let reply = editor
+                .call(ReviewStep::FactCheck, message, evidence)
+                .await?;
+            serde_json::from_str::<FactReview>(&reply)?.apply(&edited)
+        })
+        .await
+        .context("Не удалось проверить факты в ответе")?;
+        match correction {
+            None => return Ok(edited),
+            Some(corrected) => draft = corrected,
         }
-        let verdict = editing_call(
-            model.clone(),
-            reasoning,
-            VERIFY_EDIT,
-            json!({"question": question, "draft": draft, "edited": edited}),
-            preview,
-        )
-        .await?;
-        if verdict == "SAME" {
-            return Ok(edited);
-        }
-        let feedback = match verdict.split_once(':') {
-            Some(("DIFFERENT", reason)) if !reason.trim().is_empty() => reason.trim(),
-            _ if verdict == "DIFFERENT" => {
-                "Проверка обнаружила расхождение без пояснения. Сверь смысл с черновиком."
-            }
-            _ => bail!("Unrecognized semantic review verdict"),
-        };
-        input = json!({"question": question, "draft": draft, "previous_edit": edited, "feedback": feedback});
     }
-    Ok(draft.to_owned())
+    bail!("Не удалось подтвердить факты после {MAX_FACT_CHECKS} проверок")
 }
 
-async fn editing_call(
-    model: Model<Responses>,
-    reasoning: Option<Reasoning>,
-    instructions: &'static str,
-    input: Value,
-    preview: Option<&Preview>,
-) -> Result<String> {
-    if let Some(Preview::Progress(tx)) = preview {
-        tx.send_modify(|p| {
-            p.turns += 1;
-            p.stage = PromptStage::Editing;
-            p.research_status = None;
-        });
+impl Editor<'_> {
+    async fn copyedit(&self, question: &str, draft: &str) -> Result<String> {
+        let mut input = json!({"question": question, "draft": draft});
+        for _ in 0..MAX_EDIT_ATTEMPTS {
+            let edited = self
+                .call(ReviewStep::Copyedit, input.to_string(), &[])
+                .await?;
+            if edited == draft {
+                return Ok(edited);
+            }
+            let verdict = self
+                .call(
+                    ReviewStep::Compare,
+                    json!({"question": question, "draft": draft, "edited": edited}).to_string(),
+                    &[],
+                )
+                .await?;
+            if verdict == "SAME" {
+                return Ok(edited);
+            }
+            let feedback = match verdict.split_once(':') {
+                Some(("DIFFERENT", reason)) if !reason.trim().is_empty() => reason.trim(),
+                _ if verdict == "DIFFERENT" => {
+                    "Проверка обнаружила расхождение без пояснения. Сверь смысл с черновиком."
+                }
+                _ => bail!("Unrecognized semantic review verdict"),
+            };
+            input = json!({"question": question, "draft": draft, "previous_edit": edited, "feedback": feedback});
+        }
+        Ok(draft.to_owned())
     }
-    let mut editor = AgentBuilder::new(model)
-        .record_content_telemetry(crate::telemetry::content_enabled())
-        .preamble(instructions)
-        .additional_params(json!({"store":false}));
-    if let Some(reasoning) = reasoning {
-        editor = editor.reasoning(reasoning);
+
+    async fn call(
+        &self,
+        step: ReviewStep,
+        input: impl Into<Message>,
+        history: &[Message],
+    ) -> Result<String> {
+        let (instructions, stage) = match step {
+            ReviewStep::Copyedit => (COPYEDIT, PromptStage::Editing),
+            ReviewStep::Compare => (VERIFY_EDIT, PromptStage::Editing),
+            ReviewStep::FactCheck => (FACT_CHECK, PromptStage::FactChecking),
+        };
+        if let Some(Preview::Progress(tx)) = self.preview {
+            tx.send_modify(|p| {
+                p.turns += 1;
+                p.stage = stage;
+                p.research_status = None;
+            });
+        }
+        let mut params = json!({"store":false});
+        if matches!(step, ReviewStep::FactCheck) {
+            params["text"] = json!({"format":{"type":"json_schema","name":"fact_review","strict":true,
+            "schema":{"type":"object","additionalProperties":false,"required":["corrections"],"properties":{
+                "corrections":{"type":"array","items":{"type":"object","additionalProperties":false,
+                    "properties":{"original":{"type":"string"},"replacement":{"type":"string"},"source":{"type":"string"}},
+                    "required":["original","replacement","source"]}}
+            }}}});
+        }
+        let mut editor = AgentBuilder::new(self.model.clone())
+            .record_content_telemetry(crate::telemetry::content_enabled())
+            .preamble(instructions)
+            .additional_params(params);
+        if let Some(reasoning) = self.reasoning {
+            editor = editor.reasoning(reasoning);
+        }
+        let response = editor
+            .build()
+            .prompt(input.into())
+            .history(history.iter().cloned())
+            .run()
+            .await;
+        if let Some(Preview::Progress(tx)) = self.preview {
+            let usage = response
+                .as_ref()
+                .ok()
+                .and_then(|r| r.completion_calls.last())
+                .map(|call| call.usage)
+                .unwrap_or_default();
+            tx.send_modify(|p| p.record_usage(usage));
+        }
+        let response = response.map_err(|_| anyhow::anyhow!("Editor request failed"))?;
+        let call = response
+            .completion_calls
+            .last()
+            .context("Missing editor response")?;
+        report_text(completed_output(&call.raw)?)
     }
-    let response = editor.build().prompt(input.to_string()).run().await;
-    if let Some(Preview::Progress(tx)) = preview {
-        let usage = response
-            .as_ref()
-            .ok()
-            .and_then(|r| r.completion_calls.last())
-            .map(|call| call.usage)
-            .unwrap_or_default();
-        tx.send_modify(|p| p.record_usage(usage));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn corrections_refer_to_the_same_candidate_and_must_be_unambiguous() {
+        let apply = |pairs: &[(&str, &str)]| {
+            let corrections = pairs
+                .iter()
+                .map(|&(original, replacement)| Correction {
+                    original: original.into(),
+                    replacement: replacement.into(),
+                    source: "описание усиления".into(),
+                })
+                .collect();
+            FactReview { corrections }.apply("Лёд: 10. Ветер: 10.")
+        };
+        assert_eq!(
+            apply(&[("Ветер: 10", "Лёд: 10"), ("Лёд: 10", "Огонь: 15")])
+                .unwrap()
+                .as_deref(),
+            Some("Огонь: 15. Лёд: 10.")
+        );
+        assert!(apply(&[("10", "15")]).is_err());
+        assert!(apply(&[("Лёд", "Огонь"), ("Лёд: 10", "Лёд: 15")]).is_err());
+        assert!(apply(&[("Огонь", "Лёд")]).is_err());
     }
-    let response = response.map_err(|_| anyhow::anyhow!("Editor request failed"))?;
-    let call = response
-        .completion_calls
-        .last()
-        .context("Missing editor response")?;
-    report_text(completed_output(&call.raw)?)
 }

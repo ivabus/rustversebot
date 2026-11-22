@@ -521,6 +521,11 @@ mod tests {
             (PromptStage::Writing, "Пишу черновик…", "Первый черновик"),
             (PromptStage::Editing, "Вычитываю ответ…", "Первый черновик"),
             (
+                PromptStage::FactChecking,
+                "Проверяю факты…",
+                "Проверяемый ответ",
+            ),
+            (
                 PromptStage::Editing,
                 "Вычитываю ответ…",
                 "Проверенный ответ",

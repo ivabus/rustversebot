@@ -275,17 +275,18 @@ impl InputBudget {
         {
             self.checkpoint = Checkpoint::default();
         }
+        let resume_stage = self.progress.as_ref().map(|p| p.borrow().stage);
         loop {
             body["input"] = Value::Array(self.checkpoint.input(&all, question));
             let tokens = api.count(&body).await?;
             if tokens < self.limit {
                 self.peak = self.peak.max(tokens);
-                if let Some(progress) = &self.progress {
+                if let (Some(progress), Some(stage)) = (&self.progress, resume_stage) {
                     progress.send_if_modified(|p| {
                         if p.stage != crate::PromptStage::Compacting {
                             return false;
                         }
-                        p.stage = crate::PromptStage::Preparing;
+                        p.stage = stage;
                         true
                     });
                 }

@@ -525,17 +525,19 @@ async fn run_agent(
     if let Some(preview) = preview.clone() {
         builder = builder.add_hook(preview);
     }
-    let history = history.iter().flat_map(|turn| {
-        [
-            user_message(&turn.question, &turn.images),
-            rig_core::message::Message::assistant(&turn.answer),
-        ]
-    });
+    let branch = || {
+        history.iter().flat_map(|turn| {
+            [
+                user_message(&turn.question, &turn.images),
+                rig_core::message::Message::assistant(&turn.answer),
+            ]
+        })
+    };
     let runner = builder
         .build()
         .prompt(user_message(&input.text, &input.images))
-        .history(history);
-    let result = if streaming {
+        .history(branch());
+    let mut result = if streaming {
         let (result, events) = runner.run_channel();
         drop(events);
         result.await
@@ -565,24 +567,28 @@ async fn run_agent(
         .last()
         .context("Rig не вернул результат модели")?;
     let draft = report_text(completed_output(&call.raw)?)?;
-    drop(result);
     if question_instructions.is_none() {
         return Ok(draft);
     }
+    // The transcript starts with the player's prompt and ends with the research draft.
+    // The checker receives the question, its images and the candidate together in its last message.
+    let mut messages = std::mem::take(&mut result.messages);
+    drop(result);
+    messages.pop();
+    let evidence: Vec<_> = branch().chain(messages.into_iter().skip(1)).collect();
+    let span = tracing::info_span!(target: "rustverse::ai", "proofread", otel.status_code = tracing::field::Empty);
     let answer = telemetry::observe(
-        tracing::info_span!(target: "rustverse::ai", "proofread", otel.status_code = tracing::field::Empty),
+        span,
         editing::proofread(
-        endpoint,
-        selection.reasoning,
-        &input.text,
-        &draft,
-        preview.as_ref(),
-    ))
-    .await
-    .unwrap_or_else(|_| {
-        log::warn!("Proofreading did not produce a usable edit; delivering the completed draft");
-        draft
-    });
+            endpoint,
+            selection.reasoning,
+            &input,
+            draft,
+            &evidence,
+            preview.as_ref(),
+        ),
+    )
+    .await?;
     if let Some(preview) = preview {
         let text = answer.chars().take(4096).collect();
         match preview {

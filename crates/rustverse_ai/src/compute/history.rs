@@ -76,6 +76,17 @@ impl JsonView {
             _ => unreachable!("view of a JSON container"),
         }
     }
+
+    fn keys(&mut self) -> Result<Array, Box<EvalAltResult>> {
+        let fields = self
+            .value()
+            .as_object()
+            .ok_or("keys expects a JSON object")?;
+        if fields.len() > super::MAX_VALUES {
+            return Err("Too many keys to materialize; iterate the object directly".into());
+        }
+        Ok(fields.keys().map(|key| key.as_str().into()).collect())
+    }
 }
 
 impl IntoIterator for JsonView {
@@ -99,6 +110,7 @@ pub(super) fn bind(engine: &mut Engine, scope: &mut Scope, history: Vec<Arc<Valu
         .register_indexer_get(JsonView::field)
         .register_indexer_get(JsonView::item)
         .register_fn("len", JsonView::len)
+        .register_fn("keys", JsonView::keys)
         .register_iterator_result::<JsonView, Dynamic>();
     let calls: Array = history
         .into_iter()

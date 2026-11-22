@@ -32,7 +32,11 @@ impl LiveMessage {
 }
 
 fn priority_stage(stage: PromptStage) -> Option<PromptStage> {
-    matches!(stage, PromptStage::Compacting | PromptStage::Editing).then_some(stage)
+    matches!(
+        stage,
+        PromptStage::Compacting | PromptStage::Editing | PromptStage::FactChecking
+    )
+    .then_some(stage)
 }
 
 async fn next_update(
@@ -342,6 +346,8 @@ mod tests {
                 (None, PromptStage::Compacting),
                 (Some(PromptStage::Compacting), PromptStage::Preparing),
                 (None, PromptStage::Editing),
+                (Some(PromptStage::Editing), PromptStage::FactChecking),
+                (Some(PromptStage::FactChecking), PromptStage::Editing),
             ] {
                 tx.send_modify(|p| p.stage = stage);
                 let next = next_update(
