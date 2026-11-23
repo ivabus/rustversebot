@@ -31,7 +31,7 @@ pub(crate) struct ToolSpec {
 
 pub(crate) fn definitions() -> Vec<ToolSpec> {
     let category = json!({"type":"string","enum":["agents","w-engines","drive-discs","bangboo","enemies","tutorials"]});
-    let language = json!({"type":"string","enum":["en","cn"]});
+    let language = json!({"type":"string","enum":["en","cn","ru"],"description":"Use en or cn for game mechanics. Use ru for Russian terminology."});
     let offset = json!({"type":["integer","null"],"minimum":0,"description":"Start at 0 or null. Copy next_offset to continue."});
     let version = json!({"type":["string","null"],"description":"Exact revision or branch ('release' or 'beta'). For current live endgame use 'release'. Read entries at the exact revision returned by search. Null reuses the pinned revision or defaults to the newest across both branches for questions. Reports start at cur."});
     let mut search_version = version.clone();
@@ -86,6 +86,7 @@ pub(crate) fn definitions() -> Vec<ToolSpec> {
 enum Language {
     En,
     Cn,
+    Ru,
 }
 
 impl Language {
@@ -93,6 +94,7 @@ impl Language {
         match self {
             Self::En => "en",
             Self::Cn => "chs",
+            Self::Ru => "ru",
         }
     }
 }
@@ -541,7 +543,7 @@ impl KitTools {
                     None => crate::entry_view::page(q.category, entry, offset)?,
                 };
                 Ok(
-                    json!({"category":q.category,"id":q.id,"version":version,"language":match q.language {Language::En=>"en",Language::Cn=>"cn"},"source":source,"result":result}),
+                    json!({"category":q.category,"id":q.id,"version":version,"language":q.language,"source":source,"result":result}),
                 )
             }
             _ => bail!("Unknown tool"),
@@ -1001,5 +1003,20 @@ mod tests {
                 .unwrap(),
             entry
         );
+        let ru_source = format!("tutorials/301124/ru/{}/raw", page.cur);
+        tools.sources.insert(
+            ru_source.clone(),
+            json!({"name":{"text":"Название из перевода"},"pages":[]}),
+        );
+        let translated = tools
+            .call(
+                "get_gachabase_entry",
+                json!({"category":"tutorials","id":301124,"language":"ru","version":page.cur}),
+            )
+            .await
+            .unwrap();
+        assert_eq!(translated["language"], "ru");
+        assert_eq!(translated["source"], ru_source);
+        assert_eq!(translated["result"]["name"], "Название из перевода");
     }
 }

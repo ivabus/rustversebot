@@ -763,8 +763,6 @@ async fn check_answer(editing_replies: &[Option<&'static str>], expected: &str) 
     .await;
 }
 
-const TERRA_MEDIUM: &str = "gpt-6.1-terra@medium";
-const TERRA_XHIGH: &str = "gpt-6.1-terra@xhigh";
 const TERRA_HIGH: &str = "gpt-6.1-terra@high";
 const SOL_MEDIUM: &str = "gpt-6.2-sol@medium";
 const SOL_HIGH: &str = "gpt-6.2-sol@high";
@@ -858,11 +856,11 @@ async fn check_review(
 #[tokio::test]
 async fn auto_routes_research_and_recovers_from_an_invalid_router_reply() {
     for (question, reply, selected) in [
-        ("Опиши майндскейпы Санбрингер", "low", TERRA_MEDIUM),
-        ("Подбери команду для этой комнаты", "medium", TERRA_XHIGH),
+        ("Опиши майндскейпы Санбрингер", "low", TERRA_HIGH),
+        ("Подбери команду для этой комнаты", "medium", SOL_MEDIUM),
         ("Вот мой билд, что заменить на скриншоте?", "high", SOL_HIGH),
-        ("А если заменить сигну?", "неизвестно", TERRA_XHIGH),
-        ("А в этой комнате?", "refusal", TERRA_XHIGH),
+        ("А если заменить сигну?", "неизвестно", SOL_MEDIUM),
+        ("А в этой комнате?", "refusal", SOL_MEDIUM),
     ] {
         check_run(
             question,
@@ -890,8 +888,8 @@ async fn decisions_trace_keeps_the_session_usage_choice_and_fallback() {
     let _guard = tracing::subscriber::set_default(crate::telemetry::subscriber(&otel));
     for (choice, selected) in [
         ("high", SOL_HIGH),
-        ("refusal", TERRA_XHIGH),
-        ("http_error", TERRA_XHIGH),
+        ("refusal", SOL_MEDIUM),
+        ("http_error", SOL_MEDIUM),
     ] {
         let root = tracing::info_span!(target: "rustverse::ai", "prompt", selected_model = tracing::field::Empty);
         crate::telemetry::set_prompt_session(&root, choice.into());

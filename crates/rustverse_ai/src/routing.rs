@@ -12,6 +12,7 @@ use crate::{ImagePromptTurn, PromptInput, PromptProgress, transport::Provider};
 
 const MODEL: &str = "gpt-6-luna";
 const QUESTION: &str = include_str!("research-tier.json");
+const MEDIUM_TIER: (&str, &str) = ("medium", "gpt-6.2-sol@medium");
 
 fn payload(input: &PromptInput, history: &[ImagePromptTurn]) -> Result<String> {
     let recent: Vec<_> = history[history.len().saturating_sub(3)..]
@@ -125,8 +126,8 @@ pub(super) async fn choose(
         );
         ensure!(answer["type"] == "choice", "Expected a Decisions choice");
         Ok(match answer["choice"].as_str() {
-            Some("low") => ("low", "gpt-6.1-terra@medium"),
-            Some("medium") => ("medium", "gpt-6.1-terra@xhigh"),
+            Some("low") => ("low", "gpt-6.1-terra@high"),
+            Some("medium") => MEDIUM_TIER,
             Some("high") => ("high", "gpt-6.2-sol@high"),
             _ => bail!("Unknown Decisions research tier"),
         })
@@ -139,7 +140,7 @@ pub(super) async fn choose(
     let (tier, model) = decision.unwrap_or_else(|err| {
         span.record("langfuse.observation.status_message", err.to_string());
         log::warn!("Question routing failed; using the middle research tier: {err}");
-        ("medium", "gpt-6.1-terra@xhigh")
+        MEDIUM_TIER
     });
     span.record("langfuse.observation.metadata.tier", tier);
     span.record("selected_model", model);
