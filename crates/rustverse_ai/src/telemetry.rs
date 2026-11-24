@@ -123,11 +123,39 @@ impl<P: SpanProcessor> SpanProcessor for SessionProcessor<P> {
     }
 
     fn on_end(&self, mut span: SpanData) {
-        // #[instrument(err)] marks failed operations. Its event can contain a URL,
-        // a Telegram token, or a provider response. Export only the status code.
+        // instrument(err) formats the original error, including provider bodies and URLs.
+        // Only application-supplied diagnostic attributes are safe as status descriptions.
         span.events.events.clear();
         if matches!(span.status, opentelemetry::trace::Status::Error { .. }) {
-            span.status = opentelemetry::trace::Status::error("");
+            let attr = |name| {
+                span.attributes
+                    .iter()
+                    .find(|kv| kv.key.as_str() == name)
+                    .map(|kv| &kv.value)
+            };
+            let application_span = attr("target")
+                .is_some_and(|v| matches!(v.as_str().as_ref(), "rustverse::bot" | "rustverse::ai"));
+            let message = if let Some(reason) = attr("error.message").filter(|_| application_span) {
+                reason.to_string()
+            } else if let Some(opentelemetry::Value::I64(status)) =
+                attr("http.response.status_code")
+                && *status >= 400
+            {
+                format!("HTTP {status} при выполнении {}.", span.name)
+            } else {
+                match attr("outcome").map(|v| v.as_str()).as_deref() {
+                    Some("delivery_failed") => "Не удалось доставить ответ в Telegram.".to_owned(),
+                    Some("generation_failed") => {
+                        "Не удалось подготовить ответ. Подробности в дочернем спане генерации."
+                            .to_owned()
+                    }
+                    _ => format!(
+                        "Операция {} завершилась ошибкой. Проверьте дочерние спаны и журнал бота.",
+                        span.name
+                    ),
+                }
+            };
+            span.status = opentelemetry::trace::Status::error(message);
         }
         self.0.on_end(span);
     }
@@ -252,6 +280,31 @@ mod tests {
     use super::*;
     use opentelemetry_http::{Bytes, HttpClient, HttpError, Request, Response};
     use std::sync::mpsc;
+
+    #[test]
+    fn exporter_uses_the_public_error_message_and_drops_raw_errors() {
+        use opentelemetry_sdk::trace::{InMemorySpanExporter, SimpleSpanProcessor};
+        let export = InMemorySpanExporter::default();
+        let provider = SdkTracerProvider::builder()
+            .with_span_processor(SessionProcessor(SimpleSpanProcessor::new(export.clone())))
+            .build();
+        let _guard = tracing::subscriber::set_default(subscriber(&provider, true, false));
+        let message = "HoYoLAB отклонил запрос (retcode 42).";
+        let span = tracing::info_span!(target: "rustverse::bot", "hoyolab.shiyu_defense",
+            error.message = tracing::field::Empty, error.type = "api", hoyolab.retcode = 42_i64);
+        span.in_scope(|| {
+            Span::current().record("error.message", message);
+            tracing::error!(target: "rustverse::bot", error = "private cookie and response body");
+        });
+        drop(span);
+        let spans = export.get_finished_spans().unwrap();
+        assert_eq!(
+            spans[0].status,
+            opentelemetry::trace::Status::error(message)
+        );
+        assert!(spans[0].events.is_empty());
+        assert!(!format!("{spans:?}").contains("private cookie"));
+    }
 
     #[derive(Debug)]
     struct Capture(mpsc::Sender<Request<Bytes>>);

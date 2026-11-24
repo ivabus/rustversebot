@@ -362,17 +362,38 @@ impl NanokaClient {
     //  Internal helpers
     // ------------------------------------------------------------------
 
-    #[tracing::instrument(target = "rustverse::bot", name = "nanoka.fetch", skip_all, err)]
+    #[tracing::instrument(target = "rustverse::bot", name = "nanoka.fetch", skip_all, err,
+        fields(error.type, error.message, http.response.status_code))]
     async fn get_json<T: serde::de::DeserializeOwned>(&self, url: &str) -> Result<T, Error> {
-        let resp = self.http.get(url).send().await?;
+        let span = tracing::Span::current();
+        let resp = self.http.get(url).send().await.inspect_err(|error| {
+            let (kind, message) = if error.is_timeout() {
+                ("timeout", "Истекло время ожидания ответа Nanoka.")
+            } else {
+                ("transport", "Не удалось выполнить HTTP-запрос к Nanoka.")
+            };
+            span.record("error.type", kind)
+                .record("error.message", message);
+        })?;
         let status = resp.status();
+        span.record("http.response.status_code", i64::from(status.as_u16()));
         if !status.is_success() {
+            span.record("error.type", "http_status")
+                .record("error.message", format!("Nanoka вернула HTTP {status}."));
             return Err(Error::HttpStatus {
                 status: status.as_u16(),
                 url: url.to_string(),
             });
         }
-        Ok(resp.json().await?)
+        Ok(resp.json().await.inspect_err(|error| {
+            let (kind, message) = if error.is_decode() {
+                ("decode", "Ответ Nanoka не соответствует ожидаемому JSON.")
+            } else {
+                ("response_body", "Не удалось прочитать ответ Nanoka.")
+            };
+            span.record("error.type", kind)
+                .record("error.message", message);
+        })?)
     }
 
     async fn data_index_url(&self, kind: &str) -> Result<String, Error> {

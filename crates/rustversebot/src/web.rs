@@ -99,7 +99,7 @@ async fn trace_request(req: Request, next: axum::middleware::Next) -> Response {
     async move {
         let response = next.run(req).await;
         let status = response.status();
-        tracing::Span::current().record("http.response.status_code", status.as_u16());
+        tracing::Span::current().record("http.response.status_code", i64::from(status.as_u16()));
         if status.is_server_error() {
             tracing::Span::current().record("otel.status_code", "ERROR");
         }

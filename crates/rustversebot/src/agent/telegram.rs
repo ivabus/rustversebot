@@ -108,14 +108,19 @@ enum Update {
 impl LiveOutput<'_> {
     // teloxide 0.13 predates sendMessageDraft. Never expose its tokenized URL in errors.
     #[tracing::instrument(target = "rustverse::bot", name = "telegram.request", skip_all,
-        fields(otel.kind = "client", rpc.method = "SendMessageDraft", http.response.status_code = tracing::field::Empty, otel.status_code = tracing::field::Empty))]
+        fields(otel.kind = "client", rpc.method = "SendMessageDraft", error.message, http.response.status_code = tracing::field::Empty, otel.status_code = tracing::field::Empty))]
     async fn draft(&self, text: &str) -> Update {
         let Ok(url) = self
             .bot
             .api_url()
             .join(&format!("./bot{}/sendMessageDraft", self.bot.token()))
         else {
-            tracing::Span::current().record("otel.status_code", "ERROR");
+            tracing::Span::current()
+                .record(
+                    "error.message",
+                    "Не удалось сформировать адрес Telegram для отправки черновика.",
+                )
+                .record("otel.status_code", "ERROR");
             return Update::Unavailable;
         };
         let mut body = json!({"chat_id":self.address.chat.0,"draft_id":self.address.message_id.0.max(1),"text":text,"parse_mode":"HTML"});
@@ -131,10 +136,18 @@ impl LiveOutput<'_> {
             .send()
             .await
         else {
-            tracing::Span::current().record("otel.status_code", "ERROR");
+            tracing::Span::current()
+                .record(
+                    "error.message",
+                    "Не удалось отправить черновик: сетевой запрос к Telegram завершился ошибкой.",
+                )
+                .record("otel.status_code", "ERROR");
             return Update::Unavailable;
         };
-        tracing::Span::current().record("http.response.status_code", response.status().as_u16());
+        tracing::Span::current().record(
+            "http.response.status_code",
+            i64::from(response.status().as_u16()),
+        );
         if response.status().is_success() {
             return Update::Sent;
         }

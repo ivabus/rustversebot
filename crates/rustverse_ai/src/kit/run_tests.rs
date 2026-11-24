@@ -728,7 +728,9 @@ async fn otlp_keeps_model_and_tool_spans_in_the_bot_trace_without_message_conten
     .await;
     let spans = exporter.get_finished_spans().unwrap();
     let command = spans.iter().find(|s| s.name == "telegram.command").unwrap();
-    assert_eq!(command.status, opentelemetry::trace::Status::error(""));
+    assert!(
+        matches!(&command.status, opentelemetry::trace::Status::Error { description } if description.contains("telegram.command"))
+    );
     let prompt = spans.iter().find(|s| s.name == "prompt").unwrap();
     assert_eq!(prompt.parent_span_id, command.span_context.span_id());
     assert!(

@@ -12,6 +12,10 @@ fn resolve_server<'a>(uid: &str, explicit: Option<&'a str>) -> Result<&'a str, H
     match explicit {
         Some(s) if !s.is_empty() => Ok(s),
         _ => server::detect_server(uid).ok_or_else(|| {
+            trace_error(
+                "invalid_uid",
+                "Не удалось определить игровой сервер по UID.",
+            );
             HoyoverseError::Other(format!(
                 "Cannot detect server from UID '{uid}'. Use --server explicitly."
             ))
@@ -24,6 +28,108 @@ const ZZZ_AVATAR_URL: &str = "https://sg-act-public-api.hoyolab.com";
 const CARD_URL: &str = "https://sg-public-api.hoyolab.com";
 
 const UA_STRING: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36";
+
+fn trace_error(kind: &str, message: &str) {
+    tracing::Span::current()
+        .record("error.type", kind)
+        .record("error.message", message);
+}
+
+fn trace_transport_error(error: &reqwest::Error) {
+    let (kind, message) = if error.is_timeout() {
+        ("timeout", "Истекло время ожидания ответа HoYoLAB.")
+    } else if error.is_connect() {
+        ("connection", "Не удалось установить соединение с HoYoLAB.")
+    } else if error.is_body() || error.is_decode() {
+        ("response_body", "Не удалось прочитать тело ответа HoYoLAB.")
+    } else {
+        ("transport", "Не удалось выполнить HTTP-запрос к HoYoLAB.")
+    };
+    trace_error(kind, message);
+}
+
+fn decode_json<T>(result: serde_json::Result<T>) -> Result<T, HoyoverseError> {
+    result.map_err(|error| {
+        let detail = error.to_string();
+        // Serde's missing-field diagnostic names a field of the destination struct.
+        // Other data errors can quote an entire value from the private response.
+        let missing = detail
+            .strip_prefix("missing field `")
+            .and_then(|rest| rest.split_once('`'))
+            .map(|(field, _)| field)
+            .filter(|name| {
+                !name.is_empty()
+                    && name.len() <= 64
+                    && name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_')
+            });
+        let reason = match error.classify() {
+            serde_json::error::Category::Eof => "Ответ HoYoLAB оборвался до конца JSON",
+            serde_json::error::Category::Syntax => "HoYoLAB вернул некорректный JSON",
+            serde_json::error::Category::Data => {
+                "JSON HoYoLAB не соответствует ожидаемой структуре"
+            }
+            serde_json::error::Category::Io => "Не удалось прочитать JSON HoYoLAB",
+        };
+        if let Some(field) = missing {
+            trace_error(
+                "decode",
+                &format!("В ответе HoYoLAB отсутствует обязательное поле {field}."),
+            );
+        } else if error.line() > 0 {
+            trace_error(
+                "decode",
+                &format!(
+                    "{reason} (строка {}, столбец {}).",
+                    error.line(),
+                    error.column()
+                ),
+            );
+        } else {
+            trace_error("decode", reason);
+        }
+        HoyoverseError::Deserialize(detail)
+    })
+}
+
+fn decode_response<T: serde::de::DeserializeOwned>(text: &str) -> Result<T, HoyoverseError> {
+    // Read the API status before interpreting the endpoint-specific data schema.
+    let response: ApiResponse<Box<serde_json::value::RawValue>> =
+        decode_json(serde_json::from_str(text))?;
+    tracing::Span::current().record("hoyolab.retcode", response.retcode);
+    match response.retcode {
+        0 => match response.data {
+            Some(data) => decode_json(serde_json::from_str(data.get())),
+            None => {
+                trace_error(
+                    "no_data",
+                    "HoYoLAB вернул успешный ответ без данных игрока.",
+                );
+                Err(HoyoverseError::DataNotPublic)
+            }
+        },
+        -101 | 10001 => {
+            trace_error(
+                "auth",
+                "HoYoLAB отклонил cookie: авторизация недействительна или истекла.",
+            );
+            Err(HoyoverseError::Auth)
+        }
+        -501000 => {
+            trace_error(
+                "data_not_public",
+                "Игрок закрыл доступ к статистике HoYoLAB.",
+            );
+            Err(HoyoverseError::DataNotPublic)
+        }
+        code => {
+            trace_error("api", &format!("HoYoLAB отклонил запрос (retcode {code})."));
+            Err(HoyoverseError::Api {
+                retcode: code,
+                message: response.message,
+            })
+        }
+    }
+}
 
 pub struct ZZZClient {
     client: Client,
@@ -125,32 +231,21 @@ impl ZZZClient {
 
     // ── Helpers ──
 
-    async fn check_response<T>(&self, resp: reqwest::Response) -> Result<T, HoyoverseError>
+    async fn request<T>(&self, request: reqwest::RequestBuilder) -> Result<T, HoyoverseError>
     where
         T: serde::de::DeserializeOwned,
     {
+        let resp = request.send().await.inspect_err(trace_transport_error)?;
         let status = resp.status();
-        let text = resp.text().await?;
+        tracing::Span::current().record("http.response.status_code", i64::from(status.as_u16()));
+        let text = resp.text().await.inspect_err(trace_transport_error)?;
 
         if !status.is_success() {
+            trace_error("http_status", &format!("HoYoLAB вернул HTTP {status}."));
             return Err(HoyoverseError::Other(format!("HTTP {status}: {text}")));
         }
 
-        let api_resp: ApiResponse<T> = serde_json::from_str(&text)?;
-        #[cfg(debug_assertions)]
-        {
-            let _value: serde_json::Value = serde_json::from_str(&text)?;
-            println!("{:#?}", _value);
-        }
-        match api_resp.retcode {
-            0 => api_resp.data.ok_or(HoyoverseError::DataNotPublic),
-            -101 | 10001 => Err(HoyoverseError::Auth),
-            -501000 => Err(HoyoverseError::DataNotPublic),
-            _ => Err(HoyoverseError::Api {
-                retcode: api_resp.retcode,
-                message: api_resp.message,
-            }),
-        }
+        decode_response(&text)
     }
 
     // ── Public API ──
@@ -160,42 +255,38 @@ impl ZZZClient {
         target = "rustverse::bot",
         name = "hoyolab.game_record_cards",
         skip_all,
-        err
+        fields(error.type, error.message, http.response.status_code, hoyolab.retcode), err
     )]
     pub async fn get_game_record_cards(
         &self,
     ) -> Result<Vec<crate::models::common::GameRecordCard>, HoyoverseError> {
-        let resp = self
+        let request = self
             .client
             .get(format!(
                 "{CARD_URL}/event/game_record/card/wapi/getGameRecordCard"
             ))
             .headers(self.headers_no_ds())
-            .query(&[("uid", &self.ltuid)])
-            .send()
-            .await?;
+            .query(&[("uid", &self.ltuid)]);
 
-        let data: GameRecordCardResponse = self.check_response(resp).await?;
+        let data: GameRecordCardResponse = self.request(request).await?;
         Ok(data.list)
     }
 
     /// Get the ZZZ Daily Note. Detect the server from the UID when it is `None`.
-    #[tracing::instrument(target = "rustverse::bot", name = "hoyolab.daily_note", skip_all, err)]
+    #[tracing::instrument(target = "rustverse::bot", name = "hoyolab.daily_note", skip_all, fields(error.type, error.message, http.response.status_code, hoyolab.retcode), err)]
     pub async fn get_daily_note(
         &self,
         role_id: &str,
         server: Option<&str>,
     ) -> Result<ZZZDailyNote, HoyoverseError> {
         let server = resolve_server(role_id, server)?;
-        let resp = self
+        let request = self
             .client
             .get(format!("{ZZZ_BASE_URL}/event/game_record_zzz/api/zzz/note"))
             .headers(self.headers_with_ds())
-            .query(&[("role_id", role_id), ("server", server)])
-            .send()
-            .await?;
+            .query(&[("role_id", role_id), ("server", server)]);
 
-        self.check_response(resp).await
+        self.request(request).await
     }
 
     /// Get Shiyu Defense data. Detect the server from the UID when it is `None`.
@@ -203,7 +294,7 @@ impl ZZZClient {
         target = "rustverse::bot",
         name = "hoyolab.shiyu_defense",
         skip_all,
-        err
+        fields(error.type, error.message, http.response.status_code, hoyolab.retcode), err
     )]
     pub async fn get_shiyu_defense(
         &self,
@@ -212,7 +303,7 @@ impl ZZZClient {
         schedule_type: &str,
     ) -> Result<ZZZShiyuDefense, HoyoverseError> {
         let server = resolve_server(role_id, server)?;
-        let resp = self
+        let request = self
             .client
             .get(format!(
                 "{ZZZ_BASE_URL}/event/game_record_zzz/api/zzz/hadal_info_v2"
@@ -222,38 +313,21 @@ impl ZZZClient {
                 ("role_id", role_id),
                 ("server", server),
                 ("schedule_type", schedule_type),
-            ])
-            .send()
-            .await?;
+            ]);
 
         // The data is wrapped in a versioned key: hadal_info_v1 or hadal_info_v2.
-        let data: serde_json::Value = {
-            let status = resp.status();
-            let text = resp.text().await?;
+        let data: serde_json::Value = self.request(request).await?;
 
-            if !status.is_success() {
-                return Err(HoyoverseError::Other(format!("HTTP {status}: {text}")));
-            }
-
-            let api_resp: ApiResponse<serde_json::Value> = serde_json::from_str(&text)?;
-            match api_resp.retcode {
-                0 => api_resp.data.ok_or(HoyoverseError::DataNotPublic)?,
-                -101 | 10001 => return Err(HoyoverseError::Auth),
-                -501000 => return Err(HoyoverseError::DataNotPublic),
-                _ => {
-                    return Err(HoyoverseError::Api {
-                        retcode: api_resp.retcode,
-                        message: api_resp.message,
-                    });
-                }
-            }
-        };
-
-        if let Some(inner) = data.get("hadal_info_v2") {
-            Ok(serde_json::from_value(inner.clone())?)
-        } else if let Some(inner) = data.get("hadal_info_v1") {
-            Ok(serde_json::from_value(inner.clone())?)
+        if let Some(inner) = data
+            .get("hadal_info_v2")
+            .or_else(|| data.get("hadal_info_v1"))
+        {
+            decode_json(serde_json::from_value(inner.clone()))
         } else {
+            trace_error(
+                "missing_shiyu_data",
+                "В ответе HoYoLAB отсутствуют поля hadal_info_v2 и hadal_info_v1.",
+            );
             Err(HoyoverseError::Deserialize(
                 "missing hadal_info_v1/v2 key".into(),
             ))
@@ -266,7 +340,7 @@ impl ZZZClient {
         target = "rustverse::bot",
         name = "hoyolab.deadly_assault",
         skip_all,
-        err
+        fields(error.type, error.message, http.response.status_code, hoyolab.retcode), err
     )]
     pub async fn get_deadly_assault(
         &self,
@@ -275,7 +349,7 @@ impl ZZZClient {
         schedule_type: &str,
     ) -> Result<ZZZDeadlyAssault, HoyoverseError> {
         let region = resolve_server(uid, region)?;
-        let resp = self
+        let request = self
             .client
             .get(format!(
                 "{ZZZ_BASE_URL}/event/game_record_zzz/api/zzz/hadal_mem_detail_v2"
@@ -285,11 +359,9 @@ impl ZZZClient {
                 ("uid", uid),
                 ("region", region),
                 ("schedule_type", schedule_type),
-            ])
-            .send()
-            .await?;
+            ]);
 
-        self.check_response(resp).await
+        self.request(request).await
     }
 
     /// Get the gacha (banner) calendar. Uses `uid`/`region`. Server auto-detected if None.
@@ -297,7 +369,7 @@ impl ZZZClient {
         target = "rustverse::bot",
         name = "hoyolab.gacha_calendar",
         skip_all,
-        err
+        fields(error.type, error.message, http.response.status_code, hoyolab.retcode), err
     )]
     pub async fn get_gacha_calendar(
         &self,
@@ -305,54 +377,50 @@ impl ZZZClient {
         region: Option<&str>,
     ) -> Result<ZZZGachaCalendar, HoyoverseError> {
         let region = resolve_server(uid, region)?;
-        let resp = self
+        let request = self
             .client
             .get(format!(
                 "{ZZZ_BASE_URL}/event/game_record_zzz/api/zzz/gacha_calendar"
             ))
             .headers(self.headers_with_ds())
-            .query(&[("uid", uid), ("region", region)])
-            .send()
-            .await?;
+            .query(&[("uid", uid), ("region", region)]);
 
-        self.check_response(resp).await
+        self.request(request).await
     }
 
     /// Get the ZZZ game record index (profile summary + stats + avatar list).
     /// Use the public API domain for public third-party UID data.
     /// Detect the server from the UID when it is `None`.
-    #[tracing::instrument(target = "rustverse::bot", name = "hoyolab.index", skip_all, err)]
+    #[tracing::instrument(target = "rustverse::bot", name = "hoyolab.index", skip_all, fields(error.type, error.message, http.response.status_code, hoyolab.retcode), err)]
     pub async fn get_index(
         &self,
         role_id: &str,
         server: Option<&str>,
     ) -> Result<ZZZIndex, HoyoverseError> {
         let server = resolve_server(role_id, server)?;
-        let resp = self
+        let request = self
             .client
             .get(format!(
                 "{ZZZ_AVATAR_URL}/event/game_record_zzz/api/zzz/index"
             ))
             .headers(self.headers_with_ds())
-            .query(&[("role_id", role_id), ("server", server)])
-            .send()
-            .await?;
+            .query(&[("role_id", role_id), ("server", server)]);
 
-        let data: ZZZIndex = self.check_response(resp).await?;
+        let data: ZZZIndex = self.request(request).await?;
         agent_cache::cache_avatars(&data.avatar_list);
         Ok(data)
     }
 
     /// Get the player agent list.
     /// Detect the server from the UID when it is `None`.
-    #[tracing::instrument(target = "rustverse::bot", name = "hoyolab.avatar_list", skip_all, err)]
+    #[tracing::instrument(target = "rustverse::bot", name = "hoyolab.avatar_list", skip_all, fields(error.type, error.message, http.response.status_code, hoyolab.retcode), err)]
     pub async fn get_avatar_list(
         &self,
         role_id: &str,
         server: Option<&str>,
     ) -> Result<ZZZAvatarList, HoyoverseError> {
         let server = resolve_server(role_id, server)?;
-        let resp = self
+        let request = self
             .client
             .get(format!(
                 "{ZZZ_AVATAR_URL}/event/game_record_zzz/api/zzz/avatar/basic"
@@ -363,12 +431,42 @@ impl ZZZClient {
                 ("server", server),
                 ("uid", role_id),
                 ("region", server),
-            ])
-            .send()
-            .await?;
+            ]);
 
-        let data: ZZZAvatarList = self.check_response(resp).await?;
+        let data: ZZZAvatarList = self.request(request).await?;
         agent_cache::cache_avatars(&data.avatar_list);
         Ok(data)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn error_responses_do_not_require_a_successful_payload_shape() {
+        for (retcode, expected) in [
+            (-101, "auth"),
+            (10001, "auth"),
+            (-501000, "private"),
+            (42, "api"),
+        ] {
+            let body = serde_json::json!({"retcode":retcode, "message":"private upstream response", "data":{"unexpected":true}});
+            let error = decode_response::<Vec<String>>(&body.to_string()).unwrap_err();
+            assert!(match error {
+                HoyoverseError::Auth => expected == "auth",
+                HoyoverseError::DataNotPublic => expected == "private",
+                HoyoverseError::Api { retcode: code, .. } => expected == "api" && code == retcode,
+                _ => false,
+            });
+        }
+        assert_eq!(
+            decode_response::<Vec<i64>>(r#"{"retcode":0,"message":"OK","data":[1]}"#).unwrap(),
+            vec![1]
+        );
+        assert!(matches!(
+            decode_response::<Vec<i64>>(r#"{"retcode":0,"message":"OK","data":null}"#),
+            Err(HoyoverseError::DataNotPublic)
+        ));
     }
 }

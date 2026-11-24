@@ -117,6 +117,8 @@ OTEL_EXPORTER_OTLP_TRACES_ENDPOINT=http://127.0.0.1:4318/v1/traces
 
 Полный адрес `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` и заголовки `OTEL_EXPORTER_OTLP_TRACES_HEADERS` имеют приоритет над соответствующими общими настройками OTLP. Если задан адрес OTLP, бот использует только этот приёмник. Без адреса OTLP действует настройка Langfuse ниже. Без обоих вариантов экспорт выключен.
 
+При ошибке откройте спан в Grafana Explore. В описании статуса видна причина, а в атрибутах запросов к HoYoLAB — `error.type`, `error.message`, полученный HTTP-статус и `hoyolab.retcode`, если HoYoLAB вернул код API. Эти поля доступны при выключенной записи ИИ-контента. Если Tempo сократил дерево при чтении, откройте запрос по Trace ID, выключите **Span Pruning Options → On/Off** и нажмите **Run query**.
+
 ### Трейсы ИИ в Langfuse Cloud
 
 Создайте тестовый проект в Langfuse Cloud. В настройках проекта откройте **API Keys**, создайте пару ключей и задайте `LANGFUSE_PUBLIC_KEY` и `LANGFUSE_SECRET_KEY` в окружении бота. Регион `LANGFUSE_REGION` по умолчанию равен `eu`. Для проекта в другом регионе укажите `us`, `jp` или `hipaa`. Перезапустите бота с новым окружением. Он отправляет трейсы в фоне по HTTPS прямо в проект. Без ключей экспорт выключен. [Приём OpenTelemetry в Langfuse](https://langfuse.com/integrations/native/opentelemetry)
