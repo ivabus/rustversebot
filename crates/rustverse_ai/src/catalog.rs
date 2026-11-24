@@ -33,9 +33,9 @@ impl Category {
 
 #[derive(Debug, Serialize)]
 pub(crate) struct Entry {
-    id: u64,
-    name: String,
-    slug: String,
+    pub(crate) id: u64,
+    pub(crate) name: String,
+    pub(crate) slug: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     specialty: Option<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -48,7 +48,7 @@ pub(crate) struct Entry {
 
 pub(crate) struct Index {
     pub revision: String,
-    entries: Vec<Entry>,
+    pub(crate) entries: Vec<Entry>,
 }
 
 impl Index {

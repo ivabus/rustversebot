@@ -71,9 +71,12 @@ fn revision_name(value: &Value) -> Result<String> {
 pub(crate) fn revision_group(rev: &str) -> Result<String> {
     let fields: Vec<_> = rev.split('_').collect();
     let [branch, version, id] = fields.as_slice() else {
-        bail!("Ожидается ревизия вида beta_X.Y.Z_N или release_X.Y.Z_N")
+        bail!("Ожидается ревизия вида <ветка>_X.Y.Z_N (beta, release или creator)")
     };
-    Branch::parse(branch)?;
+    ensure!(
+        matches!(*branch, "beta" | "release" | "creator"),
+        "Ожидается ревизия beta, release или creator"
+    );
     let parts: Vec<_> = version.split('.').collect();
     ensure!(
         parts.len() == 3
@@ -162,6 +165,70 @@ fn decode_group(body: &str, branch: Branch) -> Result<(Vec<Revision>, Option<Str
         }
     }
     bail!("GachaBase не вернул журнал изменений")
+}
+
+pub async fn compare_revisions(client: &Client, prev: &str, cur: &str) -> Result<Revision> {
+    revision_group(prev)?;
+    revision_group(cur)?;
+    let branch = cur.split('_').next();
+    if branch == prev.split('_').next() && matches!(branch, Some("beta" | "release")) {
+        let mut rows = revisions(client, Some(prev), Some(cur)).await?;
+        return if rows.len() == 1 {
+            Ok(rows.remove(0))
+        } else {
+            comparison_range(&rows)
+        };
+    }
+    ensure!(prev != cur, "начальная и конечная ревизии совпадают");
+    let load = |rev| catalog::Index::load(client, catalog::Category::Agents, "en", rev);
+    let (before, after) = tokio::try_join!(load(prev), load(cur))?;
+    let mut candidates = BTreeMap::new();
+    for entry in before.entries {
+        candidates.insert(entry.id, (entry, "removed"));
+    }
+    for entry in after.entries {
+        let status = if candidates.contains_key(&entry.id) {
+            "updated"
+        } else {
+            "new"
+        };
+        candidates.insert(entry.id, (entry, status));
+    }
+    let mut revision = Revision {
+        previous: prev.into(),
+        current: cur.into(),
+        agents: Vec::new(),
+    };
+    for (entry, status) in candidates.into_values() {
+        let mut agent = AgentChange {
+            id: entry.id,
+            name: entry.name,
+            slug: entry.slug,
+            status: status.into(),
+            forms: Vec::new(),
+            assets_changed: false,
+        };
+        if status == "updated" {
+            let (_, en, cn) = report_snapshots(client, &revision, &agent).await?;
+            agent.assets_changed = en.prev["agent"]["assets"] != en.cur["agent"]["assets"];
+            if ![en, cn].into_iter().any(agent_data_changed) {
+                continue;
+            }
+        }
+        revision.agents.push(agent);
+    }
+    Ok(revision)
+}
+
+fn agent_data_changed(mut snapshots: Snapshots) -> bool {
+    // GachaBase dates the same agent data independently on each branch.
+    for side in [&mut snapshots.prev, &mut snapshots.cur] {
+        if let Some(agent) = side["agent"].as_object_mut() {
+            agent.remove("last_updated");
+            agent.remove("first_seen");
+        }
+    }
+    snapshots.prev != snapshots.cur
 }
 
 /// Adjacent design revisions in chronological order, excluding the starting revision.
@@ -483,6 +550,19 @@ async fn report_snapshots(
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn creator_comparison_ignores_branch_dates_and_detects_skill_changes() {
+        assert_eq!(revision_group("creator_3.4.12_20749856").unwrap(), "3.4.X");
+        let prev = json!({"agent":{"last_updated":1,"skill":17}});
+        let mut cur = json!({"agent":{"last_updated":2,"skill":17}});
+        assert!(!agent_data_changed(Snapshots {
+            prev: prev.clone(),
+            cur: cur.clone()
+        }));
+        cur["agent"]["skill"] = json!(18);
+        assert!(agent_data_changed(Snapshots { prev, cur }));
+    }
 
     fn agent(id: u64, status: &str) -> AgentChange {
         AgentChange {

@@ -554,15 +554,20 @@ impl ChatAgent for Diff {
             .cache_key();
         let chat = status.address().chat;
         let bot = status.bot().clone();
-        let mut rows = revisions(
-            &state.beta.client,
+        let mut rows = if let (true, Some(prev), Some(cur)) = (
+            self.compare,
             self.previous.as_deref(),
             self.current.as_deref(),
-        )
-        .await?;
-        if self.compare && rows.len() > 1 {
-            rows = vec![rustverse_ai::beta::comparison_range(&rows)?];
-        }
+        ) {
+            vec![rustverse_ai::beta::compare_revisions(&state.beta.client, prev, cur).await?]
+        } else {
+            revisions(
+                &state.beta.client,
+                self.previous.as_deref(),
+                self.current.as_deref(),
+            )
+            .await?
+        };
         let prev = rows.first().context("empty changelog")?.previous.clone();
         let cur = rows.last().unwrap().current.clone();
         status
