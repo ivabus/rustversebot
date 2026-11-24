@@ -32,7 +32,6 @@ mod tests {
         let ds = generate_ds();
         let parts: Vec<&str> = ds.split(',').collect();
         assert_eq!(parts.len(), 3, "DS should have 3 comma-separated parts");
-        // timestamp is all digits
         assert!(parts[0].chars().all(|c| c.is_ascii_digit()));
         // random is 6 alphanumeric
         assert_eq!(parts[1].len(), 6);

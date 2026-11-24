@@ -200,8 +200,7 @@ impl AgentRun<'_> {
         self.track_progress(status, rx, generate(tx)).await
     }
 
-    /// A prefetched report can already be running when it reaches the front
-    /// of the delivery queue. Its own receiver retains its full usage totals.
+    /// Accumulate this report's usage after its final status update.
     pub async fn track_progress<T>(
         &mut self,
         status: Status<'_>,
@@ -454,14 +453,10 @@ mod tests {
             "model",
             &totals,
             "diff_status",
-            &json!({"previous":"beta_1", "current":"beta_2", "stage":"send", "character":"A&B"}),
+            &json!({"previous":"beta_1", "current":"beta_2", "stage":"send"}),
         )
         .unwrap();
-        assert!(
-            rendered
-                .text
-                .contains("<b>A&amp;B</b>\n<i>Отправляю отчёт…</i>")
-        );
+        assert!(rendered.text.contains("<i>Отправляю отчёт…</i>"));
         assert!(rendered.text.starts_with(
             "<b>Создаю дифф между версиями</b> · <code>beta_1</code> → <code>beta_2</code>"
         ));

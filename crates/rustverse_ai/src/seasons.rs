@@ -1,10 +1,10 @@
-//! Public Nanoka data for interactive questions. Keep one calendar per research run.
+//! Versioned Nanoka calendars and season pages for interactive questions.
 use std::collections::HashMap;
 
 use anyhow::{Context, Result, bail, ensure};
 use chrono::{DateTime, Utc};
 use nanoka::{
-    NanokaClient,
+    GameManifest, NanokaClient,
     calendar::{
         IndexedSeason, MOSCOW, SeasonPosition, current_live_season, endgame_index_sort,
         indexed_season, select_indexed_season,
@@ -21,12 +21,13 @@ const MAX_SEASON_REQUESTS: usize = 8;
 pub(crate) fn definitions() -> [ToolSpec; 3] {
     let mode = json!({"type":"string","enum":["shiyu_defense","deadly_assault"]});
     let offset = json!({"type":["integer","null"],"minimum":0,"description":"Start with null. Continue with next_offset."});
-    let detail = json!({"type":"object","additionalProperties":false,"properties":{"mode":mode,"season":{"type":"string","description":"current, next, or a five/six-digit season ID"},"offset":offset,"selector":{"type":["string","null"],"description":"Null for the full page, or an exact /zones/... JSON pointer."}},"required":["mode","season","offset","selector"]});
+    let version = crate::kit::version_parameter();
+    let detail = json!({"type":"object","additionalProperties":false,"properties":{"mode":mode,"version":version,"season":{"type":"string","description":"current, next, or a five/six-digit season ID"},"offset":offset,"selector":{"type":["string","null"],"description":"Null for the full page, or an exact /zones/... JSON pointer."}},"required":["mode","season","offset","selector","version"]});
     [
         ToolSpec {
             name: "list_endgame_seasons",
             description: "Browse Nanoka's season calendar. Current and upcoming seasons first, then past rotations. Each result identifies the mode, ID, schedule status and official Moscow dates. A preview has no confirmed dates.",
-            parameters: json!({"type":"object","additionalProperties":false,"properties":{"mode":{"anyOf":[mode,{"type":"null"}]},"offset":offset},"required":["mode","offset"]}),
+            parameters: json!({"type":"object","additionalProperties":false,"properties":{"mode":{"anyOf":[mode,{"type":"null"}]},"offset":offset,"version":version},"required":["mode","offset","version"]}),
         },
         ToolSpec {
             name: "get_endgame_season",
@@ -35,13 +36,20 @@ pub(crate) fn definitions() -> [ToolSpec; 3] {
         },
         ToolSpec {
             name: "get_endgame_seasons",
-            description: "Read multiple independent season pages in one call. Use for comparisons across modes or rotations. Each result corresponds to one request in input order and has the same fields, pagination, source and team rules as get_endgame_season, or an individual error.",
+            description: "Read multiple independent season pages in one call. To compare builds, request the same mode and season ID once per exact version. Each result corresponds to one request in input order and has the same fields, pagination, source and team rules as get_endgame_season, or an individual error.",
             parameters: json!({"type":"object","additionalProperties":false,"properties":{"requests":{"type":"array","minItems":1,"maxItems":MAX_SEASON_REQUESTS,"items":detail}},"required":["requests"]}),
         },
     ]
 }
 
 pub(crate) struct SeasonTools {
+    client: NanokaClient,
+    manifest: Option<GameManifest>,
+    snapshots: HashMap<String, SeasonSnapshot>,
+}
+
+pub(crate) struct SeasonSnapshot {
+    pub(crate) version: String,
     client: NanokaClient,
     indexes: HashMap<EndgameType, HashMap<String, SeasonMeta>>,
     details: HashMap<u64, Vec<Value>>,
@@ -113,15 +121,96 @@ fn zones(mode_id: u64, zone_type: Option<u64>, zones: &HashMap<String, Zone>) ->
         .collect()
 }
 
+pub(crate) fn batch_requests(args: Value) -> Result<Vec<Value>> {
+    #[derive(Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct Batch {
+        requests: Vec<Value>,
+    }
+    let batch: Batch = serde_json::from_value(args)?;
+    ensure!(
+        (1..=MAX_SEASON_REQUESTS).contains(&batch.requests.len()),
+        "Expected 1 to {MAX_SEASON_REQUESTS} season requests"
+    );
+    Ok(batch.requests)
+}
+
 impl SeasonTools {
+    pub(crate) fn new(client: NanokaClient) -> Self {
+        Self {
+            client,
+            manifest: None,
+            snapshots: HashMap::new(),
+        }
+    }
+
+    pub(crate) async fn snapshot(
+        &mut self,
+        requested: Option<&str>,
+    ) -> Result<(String, &mut SeasonSnapshot)> {
+        if self.manifest.is_none() {
+            self.manifest = Some(self.client.manifest().await?);
+        }
+        let manifest = self.manifest.as_ref().unwrap();
+        let version = match requested {
+            None => &manifest.latest,
+            Some("release") => manifest
+                .live
+                .as_deref()
+                .context("Nanoka has no live version")?,
+            Some(exact) => exact,
+        };
+        let build = if let Some((_, numbers)) = version.split_once('_') {
+            crate::beta::revision_group(version)?;
+            numbers.replace('_', "+")
+        } else {
+            version.to_owned()
+        };
+        ensure!(
+            manifest.available.contains(&build)
+                || manifest.latest == build
+                || manifest.live.as_ref() == Some(&build),
+            "Nanoka has no snapshot for {version} ({build})"
+        );
+        let snapshot = self
+            .snapshots
+            .entry(build.clone())
+            .or_insert_with(|| SeasonSnapshot::new(self.client.clone(), build));
+        Ok((version.to_owned(), snapshot))
+    }
+
     #[cfg(test)]
     pub(crate) fn fixture() -> Self {
         let mut tools = Self::new(NanokaClient::new());
+        let version = "1.0.0+2";
+        let builds = [
+            (version, 60),
+            ("1.0", 50),
+            ("3.4.5+20713015", 65),
+            ("3.4.12+20749856", 70),
+        ];
+        tools.manifest = Some(GameManifest {
+            latest: version.into(),
+            live: Some("1.0".into()),
+            available: builds.iter().map(|(build, _)| build.to_string()).collect(),
+        });
+        for (build, level) in builds {
+            let mut snapshot = SeasonSnapshot::new(tools.client.clone(), build.into());
+            snapshot.add_fixture(level);
+            tools.snapshots.insert(build.into(), snapshot);
+        }
+        tools
+    }
+}
+
+impl SeasonSnapshot {
+    #[cfg(test)]
+    fn add_fixture(&mut self, level: u64) {
         for (mode, id, sort) in [
             (EndgameType::ShiyuDefence, "62053", 1),
             (EndgameType::DeadlyAssault, "69041", 9),
         ] {
-            tools.indexes.insert(
+            self.indexes.insert(
                 mode,
                 serde_json::from_value(
                     json!({id:{"en":"Trial","sort":sort,"begin":"2000-01-01 04:00:00"}}),
@@ -130,16 +219,16 @@ impl SeasonTools {
             );
         }
         let fixture = serde_json::from_value(
-            json!({"123":{"name":"Test enemy","stage_num":5,"monster_level":60}}),
+            json!({"123":{"name":"Test enemy","stage_num":5,"monster_level":level}}),
         )
         .unwrap();
-        tools.details.insert(62053, zones(62053, None, &fixture));
-        tools
+        self.details.insert(62053, zones(62053, None, &fixture));
     }
 
-    pub(crate) fn new(client: NanokaClient) -> Self {
+    fn new(client: NanokaClient, version: String) -> Self {
         Self {
-            client,
+            client: client.with_version(&version),
+            version,
             indexes: HashMap::new(),
             details: HashMap::new(),
         }
@@ -159,29 +248,8 @@ impl SeasonTools {
         name: &str,
         args: Value,
         sources: &mut HashMap<String, Value>,
+        now: DateTime<Utc>,
     ) -> Result<Value> {
-        let now = Utc::now();
-        if name == "get_endgame_seasons" {
-            #[derive(Deserialize)]
-            #[serde(deny_unknown_fields)]
-            struct Batch {
-                requests: Vec<Value>,
-            }
-            let batch: Batch = serde_json::from_value(args)?;
-            ensure!(
-                (1..=MAX_SEASON_REQUESTS).contains(&batch.requests.len()),
-                "Expected 1 to {MAX_SEASON_REQUESTS} season requests"
-            );
-            let mut results = Vec::with_capacity(batch.requests.len());
-            for request in batch.requests {
-                let result = self
-                    .read_page(request.clone(), now, sources)
-                    .await
-                    .unwrap_or_else(|err| json!({"request":request,"error":err.to_string()}));
-                results.push(result);
-            }
-            return Ok(json!({"results":results}));
-        }
         if name == "get_endgame_season" {
             return self.read_page(args, now, sources).await;
         }
@@ -336,7 +404,7 @@ impl SeasonTools {
             }
         }
         ensure!(offset <= rows.len(), "Invalid zone offset");
-        // Keep small zones together and always return at least one complete zone.
+        // Include the first remaining zone even when it alone exceeds the page budget.
         let mut end = offset;
         let mut bytes = 0;
         while end < rows.len() {
@@ -349,7 +417,11 @@ impl SeasonTools {
         }
         result["requested_season"] = json!(selector);
         result["offset"] = json!(offset);
-        result["source"] = json!(format!("nanoka/{}/{id}/page/{offset}", mode_name(mode)));
+        result["source"] = json!(format!(
+            "nanoka/{}/{}/{id}/page/{offset}",
+            self.version,
+            mode_name(mode)
+        ));
         result["zones"] = json!(&rows[offset..end]);
         result["next_offset"] = json!((end < rows.len()).then_some(end));
         Ok(result)
@@ -363,7 +435,7 @@ mod tests {
     #[tokio::test]
     async fn exact_followups_survive_a_rotation_and_preview_dates_stay_unconfirmed() {
         let ty = EndgameType::DeadlyAssault;
-        let mut tools = SeasonTools::new(NanokaClient::new());
+        let mut tools = SeasonSnapshot::new(NanokaClient::new(), "1.0".into());
         let index = serde_json::from_value(json!({
             "69041":{"en":"Trial","sort":9,"begin":"2026-11-01 04:00:00","end":"2026-11-15 03:59:59"},
             "690421":{"en":"Trial","sort":9,"begin":"2026-01-01 00:00:00","live_begin":"2026-11-15 04:00:00"},

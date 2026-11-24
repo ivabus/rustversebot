@@ -108,9 +108,7 @@ const TEMPLATES: &[EmbeddedTemplate] = &[
     template!("unregister_not_found", "txt"),
     template!("status", "html"),
     template!("top_header", "html"),
-    template!("top_entry", "html"),
     template!("top_empty", "html"),
-    template!("top_footer", "html"),
     template!("da_detail", "txt"),
     template!("shiyu_detail", "txt"),
     template!("cookie_updated", "txt"),
@@ -156,7 +154,7 @@ impl TemplateEngine {
 
             // Most of the former Rust string literals did not end in a newline.
             // Keep that behavior while allowing text files to remain POSIX-style.
-            let source = if matches!(template.name, "status" | "top_header" | "top_entry") {
+            let source = if matches!(template.name, "status" | "top_header") {
                 template.source
             } else {
                 template
@@ -308,16 +306,24 @@ mod tests {
         let engine = TemplateEngine::new().expect("templates should compile");
         let rendered = engine
             .render(
-                "top_entry",
-                &json!({
-                    "position": 1,
-                    "display_name": "Прокси",
-                    "score_str": "42 000",
-                    "extra": "6★"
-                }),
+                "status",
+                &json!({ "seasons": [
+                    { "name": "Deadly Assault", "active": true, "start": "01.06", "end": "15.06", "tracked": 3 },
+                    { "name": "Shiyu", "active": false }
+                ] }),
             )
-            .expect("top entry should render");
+            .expect("season status should render");
 
-        assert_eq!(rendered.text, "1. <b>Прокси</b> — 42 000 | 6★");
+        assert!(
+            rendered
+                .text
+                .contains("<b>Deadly Assault</b>\n🟢 Активный сезон")
+        );
+        assert!(rendered.text.contains("Отслеживается игроков: 3"));
+        assert!(
+            rendered
+                .text
+                .contains("<b>Shiyu</b>\n🔴 Нет активного сезона")
+        );
     }
 }

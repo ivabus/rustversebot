@@ -1,7 +1,6 @@
 use std::collections::HashMap;
 use std::sync::OnceLock;
 
-/// Static mapping of all known ZZZ agent IDs → names.
 fn static_agent_map() -> &'static HashMap<i64, &'static str> {
     static MAP: OnceLock<HashMap<i64, &str>> = OnceLock::new();
     MAP.get_or_init(|| {

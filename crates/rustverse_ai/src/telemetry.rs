@@ -167,11 +167,11 @@ pub fn diff_span(
     model: &str,
     previous: &str,
     current: &str,
-    agent_id: u64,
+    agent_count: usize,
 ) -> Span {
     tracing::info_span!(target: "rustverse::ai", "diff.generate", langfuse.observation.type = "span",
         source, selected_model = model, previous, current,
-        agent_id, otel.status_code = tracing::field::Empty)
+        agent_count, otel.status_code = tracing::field::Empty)
 }
 
 /// Build full Rig payloads only when the application is collecting AI spans.
@@ -222,7 +222,7 @@ mod tests {
             .build();
         let _guard = tracing::subscriber::set_default(subscriber(&provider));
         observe(
-            diff_span("scheduler", "model", "before", "after", 1601),
+            diff_span("scheduler", "model", "before", "after", 2),
             async { Ok(()) },
         )
         .await

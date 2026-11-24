@@ -24,7 +24,7 @@ enum Commands {
         #[arg(short, long)]
         r#type: Option<EndgameTypeArg>,
 
-        /// Show only the most recent N seasons.
+        /// Show the N seasons with the highest numeric IDs.
         #[arg(short, long)]
         recent: Option<usize>,
 
@@ -42,7 +42,7 @@ enum Commands {
         #[arg(short, long)]
         images: bool,
 
-        /// Output raw JSON (all fields, unfiltered).
+        /// Print the parsed season detail as JSON.
         #[arg(long)]
         json: bool,
 
@@ -50,9 +50,8 @@ enum Commands {
         #[arg(long, conflicts_with = "json")]
         json_resolved: bool,
 
-        /// Show final Deadly Assault stats from `boss_adjust`.
-        /// Set an optional player level from 1 through 29.
-        /// The command uses the highest available level by default.
+        /// Show final Deadly Assault stats at the given difficulty level.
+        /// Levels start at one and default to the highest level in the first mode's table.
         #[arg(long, value_name = "LEVEL")]
         scaled: Option<Option<usize>>,
     },
@@ -115,7 +114,6 @@ async fn cmd_list(
     let seasons = match filter_type.map(EndgameType::from) {
         Some(ty) => client.get_seasons_by_type(ty).await?,
         None => {
-            // Fetch both and merge, prefixing with type marker
             let mut all = client.get_seasons().await?;
             let boss = client.get_boss_seasons().await?;
             all.extend(boss);
@@ -123,7 +121,6 @@ async fn cmd_list(
         }
     };
 
-    // Collect into a sorted vec (by numeric key descending so newest first)
     let mut entries: Vec<_> = seasons.iter().collect();
     entries.sort_by_key(|(k, _)| k.parse::<u64>().unwrap_or(0));
     entries.reverse();
@@ -201,7 +198,6 @@ async fn cmd_show(
                 println!("(no zones)");
             }
 
-            // If --scaled flag is present, show computed final stats
             if let Some(level_opt) = scaled {
                 print_scaled_stats(d, level_opt);
             }
@@ -233,7 +229,6 @@ fn print_zones(
     zones: &HashMap<String, nanoka::types::Zone>,
     print_images: bool,
 ) {
-    // Sort zones by key
     let mut zone_ids: Vec<&String> = zones.keys().collect();
     zone_ids.sort_by_key(|k| k.parse::<u64>().unwrap_or(0));
 
@@ -254,7 +249,6 @@ fn print_zones(
             zone.child.len()
         );
 
-        // Goals
         if zone.ss_rank_goal > 0 {
             print!("│  Goals: SS ≥ {}, ", zone.ss_rank_goal);
         } else {
@@ -289,7 +283,6 @@ fn print_zones(
             );
         }
 
-        // Buffs (layer_buff + selectable_buff)
         for (buff_id, buff) in &zone.layer_buff {
             if buff.title.is_empty() && buff.desc.is_empty() {
                 continue;
@@ -315,7 +308,6 @@ fn print_zones(
             }
         }
 
-        // Rooms
         let mut room_ids: Vec<&String> = zone.layer_room.keys().collect();
         room_ids.sort_by_key(|k| k.parse::<u64>().unwrap_or(0));
 
@@ -323,7 +315,6 @@ fn print_zones(
             let room = &zone.layer_room[room_id];
             println!("│  ├─ Room {room_id} ({}-wave)", room.waves_num);
 
-            // Weaknesses
             if !room.monster_weakness.is_empty() {
                 let weaknesses: Vec<_> = room.monster_weakness.values().collect();
                 println!(
@@ -336,7 +327,6 @@ fn print_zones(
                 );
             }
 
-            // Monsters
             let mut monster_ids: Vec<&String> = room.monster_list.keys().collect();
             monster_ids.sort();
 
@@ -378,7 +368,6 @@ fn print_zones(
             }
         }
 
-        // Child zones
         if !zone.child.is_empty() {
             println!("│  Child zones: {:?}", zone.child);
         }
@@ -402,14 +391,12 @@ fn print_scaled_stats(detail: &nanoka::types::BossSeasonDetail, level_opt: Optio
     println!("\n=== Scaled Boss Stats (level {level}/{max_level}) ===");
     println!("Level rates: {} entries loaded", rates.len());
 
-    // Show rates summary at level
     let rate = &rates[level - 1];
     println!(
         "Rates at level {level}: hp_rate={}, atk_rate={}, points={}",
         rate.hp_rate, rate.atk_rate, rate.points
     );
 
-    // Show per-zone monster stats
     if let Some(zones) = detail.zones() {
         let mut zone_ids: Vec<&String> = zones.keys().collect();
         zone_ids.sort_by_key(|k| k.parse::<u64>().unwrap_or(0));
@@ -432,7 +419,6 @@ fn print_scaled_stats(detail: &nanoka::types::BossSeasonDetail, level_opt: Optio
                         );
                     }
 
-                    // Also show range
                     if let Some(range) = detail.scale_stats_range(api_hp, api_atk, 0) {
                         println!(
                             "    Range: HP {hp_min:.0} → {hp_max:.0}  ATK {atk_r:.0}  Points {pts_min} → {pts_max}",
@@ -459,11 +445,7 @@ fn meta_local_name<'a>(meta: &'a nanoka::types::SeasonMeta, lang: &str) -> &'a s
     }
 }
 
-/// Format element weaknesses from the monster `element` field (`1` = weak).
-///
-/// Use `monster_weakness` from the room when it is available.
-/// Otherwise, summarize the per-element flags.
-/// A value of `-1` means resistant and does not appear in this summary.
+/// List the elements for which the monster has a weakness flag of 1.
 fn format_resistances(elem: &nanoka::types::ElementResist) -> String {
     let map = [
         ("Phys", elem.physical),

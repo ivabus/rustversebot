@@ -1,7 +1,6 @@
 {% extends "prompt_status.html.j2" %}
 {% block heading %}<b>Создаю дифф между версиями</b>{% if activity.previous and activity.current %} · <code>{{ activity.previous[:64] }}</code> → <code>{{ activity.current[:64] }}</code>{% endif %}
-{% if activity.character %}<b>{{ activity.character[:100] }}</b>
-{% endif %}{% endblock %}
+{% endblock %}
 {% block stage -%}
 {% if activity.stage == "prepare" %}Подбираю ревизии…
 {%- elif activity.stage == "send" %}Отправляю отчёт…

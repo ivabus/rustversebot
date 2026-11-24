@@ -1,1 +1,1 @@
-[{% if comparison %}Сравнение ревизий{% elif hotfix %}Хотфикс{% elif release %}Релиз патча{% else %}Обновление беты{% endif %} · GachaBase](<{{ url }}>)
+{% if comparison %}Сравнение ревизий{% elif hotfix %}Хотфикс{% elif release %}Релиз патча{% else %}Обновление беты{% endif %} · GachaBase — {% for source in sources %}[{{ source.name }}](<{{ source.url }}>){% if not loop.last %}, {% endif %}{% endfor %}

@@ -273,7 +273,7 @@ pub struct BossSeasonDetail {
     pub name: String,
     /// Priority / sort order (always 9 for Deadly Assault).
     pub priority: u32,
-    /// Boss adjustment data (miscellaneous, keyed by zone type ID).
+    /// Per-level adjustments keyed by consecutive IDs within each scaling table.
     #[serde(default)]
     pub boss_adjust: HashMap<String, serde_json::Value>,
     /// Default zone type ID.
@@ -288,7 +288,7 @@ pub struct BossSeasonDetail {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub struct BossMode {
-    /// Mode ID (same as parent season ID).
+    /// Mode identifier. A complex boss can have its own ID within the season.
     pub id: u64,
     /// Zone type ID for this mode.
     #[serde(default)]
@@ -342,12 +342,9 @@ impl BossSeasonDetail {
         self.modes.first().map(|m| &m.zone)
     }
 
-    /// Extract the per-level rate array for the given mode (or the first mode).
-    ///
-    /// This walks the `boss_adjust` map starting from the mode's `zone_type`
-    /// base key, collecting sequential entries until a gap is found.
-    /// Return an ordered vector of [`LevelRates`].
-    /// Index zero contains the rates for player level one.
+    /// Return consecutive level rates for the selected mode, starting at level one.
+    /// Complex mode uses the table at 1301 when present. Other tables start at
+    /// the mode's zone type. A missing mode or table yields an empty vector.
     pub fn level_rates(&self, mode_index: usize) -> Vec<LevelRates> {
         let mode = match self.modes.get(mode_index) {
             Some(m) => m,
@@ -392,7 +389,7 @@ impl BossSeasonDetail {
     /// * `mode_index` — which mode to use (usually 0).
     ///
     /// Formulas match nanoka.cc:
-    ///   - **HP**: cumulative `floor(api_hp × hp_rate / 10000)` summed over levels `1..=level`
+    ///   - **HP**: `floor(sum(api_hp × hp_rate / 10000))` over levels `1..=level`
     ///   - **ATK**: `floor(api_atk × (1 + atk_rate / 10000))` at `level`
     ///   - **Points**: cumulative sum of per-level `points` over `1..=level`
     pub fn scale_stats(
@@ -561,11 +558,7 @@ impl AnySeasonDetail {
     pub fn zones(&self) -> &HashMap<String, Zone> {
         match self {
             AnySeasonDetail::Shiyu(d) => &d.zone,
-            AnySeasonDetail::Boss(d) => {
-                // Return zones from the first mode, or an empty ref.
-                // This is a bit awkward — we keep a static empty map for the fallback.
-                d.zones().unwrap_or(&EMPTY_ZONE_MAP)
-            }
+            AnySeasonDetail::Boss(d) => d.zones().unwrap_or(&EMPTY_ZONE_MAP),
         }
     }
 }

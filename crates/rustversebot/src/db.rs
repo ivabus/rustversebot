@@ -677,20 +677,26 @@ impl Db {
         Ok(agents)
     }
 
-    pub async fn pending_beta_text(
+    pub async fn pending_beta_parts(
         &self,
         chat: i64,
         cur: &str,
-        agent: u64,
-    ) -> anyhow::Result<Option<Vec<String>>> {
-        self.optional_string(
-            "SELECT remaining FROM beta_pending_text WHERE chat_id=?1 AND revision=?2 AND agent=?3",
-            params![chat, cur, i64::try_from(agent)?],
-        )
-        .await?
-        .map(|json| serde_json::from_str(&json))
-        .transpose()
-        .map_err(Into::into)
+    ) -> anyhow::Result<std::collections::HashMap<u64, Vec<String>>> {
+        let mut rows = self
+            .connection()?
+            .query(
+                "SELECT agent, remaining FROM beta_pending_text WHERE chat_id=?1 AND revision=?2",
+                params![chat, cur],
+            )
+            .await?;
+        let mut tails = std::collections::HashMap::new();
+        while let Some(row) = rows.next().await? {
+            tails.insert(
+                u64::try_from(row.get::<i64>(0)?)?,
+                serde_json::from_str(&row.get::<String>(1)?)?,
+            );
+        }
+        Ok(tails)
     }
 
     pub async fn save_pending_beta_text(
@@ -1468,13 +1474,10 @@ mod tests {
         db.save_pending_beta_text(5, "r2", 2, &tail).await.unwrap();
         drop(db);
         let db = Db::connect(&url).await.unwrap();
-        assert_eq!(
-            db.pending_beta_text(5, "r2", 2).await.unwrap().unwrap(),
-            tail
-        );
-        assert!(db.pending_beta_text(6, "r2", 2).await.unwrap().is_none());
+        assert_eq!(db.pending_beta_parts(5, "r2").await.unwrap()[&2], tail);
+        assert!(db.pending_beta_parts(6, "r2").await.unwrap().is_empty());
         db.mark_beta_delivered(5, "r2", &[2, 3]).await.unwrap();
-        assert!(db.pending_beta_text(5, "r2", 2).await.unwrap().is_none());
+        assert!(db.pending_beta_parts(5, "r2").await.unwrap().is_empty());
         assert_eq!(db.delivered_beta_agents(5, "r2").await.unwrap().len(), 3);
     }
 
@@ -1822,6 +1825,7 @@ mod tests {
             seasons: [rustverse_ai::SeasonReference {
                 mode: "shiyu_defense".into(),
                 season_id: season,
+                version: Some("beta_1.0.0_2".into()),
                 requested: "next".into(),
                 page: 0,
                 path: None,

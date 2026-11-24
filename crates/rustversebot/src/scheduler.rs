@@ -300,9 +300,9 @@ pub async fn fetch_all_users(cookie: &str, state: &BotState) -> anyhow::Result<(
     let mut err_count = 0;
 
     for user in &users {
-        match fetch_one_inner(&client, &user.uid, user, state).await {
+        match fetch_one_inner(&client, &user.uid, Some(user), state).await {
             Ok(true) => ok_count += 1,
-            Ok(false) => { /* data not public, counted as skipped */ }
+            Ok(false) => {}
             Err(_) => err_count += 1,
         }
     }
@@ -316,32 +316,20 @@ pub async fn fetch_all_users(cookie: &str, state: &BotState) -> anyhow::Result<(
     Ok((ok_count, err_count))
 }
 
-/// Fetch endgame data for one UID.
-///
-/// The UID does not need to be registered.
-/// Return `true` after storage. Return `false` when the data is not public.
+/// Fetch both modes for a registered or unregistered UID. Return whether a snapshot was stored.
 pub async fn fetch_single_user(cookie: &str, uid: &str, state: &BotState) -> anyhow::Result<bool> {
     let client = rustverse::client::zzz::ZZZClient::from_cookie_string(cookie)?;
-    // Use a placeholder UserRow — we just need uid for this fetch
-    let placeholder = crate::db::UserRow {
-        chat_id: 0,
-        telegram_user_id: 0,
-        uid: uid.to_string(),
-        nickname: None,
-    };
-    fetch_one_inner(&client, uid, &placeholder, state).await
+    fetch_one_inner(&client, uid, None, state).await
 }
 
-/// Core fetch logic for a single user. Shared by fetch_all_users and fetch_single_user.
 async fn fetch_one_inner(
     client: &rustverse::client::zzz::ZZZClient,
     uid: &str,
-    user: &crate::db::UserRow,
+    registration: Option<&crate::db::UserRow>,
     state: &BotState,
 ) -> anyhow::Result<bool> {
     let mut any_stored = false;
 
-    // Fetch Deadly Assault
     match retry_hoyolab(|| client.get_deadly_assault(uid, None, "1")).await {
         Ok(data) => {
             let season_start = data
@@ -373,8 +361,8 @@ async fn fetch_one_inner(
 
                 if let Some(ref nick) = data.nick_name
                     && !nick.is_empty()
+                    && let Some(user) = registration
                     && user.nickname.is_none()
-                    && user.chat_id != 0
                 {
                     state
                         .db
@@ -393,7 +381,6 @@ async fn fetch_one_inner(
 
     tokio::time::sleep(SchedulerSettings::from_env().request_spacing).await;
 
-    // Fetch Shiyu Defense
     match retry_hoyolab(|| client.get_shiyu_defense(uid, None, "1")).await {
         Ok(data) => {
             let season_start = data
@@ -432,7 +419,6 @@ async fn fetch_one_inner(
         }
     }
 
-    // Cache avatar names for this UID
     if any_stored {
         let _ = cache_avatar_names(client, uid, state).await;
     }
@@ -483,7 +469,6 @@ async fn cache_avatar_names(
     }
 }
 
-/// Internal tick helper used by the background scheduler.
 async fn fetch_all_bg(state: &Arc<BotState>) -> anyhow::Result<()> {
     let cookie = match state.db.get_cookie().await? {
         Some(c) => c,

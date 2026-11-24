@@ -471,32 +471,47 @@ pub async fn report_with_progress(
     model: &str,
     progress: Option<tokio::sync::watch::Sender<PromptProgress>>,
 ) -> Result<String> {
+    let selected = Revision {
+        previous: revision.previous.clone(),
+        current: revision.current.clone(),
+        agents: vec![agent.clone()],
+    };
+    let text = revision_report(client, &selected, key, model, progress).await?;
+    Ok(format!("# {}\n\n{text}", agent.name))
+}
+
+/// Research the selected families together using one tool store and one agent run.
+pub async fn revision_report(
+    client: &Client,
+    revision: &Revision,
+    key: &str,
+    model: &str,
+    progress: Option<tokio::sync::watch::Sender<PromptProgress>>,
+) -> Result<String> {
     let mut tools = crate::kit::KitTools::new(client.clone());
-    let mut parts = Vec::new();
+    let mut groups = Vec::new();
     let mut assets = Vec::new();
-    for member in agent.changed_members() {
-        let (page, en, cn) = report_snapshots(client, revision, member).await?;
-        if let Some(input) = tools.report_input(&page, en, cn)? {
-            parts.push(if agent.forms.is_empty() {
-                input
-            } else {
-                format!("{} (ID {}):\n{input}", member.name, member.id)
-            });
+    for agent in &revision.agents {
+        let mut members = Vec::new();
+        for member in agent.changed_members() {
+            let (page, en, cn) = report_snapshots(client, revision, member).await?;
+            if let Some(input) = tools.report_input(&page, en, cn)? {
+                members.push(format!("{} (ID {})\n{input}", member.name, member.id));
+            }
+            if member.assets_changed {
+                assets.push(member.name.as_str());
+            }
         }
-        if member.assets_changed {
-            assets.push(member.name.as_str());
+        if !members.is_empty() {
+            groups.push(format!(
+                "Агент {} (ID {}) и его изменённые записи:\n{}",
+                agent.name,
+                agent.id,
+                members.join("\n")
+            ));
         }
     }
-    let input = (!parts.is_empty()).then(|| {
-        let mut input = parts.join("\n\n");
-        if !agent.forms.is_empty() {
-            input = format!(
-                "Подготовь один отчёт для {} (ID {}). Записи относятся к одному агенту и его формам. Общие изменения опиши один раз, отличия привяжи к названиям форм. При необходимости сверяй механику с основным агентом.\n\n{input}",
-                agent.name, agent.id
-            );
-        }
-        input
-    });
+    let input = (!groups.is_empty()).then(|| groups.join("\n\n"));
     let text = crate::write_report(
         tools,
         input,
@@ -505,11 +520,13 @@ pub async fn report_with_progress(
         progress,
     )
     .await?;
-    let mut report =
-        crate::format_report(&agent.name, &revision.previous, &revision.current, &text);
+    let mut report = format!(
+        "## `{}` → `{}`\n\n{text}",
+        revision.previous, revision.current
+    );
     if !assets.is_empty() {
         report.push_str(&format!(
-            "\n\n### Ресурсы персонажа\n- Обновлены игровые ресурсы: {}.",
+            "\n\nОбновлены игровые ресурсы: {}.",
             assets.join(", ")
         ));
     }

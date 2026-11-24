@@ -29,11 +29,15 @@ pub(crate) struct ToolSpec {
     pub(crate) parameters: Value,
 }
 
+pub(crate) fn version_parameter() -> Value {
+    json!({"type":["string","null"],"description":"Exact revision (beta_X.Y.Z_N, creator_X.Y.Z_N, release_X.Y.Z_N) or branch ('release' or 'beta'). For current live endgame use 'release'. Null reuses the pinned version or defaults to the newest. Reuse the returned version for later pages."})
+}
+
 pub(crate) fn definitions() -> Vec<ToolSpec> {
     let category = json!({"type":"string","enum":["agents","w-engines","drive-discs","bangboo","enemies","tutorials"]});
     let language = json!({"type":"string","enum":["en","cn","ru"],"description":"Use en or cn for game mechanics. Use ru for Russian terminology."});
     let offset = json!({"type":["integer","null"],"minimum":0,"description":"Start at 0 or null. Copy next_offset to continue."});
-    let version = json!({"type":["string","null"],"description":"Exact revision or branch ('release' or 'beta'). For current live endgame use 'release'. Read entries at the exact revision returned by search. Null reuses the pinned revision or defaults to the newest across both branches for questions. Reports start at cur."});
+    let version = version_parameter();
     let mut search_version = version.clone();
     search_version["description"] = json!(
         "For an unversioned build or stat goal, look up the agent by name with 'release_then_beta': check release first, then beta on a miss. For an explicitly requested branch, live endgame or an exact patch, use the requested branch or revision. Null reuses the pinned revision or the newest available."
@@ -109,6 +113,8 @@ pub struct SeasonReference {
     pub mode: String,
     pub season_id: u64,
     pub requested: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub version: Option<String>,
     pub page: usize,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub path: Option<String>,
@@ -143,6 +149,7 @@ impl TurnReferences {
                     mode: mode.into(),
                     season_id: id,
                     requested: result["requested_season"].as_str().unwrap_or(mode).into(),
+                    version: result["version"].as_str().map(str::to_owned),
                     page: result["offset"].as_u64().unwrap_or_default() as usize,
                     path: result["path"].as_str().map(str::to_owned),
                 });
@@ -167,6 +174,7 @@ pub(crate) struct KitTools {
     calls: Vec<Arc<Value>>,
     report_changes: HashMap<(u64, Language, String), Groups>,
     seasons: Option<crate::seasons::SeasonTools>,
+    pinned_season_version: Option<String>,
     pinned: Option<String>,
     timeline: Option<Timeline>,
 }
@@ -180,6 +188,7 @@ impl KitTools {
             sources: HashMap::new(),
             calls: Vec::new(),
             seasons: None,
+            pinned_season_version: None,
             pinned: None,
             report_changes: HashMap::new(),
             timeline: None,
@@ -188,11 +197,12 @@ impl KitTools {
 
     pub fn for_question(client: Client, question: &str) -> Self {
         static EXACT: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
-            regex::Regex::new(r"\b(?:beta|release)_[0-9]+\.[0-9]+\.[0-9]+_[0-9]+\b").unwrap()
+            regex::Regex::new(r"\b(?:beta|release|creator)_[0-9]+\.[0-9]+\.[0-9]+_[0-9]+\b")
+                .unwrap()
         });
         let mut tools = Self::new(client);
-        tools.seasons = Some(crate::seasons::SeasonTools::new(nanoka::NanokaClient::new()));
         tools.pinned = EXACT.find(question).map(|v| v.as_str().to_owned());
+        tools.seasons = Some(crate::seasons::SeasonTools::new(nanoka::NanokaClient::new()));
         tools
     }
 
@@ -374,14 +384,63 @@ impl KitTools {
         Ok(result)
     }
 
+    async fn season_request(
+        &mut self,
+        name: &str,
+        mut args: Value,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> Result<Value> {
+        let version = args
+            .as_object_mut()
+            .context("Expected season request")?
+            .remove("version");
+        let mut version: Option<String> = serde_json::from_value(version.unwrap_or_default())?;
+        if version.as_deref() == Some("beta") {
+            // Nanoka's manifest lists build numbers without their beta/creator branch.
+            version = Some(
+                self.timeline()
+                    .await?
+                    .latest(Some("beta"))
+                    .context("No beta revisions")?,
+            );
+        }
+        let requested = version
+            .as_ref()
+            .or(self.pinned_season_version.as_ref())
+            .or(self.pinned.as_ref());
+        let (resolved, snapshot) = self
+            .seasons
+            .as_mut()
+            .context("Season tools unavailable")?
+            .snapshot(requested.map(String::as_str))
+            .await?;
+        let mut result = snapshot.call(name, args, &mut self.sources, now).await?;
+        result["version"] = json!(resolved);
+        result["nanoka_version"] = json!(snapshot.version);
+        self.pinned_season_version
+            .get_or_insert_with(|| resolved.clone());
+        if resolved.contains('_') {
+            self.pinned.get_or_insert(resolved);
+        }
+        Ok(result)
+    }
+
     async fn call(&mut self, name: &str, args: Value) -> Result<Value> {
         match name {
-            "list_endgame_seasons" | "get_endgame_season" | "get_endgame_seasons" => {
-                self.seasons
-                    .as_mut()
-                    .context("Season tools unavailable")?
-                    .call(name, args, &mut self.sources)
-                    .await
+            "list_endgame_seasons" | "get_endgame_season" => {
+                self.season_request(name, args, chrono::Utc::now()).await
+            }
+            "get_endgame_seasons" => {
+                let mut results = Vec::new();
+                let now = chrono::Utc::now();
+                for request in crate::seasons::batch_requests(args)? {
+                    let result = self
+                        .season_request("get_endgame_season", request.clone(), now)
+                        .await
+                        .unwrap_or_else(|err| json!({"request":request,"error":err.to_string()}));
+                    results.push(result);
+                }
+                Ok(json!({"results":results}))
             }
             "list_recent_revisions" => {
                 ensure!(args == json!({}), "Expected empty arguments");

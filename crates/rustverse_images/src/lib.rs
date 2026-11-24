@@ -209,7 +209,7 @@ async fn pipeline(
     Ok(png)
 }
 
-/// Download all referenced images before either renderer is started.
+/// Stage available images from the cache or remote sources before rendering.
 pub async fn render(
     template: Template,
     input: &Value,

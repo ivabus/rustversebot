@@ -54,7 +54,7 @@ pub struct Cli {
     #[arg(short = 'c', long, env = "HOYO_COOKIE")]
     pub cookie: Option<String>,
 
-    /// Output the raw JSON response.
+    /// Print the parsed game data as JSON for commands that support JSON output.
     #[arg(short = 'j', long, global = true)]
     pub json: bool,
 
@@ -217,7 +217,6 @@ impl Cli {
                             eprintln!(
                                 "Note: cannot fetch target avatars ({e}), trying own account..."
                             );
-                            // Fall back to own avatars if not cached yet
                             if !agent_cache::is_cached() {
                                 let cards = client.get_game_record_cards().await?;
                                 if let Some(own) = cards.iter().find(|c| c.game_id == 8) {
@@ -509,7 +508,6 @@ impl Cli {
                             stats.memory_battlefield_full_stars_times.unwrap_or(0)
                         );
 
-                        // Shiyu summary
                         if let Some(ref hadal) = stats.hadal_brief
                             && let Some(ref v2) = hadal.v2
                         {
@@ -522,7 +520,6 @@ impl Cli {
                             );
                         }
 
-                        // Deadly Assault summary
                         if let Some(ref mb) = stats.memory_battlefield {
                             let rp = mb.rank_percent.unwrap_or(0) as f64 / 100.0;
                             println!(
@@ -532,13 +529,11 @@ impl Cli {
                             );
                         }
 
-                        // Tower
                         if let Some(t) = stats.climbing_tower_layer {
                             println!("  Tower (S1):          Floor {t}");
                         }
                     }
 
-                    // Use full avatar list when -n was given, otherwise fall back to index's list
                     let display_avatars = full_avatars.as_ref().unwrap_or(&data.avatar_list);
                     if !display_avatars.is_empty() {
                         let s_agents: Vec<_> =
@@ -564,7 +559,6 @@ impl Cli {
                 if self.json {
                     println!("{}", serde_json::to_string_pretty(&data)?);
                 } else {
-                    // Group by rarity
                     let s_agents: Vec<_> = data
                         .avatar_list
                         .iter()

@@ -19,7 +19,7 @@ use anyhow::Context;
 use std::{net::SocketAddr, sync::Arc};
 use teloxide::{prelude::*, utils::command::BotCommands};
 
-/// All bot commands, matched case-insensitively.
+/// Telegram bot commands.
 #[derive(BotCommands, Clone)]
 #[command(rename_rule = "lowercase", parse_with = command_text)]
 enum Command {
@@ -40,7 +40,7 @@ enum Command {
     Current,
     /// Show the previous pair of mode seasons.
     Previous,
-    /// Show an infographic for a current or next endgame season: `/endgame [id]`.
+    /// Show a season card. Use /endgame to choose a season or /endgame <id> to open it.
     Endgame(String),
     /// Изменения агентов за последнюю бету: /betadiff [prev cur].
     BetaDiff(String),
@@ -154,7 +154,6 @@ async fn main() -> anyhow::Result<()> {
     let db = db::Db::connect(&database_url).await?;
     log::info!("Local libSQL database ready");
 
-    // Set up template engine
     let templates = templates::TemplateEngine::new()?;
     log::info!("Templates loaded");
 
@@ -186,7 +185,6 @@ async fn main() -> anyhow::Result<()> {
     let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
     let ai_task = tokio::spawn(ai_jobs::run(ai_queue, shutdown_rx.clone()));
 
-    // Spawn the background scheduler
     let sched_bot = bot.clone();
     let sched_state = state.clone();
     let scheduler_task = tokio::spawn(async move {
@@ -215,7 +213,6 @@ async fn main() -> anyhow::Result<()> {
         Err(error) => return Err(error).context("could not read BOT_WEB_BIND"),
     };
 
-    // Set up the command handler dispatch tree
     let handler = dptree::entry()
         .branch(
             Update::filter_message()

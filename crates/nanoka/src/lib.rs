@@ -9,8 +9,8 @@
 //!
 //! | Type | ID prefix | Index URL | Detail URL |
 //! |------|-----------|-----------|------------|
-//! | [`ShiyuDefence`] | `61…`, `62…` | `shiyu.json` | `en/shiyu/{id}.json` |
-//! | [`DeadlyAssault`] | `69…` | `boss.json` | `en/boss/{id}.json` |
+//! | [`EndgameType::ShiyuDefence`] | `61…`, `62…` | `shiyu.json` | `en/shiyu/{id}.json` |
+//! | [`EndgameType::DeadlyAssault`] | `69…` | `boss.json` | `en/boss/{id}.json` |
 //!
 //! # Quick start
 //!
@@ -40,7 +40,7 @@ pub mod types;
 use regex::Regex;
 use reqwest::Client as HttpClient;
 use std::collections::HashMap;
-use std::sync::OnceLock;
+use std::sync::{Arc, OnceLock};
 use tracing::debug;
 use types::*;
 
@@ -51,9 +51,13 @@ struct DataManifest {
     zzz: GameManifest,
 }
 
-#[derive(serde::Deserialize)]
-struct GameManifest {
-    latest: String,
+#[derive(Clone, serde::Deserialize)]
+pub struct GameManifest {
+    pub latest: String,
+    #[serde(default)]
+    pub live: Option<String>,
+    #[serde(default)]
+    pub available: Vec<String>,
 }
 
 /// The main client for the nanoka.cc ZZZ API.
@@ -68,12 +72,13 @@ struct GameManifest {
 ///
 /// let client = NanokaClient::new();
 /// ```
+#[derive(Clone)]
 pub struct NanokaClient {
     http: HttpClient,
-    base_url: String,       // https://static.nanoka.cc
-    image_base_url: String, // https://static.nanoka.cc/assets/zzz
+    base_url: String,
+    image_base_url: String,
     pinned_version: Option<String>,
-    version: tokio::sync::Mutex<Option<(std::time::Instant, String)>>,
+    manifest: Arc<tokio::sync::Mutex<Option<(std::time::Instant, GameManifest)>>>,
     /// Language code for localized data. The default is `"en"`.
     pub lang: String,
 }
@@ -95,7 +100,7 @@ impl NanokaClient {
             base_url: "https://static.nanoka.cc".into(),
             image_base_url: "https://static.nanoka.cc/assets/zzz".into(),
             pinned_version: None,
-            version: Default::default(),
+            manifest: Default::default(),
             lang: "en".into(),
         }
     }
@@ -111,6 +116,7 @@ impl NanokaClient {
     /// Override the static asset base URL for tests or mirrors.
     pub fn with_base_url(mut self, url: impl Into<String>) -> Self {
         self.base_url = url.into();
+        self.manifest = Default::default();
         self
     }
 
@@ -137,23 +143,27 @@ impl NanokaClient {
         if let Some(v) = &self.pinned_version {
             return Ok(v.clone());
         }
-        let mut cache = self.version.lock().await;
-        if let Some((checked, version)) = &*cache
+        Ok(self.manifest().await?.latest)
+    }
+
+    /// Published ZZZ snapshots, refreshed hourly.
+    pub async fn manifest(&self) -> Result<GameManifest, Error> {
+        let mut cache = self.manifest.lock().await;
+        if let Some((checked, manifest)) = &*cache
             && checked.elapsed() < std::time::Duration::from_secs(3600)
         {
-            return Ok(version.clone());
+            return Ok(manifest.clone());
         }
 
         let url = format!("{}/manifest.json", self.base_url.trim_end_matches('/'));
         let manifest: DataManifest = self.get_json(&url).await?;
-        let version = manifest.zzz.latest;
-        if version.is_empty() {
+        let game = manifest.zzz;
+        if game.latest.is_empty() {
             return Err(Error::VersionNotFound);
         }
-        debug!("Resolved game version: {version}");
-
-        *cache = Some((std::time::Instant::now(), version.clone()));
-        Ok(version)
+        debug!("Resolved game version: {}", game.latest);
+        *cache = Some((std::time::Instant::now(), game.clone()));
+        Ok(game)
     }
 
     // ------------------------------------------------------------------
@@ -240,11 +250,8 @@ impl NanokaClient {
     //  Resolved / scaled convenience methods
     // ------------------------------------------------------------------
 
-    /// Fetch a Deadly Assault detail with images resolved and stats scaled
-    /// to final in-game values.
-    ///
-    /// Equivalent to calling [`get_boss_detail`](Self::get_boss_detail) then
-    /// [`BossSeasonDetail::scale_stats_in_place`] then resolving images.
+    /// Fetch the season, scale each mode at the requested level and resolve its images.
+    /// See [`BossSeasonDetail::scale_all_modes_in_place`] for level selection.
     pub async fn get_boss_detail_resolved(
         &self,
         id: u64,
@@ -287,29 +294,21 @@ impl NanokaClient {
         if let Some(caps) = re.captures(path) {
             Some(format!("{}/{}.webp", self.image_base_url, &caps[1]))
         } else {
-            // Fallback: use the whole last segment as-is and tack on .webp
             let name = path.rsplit('/').next().unwrap_or(path);
             let stem = name.rsplit_once('.').map(|(s, _)| s).unwrap_or(name);
             Some(format!("{}/{}.webp", self.image_base_url, stem))
         }
     }
 
-    /// Replace all relative image paths AND raw API stats in the given detail.
-    ///
-    /// For Shiyu Defense: only image paths are resolved.
-    /// For Deadly Assault: image paths are resolved AND monster stats + zone
-    /// goals are scaled to their final in-game values using the max player
-    /// level from boss_adjust.
-    ///
-    /// Use this method before serialization to JSON.
-    /// Consumers then do not need to resolve images or scale stats.
+    /// Resolve monster images before serializing the season.
+    /// For Deadly Assault, also scale HP and ATK at each mode's highest available level.
+    /// Rank goals retain the thresholds supplied by the API.
     pub fn resolve_images(&self, detail: &mut AnySeasonDetail) {
         match detail {
             AnySeasonDetail::Shiyu(d) => {
                 Self::resolve_zone_images(&self.image_base_url, &mut d.zone);
             }
             AnySeasonDetail::Boss(d) => {
-                // Scale stats first, then resolve images
                 d.scale_all_modes_in_place(None);
                 for mode in &mut d.modes {
                     Self::resolve_zone_images(&self.image_base_url, &mut mode.zone);
@@ -318,19 +317,16 @@ impl NanokaClient {
         }
     }
 
-    /// Internal helper: walk a zone map and replace image paths.
     fn resolve_zone_images(image_base: &str, zones: &mut HashMap<String, Zone>) {
         let re =
             IMAGE_FILENAME_RE.get_or_init(|| Regex::new(r"([^/]+)\.\w+$").expect("image regex"));
 
         for zone in zones.values_mut() {
             for room in zone.layer_room.values_mut() {
-                // Resolve monster_icon
                 if !room.monster_icon.is_empty() {
                     room.monster_icon =
                         Self::resolve_image_path(image_base, re, &room.monster_icon);
                 }
-                // Resolve each monster's image
                 for monster in room.monster_list.values_mut() {
                     if !monster.image.is_empty() {
                         monster.image = Self::resolve_image_path(image_base, re, &monster.image);
@@ -399,7 +395,7 @@ pub enum Error {
     #[error("Unknown season ID {0} — expected a Shiyu (61…/62…) or Deadly Assault (69…) ID")]
     UnknownSeasonId(u64),
 
-    /// The game data version string was absent from the static-data manifest.
+    /// The manifest contains an empty latest version string.
     #[error("Could not find the ZZZ data version in the nanoka.cc manifest")]
     VersionNotFound,
 }
@@ -470,7 +466,6 @@ mod tests {
 
     #[test]
     fn test_boss_stat_scaling() {
-        // Simulate boss_adjust data for zone_type 1001
         let mut boss_adjust = HashMap::new();
         boss_adjust.insert(
             "1001".into(),
@@ -500,7 +495,6 @@ mod tests {
         assert_eq!(rates[0].atk_rate, -5000);
         assert_eq!(rates[0].points, 1000);
 
-        // Level 1 stats for the known boss
         let api_hp = 19_081_773.292_5;
         let api_atk = 2_967.1515151515155;
 
@@ -511,7 +505,6 @@ mod tests {
         assert_eq!(scaled.atk, (api_atk * 0.5).floor());
         assert_eq!(scaled.points, 1000);
 
-        // Level 2
         let scaled2 = detail.scale_stats(api_hp, api_atk, 2, 0).unwrap();
         // Cumulative HP = api_hp * (1200+1200) / 10000
         assert_eq!(scaled2.hp, (api_hp * 2400.0 / 10000.0).floor());

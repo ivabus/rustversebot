@@ -552,16 +552,12 @@ async fn handle_endgame_callback(
     Ok(())
 }
 
-// ── /start ──
-
 async fn cmd_start(bot: &Bot, chat_id: ChatId, state: &BotState) -> anyhow::Result<()> {
     BotTemplateSender::new(bot, &state.templates)
         .send_message(chat_id, "welcome", &())
         .await?;
     Ok(())
 }
-
-// ── /promocodes ──
 
 async fn cmd_promocodes(bot: &Bot, chat_id: ChatId, state: &BotState) -> anyhow::Result<()> {
     let sender = BotTemplateSender::new(bot, &state.templates);
@@ -585,8 +581,6 @@ async fn cmd_promocodes(bot: &Bot, chat_id: ChatId, state: &BotState) -> anyhow:
     Ok(())
 }
 
-// ── /register <uid> ──
-
 async fn cmd_register(bot: &Bot, msg: Message, uid: &str, state: &BotState) -> anyhow::Result<()> {
     let chat_id = msg.chat.id;
     let user_id = msg.from.as_ref().map(|u| u.id.0 as i64).unwrap_or(0);
@@ -604,7 +598,6 @@ async fn cmd_register(bot: &Bot, msg: Message, uid: &str, state: &BotState) -> a
         return Ok(());
     }
 
-    // Check if already registered in this chat
     if state.db.get_user(chat_id.0, uid).await?.is_some() {
         BotTemplateSender::new(bot, &state.templates)
             .send_message(
@@ -616,7 +609,6 @@ async fn cmd_register(bot: &Bot, msg: Message, uid: &str, state: &BotState) -> a
         return Ok(());
     }
 
-    // Try to verify the UID by fetching data from HoYoLAB
     let verification = verify_uid(state, uid).await;
 
     match verification {
@@ -658,8 +650,6 @@ async fn cmd_register(bot: &Bot, msg: Message, uid: &str, state: &BotState) -> a
     Ok(())
 }
 
-// ── /unregister <uid> ──
-
 async fn cmd_unregister(
     bot: &Bot,
     chat_id: ChatId,
@@ -689,8 +679,6 @@ async fn cmd_unregister(
     }
     Ok(())
 }
-
-// ── /status ──
 
 async fn cmd_status(bot: &Bot, chat_id: ChatId, state: &BotState) -> anyhow::Result<()> {
     let tracked = state.db.get_all_users().await?.len();
@@ -774,7 +762,6 @@ async fn cmd_cookie(bot: &Bot, msg: Message, cookie: &str, state: &BotState) -> 
         return Ok(());
     }
 
-    // Validate cookie by trying to create a client
     match rustverse::client::zzz::ZZZClient::from_cookie_string(cookie.trim()) {
         Ok(client) => match client.get_game_record_cards().await {
             Ok(cards) => {
@@ -1005,7 +992,6 @@ async fn send_detail(
 }
 
 async fn send_da(bot: &Bot, chat_id: ChatId, uid: &str, state: &BotState) -> anyhow::Result<()> {
-    // Try DB first
     if let Some(json) = state
         .db
         .get_latest_result_json(uid, "deadly_assault")
@@ -1028,7 +1014,6 @@ async fn send_da(bot: &Bot, chat_id: ChatId, uid: &str, state: &BotState) -> any
         return Ok(());
     }
 
-    // Fallback: live API
     let cookie = match state.db.get_cookie().await? {
         Some(c) => c,
         None => {
@@ -1095,7 +1080,6 @@ async fn send_da(bot: &Bot, chat_id: ChatId, uid: &str, state: &BotState) -> any
 }
 
 async fn send_shiyu(bot: &Bot, chat_id: ChatId, uid: &str, state: &BotState) -> anyhow::Result<()> {
-    // Try DB first
     if let Some(json) = state
         .db
         .get_latest_result_json(uid, "shiyu_defense")
@@ -1118,7 +1102,6 @@ async fn send_shiyu(bot: &Bot, chat_id: ChatId, uid: &str, state: &BotState) -> 
         return Ok(());
     }
 
-    // Fallback: live API
     let cookie = match state.db.get_cookie().await? {
         Some(c) => c,
         None => {
@@ -1383,8 +1366,6 @@ fn format_season_comparison(
     Some(parts.join(", "))
 }
 
-// ── /uids ──
-
 async fn cmd_uids(bot: &Bot, chat_id: ChatId, state: &BotState) -> anyhow::Result<()> {
     let users = state.db.get_users_by_chat(chat_id.0).await?;
 
@@ -1575,7 +1556,6 @@ async fn resolve_nickname(
     if let Some(n) = state.db.get_nickname_for_uid(uid).await? {
         return Ok(n);
     }
-    // Try DA result_json
     if let Some(json) = state
         .db
         .get_latest_result_json(uid, "deadly_assault")
@@ -1600,12 +1580,10 @@ async fn resolve_uid(
 ) -> anyhow::Result<Result<String, RenderedTemplate>> {
     let input = input.trim();
 
-    // Numeric UID
     if !input.is_empty() && input.chars().all(|c| c.is_ascii_digit()) {
         return Ok(Ok(input.to_string()));
     }
 
-    // Try nickname lookup
     if let Some(uid) = state.db.find_uid_by_nickname(chat_id.0, input).await? {
         return Ok(Ok(uid));
     }
@@ -1650,9 +1628,7 @@ async fn verify_uid(state: &BotState, uid: &str) -> Result<Option<String>, Verif
 
     // Fallback: Shiyu Defense — just checks data accessibility, no nickname
     match client.get_shiyu_defense(uid, None, "1").await {
-        Ok(_) => {
-            Ok(None) // data is public, but no nickname available
-        }
+        Ok(_) => Ok(None),
         Err(rustverse::error::HoyoverseError::DataNotPublic) => {
             Err(VerificationError::DataNotPublic)
         }
@@ -1665,7 +1641,6 @@ async fn verify_uid(state: &BotState, uid: &str) -> Result<Option<String>, Verif
     }
 }
 
-/// Build a top leaderboard message for the given endgame type.
 /// Build the PNG image and caption for a leaderboard.
 pub async fn build_top_image_and_caption(
     state: &BotState,
@@ -1767,135 +1742,6 @@ pub async fn build_top_image_and_caption(
     };
 
     Ok((png, caption))
-}
-
-/// Legacy text-only version kept for compatibility.
-#[allow(dead_code)]
-pub async fn build_top_message(
-    state: &BotState,
-    chat_id: i64,
-    endgame_type: &str,
-    checkpoint: &str,
-) -> anyhow::Result<String> {
-    let event_name = endgame_name(endgame_type);
-
-    // Get the latest season start from DB
-    let season_start = match state
-        .db
-        .get_latest_season_start(chat_id, endgame_type)
-        .await?
-    {
-        Some(s) => s,
-        None => {
-            return Ok(state
-                .templates
-                .render("top_empty", &())
-                .map(|rendered| rendered.text)
-                .unwrap_or_else(|e| format!("Error: {e}")));
-        }
-    };
-
-    let checkpoint_label = match checkpoint {
-        "6h" => "6 часов после начала",
-        "24h" => "24 часа после начала",
-        "14d" => "14 дней (итог)",
-        _ => "текущий топ",
-    };
-
-    let entries = state
-        .db
-        .get_latest_results(chat_id, endgame_type, &season_start)
-        .await?;
-
-    if entries.is_empty() {
-        return Ok(state
-            .templates
-            .render("top_empty", &())
-            .map(|rendered| rendered.text)
-            .unwrap_or_else(|e| format!("Error: {e}")));
-    }
-
-    // Use the season_end from DB (already formatted as "YYYY-MM-DD HH:MM:SS")
-    let season_end = &entries[0].season_end;
-
-    let header = state
-        .templates
-        .render(
-            "top_header",
-            &serde_json::json!({
-                "name": event_name,
-                "checkpoint_label": checkpoint_label,
-                "start": display_wall_time(&season_start, EUROPE_SERVER),
-                "end": display_wall_time(season_end, EUROPE_SERVER),
-            }),
-        )
-        .map(|rendered| rendered.text)
-        .unwrap_or_default();
-
-    let mut body = String::new();
-    for (i, entry) in entries.iter().enumerate() {
-        let display_name = entry.nickname.as_deref().unwrap_or(&entry.uid);
-        // Format score
-        let score_str = format!("{} очков", entry.total_score);
-        // Try to extract extra info from data_json
-        let extra = extract_extra(endgame_type, &entry.data_json);
-
-        let line = state
-            .templates
-            .render(
-                "top_entry",
-                &serde_json::json!({
-                    "position": i + 1,
-                    "display_name": display_name,
-                    "score_str": score_str,
-                    "extra": extra,
-                }),
-            )
-            .map(|rendered| rendered.text)
-            .unwrap_or_default();
-        body.push_str(&line);
-    }
-
-    let footer = state
-        .templates
-        .render("top_footer", &())
-        .map(|rendered| rendered.text)
-        .unwrap_or_default();
-
-    Ok(format!("{header}\n{body}{footer}"))
-}
-
-fn extract_extra(endgame_type: &str, data_json: &str) -> String {
-    let v: serde_json::Value = match serde_json::from_str(data_json) {
-        Ok(v) => v,
-        Err(_) => return String::new(),
-    };
-
-    match endgame_type {
-        "deadly_assault" => {
-            let stars = v.get("total_star").and_then(|s| s.as_i64()).unwrap_or(0);
-            let rp = v
-                .get("rank_percent")
-                .and_then(|s| s.as_f64())
-                .unwrap_or(0.0);
-            format!("{}★ | Топ {:.2}%", stars, rp / 100.0)
-        }
-        "shiyu_defense" => {
-            let rating = v
-                .get("brief")
-                .and_then(|b| b.get("rating"))
-                .and_then(|r| r.as_str())
-                .unwrap_or("?");
-            let rp = v
-                .get("brief")
-                .and_then(|b| b.get("rank_percent"))
-                .and_then(|r| r.as_i64())
-                .unwrap_or(0) as f64
-                / 100.0;
-            format!("Ранг {} | Топ {:.2}%", rating, rp)
-        }
-        _ => String::new(),
-    }
 }
 
 #[cfg(test)]

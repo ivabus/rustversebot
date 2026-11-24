@@ -78,7 +78,7 @@ impl HttpClientExt for ReportFixture {
         request: Request<Bytes>,
     ) -> impl Future<Output = http_client::Result<Response<LazyBody>>> + Send + 'static {
         let body: Value = serde_json::from_slice(request.body()).unwrap();
-        let draft = "### Базовая атака\n- Урон вырос с 20 до 24.";
+        let draft = "Первый — урон вырос с 20 до 24. Второй — с 30 до 31.";
         let corrected = draft.replace("24", "21");
         let reply = match request.uri().path() {
             "/v1/responses/input_tokens" => json!({"input_tokens": 1000}),
@@ -89,10 +89,11 @@ impl HttpClientExt for ReportFixture {
                 if step == 0 {
                     let task = input.as_str().unwrap();
                     assert!(task.contains(crate::REPORT_TASK) && task.contains("beta_1.0.0_2"));
+                    assert!(task.contains("1601") && task.contains("1651"));
                     assert!(!task.contains("before") && !task.contains("damage"));
                     let mut reply = response(&Value::Null, "lookup");
-                    reply["output"] = ["en", "cn"].iter().enumerate().map(|(i, lang)| call(i, "get_gachabase_entry",
-                        json!({"category":"agents","id":1601,"version":"beta_1.0.0_2","language":lang,
+                    reply["output"] = [(1601,"en"), (1601,"cn"), (1651,"en"), (1651,"cn")].into_iter().enumerate().map(|(i, (id, lang))| call(i, "get_gachabase_entry",
+                        json!({"category":"agents","id":id,"version":"beta_1.0.0_2","language":lang,
                                "selector":"@changes","offset":null,"skill_level":null,"core_level":null}))).collect();
                     reply
                 } else {
@@ -115,15 +116,25 @@ impl HttpClientExt for ReportFixture {
                                         .strip_prefix("[tool get_gachabase_entry result] ")
                                 })
                                 .collect();
-                            assert_eq!(outputs.len(), 2);
-                            let mut languages = BTreeSet::new();
+                            assert_eq!(outputs.len(), 4);
+                            let mut sources = BTreeSet::new();
                             for output in outputs {
                                 let data: Value = serde_json::from_str(output).unwrap();
-                                languages.insert(data["language"].as_str().unwrap().to_owned());
-                                assert_eq!(data["result"][0]["changes"][0]["before"], 20);
-                                assert_eq!(data["result"][0]["changes"][0]["after"], 21);
+                                let id = data["id"].as_u64().unwrap();
+                                sources.insert((id, data["language"].as_str().unwrap().to_owned()));
+                                let before = if id == 1601 { 20 } else { 30 };
+                                assert_eq!(data["result"][0]["changes"][0]["before"], before);
+                                assert_eq!(data["result"][0]["changes"][0]["after"], before + 1);
                             }
-                            assert_eq!(languages, BTreeSet::from(["en".into(), "cn".into()]));
+                            assert_eq!(
+                                sources,
+                                BTreeSet::from([
+                                    (1601, "en".into()),
+                                    (1601, "cn".into()),
+                                    (1651, "en".into()),
+                                    (1651, "cn".into())
+                                ])
+                            );
                             if step == 3 {
                                 assert_eq!(input["answer"], draft);
                                 r#"{"corrections":[{"original":"24","replacement":"21","source":"en/cn /damage, beta_1.0.0_2: 21"}]}"#
@@ -160,17 +171,26 @@ impl HttpClientExt for ReportFixture {
 }
 
 #[tokio::test]
-async fn diff_report_reads_changes_through_tools_before_checking_the_text() {
-    let page = Comparison::parse(
-        "https://zzz.gachabase.net/diff/agents/1601/test?prev=beta_1.0.0_1&cur=beta_1.0.0_2",
-    )
-    .unwrap();
-    let snaps = || Snapshots {
-        prev: json!({"agent":{"damage":20}}),
-        cur: json!({"agent":{"damage":21}}),
-    };
+async fn one_diff_research_and_fact_check_share_both_agents_sources() {
     let mut tools = KitTools::new(Client::new());
-    let input = tools.report_input(&page, snaps(), snaps()).unwrap();
+    let mut members = Vec::new();
+    for (id, before) in [(1601, 20), (1651, 30)] {
+        let page = Comparison::parse(&format!(
+            "https://zzz.gachabase.net/diff/agents/{id}/test?prev=beta_1.0.0_1&cur=beta_1.0.0_2"
+        ))
+        .unwrap();
+        let snaps = || Snapshots {
+            prev: json!({"agent":{"damage":before}}),
+            cur: json!({"agent":{"damage":before+1}}),
+        };
+        members.push(
+            tools
+                .report_input(&page, snaps(), snaps())
+                .unwrap()
+                .unwrap(),
+        );
+    }
+    let input = Some(members.join("\n"));
     let provider = crate::transport::Provider {
         config: OpenAIConfig::new("mock"),
         client: DynHttpClient::new(ReportFixture::default()),
@@ -178,7 +198,10 @@ async fn diff_report_reads_changes_through_tools_before_checking_the_text() {
     let report = crate::write_report(tools, input, provider, MODEL, None)
         .await
         .unwrap();
-    assert_eq!(report, "### Базовая атака\n- Урон вырос с 20 до 21.");
+    assert_eq!(
+        report,
+        "Первый — урон вырос с 20 до 21. Второй — с 30 до 31."
+    );
 }
 
 impl HttpClientExt for Fixture {
@@ -473,6 +496,65 @@ impl Fixture {
             .into_iter()
             .map(|v| format!("data: {v}\n\n"))
             .collect()
+    }
+}
+
+#[tokio::test]
+async fn season_comparison_uses_both_requested_builds_and_retains_their_sources() {
+    let beta = "beta_3.4.5_20713015";
+    let creator = "creator_3.4.12_20749856";
+    let mut kit = KitTools::for_question(Client::new(), creator);
+    kit.seasons = Some(SeasonTools::fixture());
+    kit.timeline = Some(
+        Timeline::from_rows(&json!([{
+            "branch":"beta","version":"3.4.5","design_revision":20713015,"design_timestamp":1
+        }]))
+        .unwrap(),
+    );
+    let kit = Mutex::new(kit);
+    let path = "/zones/0/zone/monster_level";
+    let page = |version: Value| json!({"mode":"shiyu_defense","season":"62053","selector":path,"version":version});
+    let result = KitTools::dispatch(
+        &kit,
+        "get_endgame_seasons",
+        json!({"requests":[
+            page(Value::Null), page(json!(beta)), page(json!("release_3.4.5_999")),
+            page(json!("beta")), page(json!("release")), page(json!("3.4.12+20749856"))
+        ]}),
+    )
+    .await
+    .unwrap();
+    let rows = &result["results"];
+    assert_eq!(rows[0]["version"], creator);
+    assert_eq!(rows[0]["nanoka_version"], "3.4.12+20749856");
+    assert_eq!(rows[1]["version"], beta);
+    assert_eq!(rows[1]["nanoka_version"], "3.4.5+20713015");
+    assert!(rows[2]["error"].as_str().unwrap().contains("no snapshot"));
+    assert_eq!(rows[3], rows[1]);
+    assert_eq!(rows[4]["version"], "1.0");
+    assert_eq!(rows[4]["value"], 50);
+    assert_eq!(rows[5]["source"], rows[0]["source"]);
+    let diff = KitTools::dispatch(
+        &kit,
+        "compute",
+        json!({"script":"x0-x1","bindings":[
+            {"source":rows[0]["source"],"path":path},{"source":rows[1]["source"],"path":path}
+        ]}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(diff["result"], 5.0);
+    let calendar = KitTools::dispatch(&kit, "list_endgame_seasons", json!({"version":null}))
+        .await
+        .unwrap();
+    assert_eq!(calendar["version"], creator);
+    let refs = kit.lock().await.references.lock().await.clone();
+    for expected in [beta, creator] {
+        assert!(
+            refs.seasons
+                .iter()
+                .any(|s| s.season_id == 62053 && s.version.as_deref() == Some(expected))
+        );
     }
 }
 
