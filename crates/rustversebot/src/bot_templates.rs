@@ -1,3 +1,4 @@
+use crate::telegram_trace::TraceRequest;
 pub use crate::templates::RenderedTemplate;
 use crate::templates::TemplateEngine;
 use anyhow::{Context, bail};
@@ -68,8 +69,8 @@ impl<'a> BotTemplateSender<'a> {
             request = request.message_thread_id(thread);
         }
         match mode {
-            Some(mode) => Ok(request.parse_mode(mode).await?),
-            None => Ok(request.await?),
+            Some(mode) => Ok(request.parse_mode(mode).traced().await?),
+            None => Ok(request.traced().await?),
         }
     }
 
@@ -162,8 +163,8 @@ async fn send_rendered_to_thread(
         request = request.message_thread_id(thread);
     }
     match mode {
-        Some(mode) => Ok(request.parse_mode(mode).await?),
-        None => Ok(request.await?),
+        Some(mode) => Ok(request.parse_mode(mode).traced().await?),
+        None => Ok(request.traced().await?),
     }
 }
 
@@ -194,7 +195,7 @@ async fn send_card(
     if let Some(keyboard) = keyboard.clone() {
         request = request.reply_markup(keyboard);
     }
-    match request.await {
+    match request.traced().await {
         Ok(message) => return Ok(message),
         Err(teloxide::RequestError::Api(error))
             if error == teloxide::ApiError::ImageProcessFailed
@@ -211,7 +212,7 @@ async fn send_card(
     if let Some(keyboard) = keyboard {
         document = document.reply_markup(keyboard);
     }
-    Ok(document.await?)
+    Ok(document.traced().await?)
 }
 
 fn selected_parse_mode(rendered: &RenderedTemplate) -> Option<ParseMode> {

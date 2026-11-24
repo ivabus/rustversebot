@@ -44,6 +44,7 @@ pub fn prompt_version() -> &'static str {
                 TUTORIAL_GUIDANCE,
                 OUTPUT_FORMAT,
                 RESEARCH_UPDATES,
+                context::SUMMARY,
             ],
             editing::REVIEW_PROMPTS,
             kit::definitions(),
@@ -172,7 +173,8 @@ const INSTRUCTIONS: &str = "Ты анализируешь изменения а�
 
 const REVIEW: &str = "Во входе указаны все записи сравнения. Для каждого изменённого ID прочитай @changes
 в точной версии cur на en и cn. Независимые запросы делай вместе. Если группа уже содержит changes,
-используй их сразу; next_offset продолжает группу. Для уточнения прочитай нужное поле в prev и cur,
+используй их сразу, иначе открой возвращённый selector группы. Для продолжения используй next_offset.
+Для уточнения прочитай нужное поле в prev и cur,
 для добавленной или удалённой записи — в доступной ревизии. Сверь числа на максимальной ступени
 пассивки и на уровне 12 остальных навыков. Различай изменение механики и уточнение перевода.
 Закончи исследование, когда подтверждены существенные изменения всей ревизии. Верни готовую сводку.";
@@ -523,11 +525,10 @@ async fn run_agent(
         );
     }
     let research_updates = matches!(&preview, Some(Preview::Progress(_)));
-    let tracing_enabled = telemetry::content_enabled();
     let mut builder = AgentBuilder::new(provider.endpoint(&selection.slug, progress))
         .preamble(instructions)
         .append_preamble(guidance)
-        .record_content_telemetry(tracing_enabled)
+        .record_content_telemetry(telemetry::content_enabled())
         .append_preamble(TUTORIAL_GUIDANCE)
         .append_preamble(OUTPUT_FORMAT)
         .dynamic_tools(tools.into_tools(research_updates))
@@ -541,7 +542,7 @@ async fn run_agent(
         builder = builder.reasoning(reasoning);
     }
     let streaming = preview.is_some();
-    if tracing_enabled {
+    if tracing::span_enabled!(target: "rustverse::ai", tracing::Level::INFO) {
         builder = builder.add_hook(telemetry::GenerationTrace::default());
     }
     if let Some(preview) = preview.clone() {

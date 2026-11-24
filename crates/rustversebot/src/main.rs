@@ -12,11 +12,13 @@ mod prompt;
 mod scheduler;
 mod season_time;
 mod telegram_html;
+mod telegram_trace;
 mod templates;
 mod web;
 
 use anyhow::Context;
 use std::{net::SocketAddr, sync::Arc};
+use telegram_trace::TraceRequest;
 use teloxide::{prelude::*, utils::command::BotCommands};
 
 /// Telegram bot commands.
@@ -90,6 +92,39 @@ fn command_text(text: String) -> Result<(String,), teloxide::utils::command::Par
     Ok((text,))
 }
 
+impl Command {
+    fn trace_name(&self) -> &'static str {
+        match self {
+            Self::Start => "start",
+            Self::Register(_) => "register",
+            Self::Unregister(_) => "unregister",
+            Self::Status => "status",
+            Self::Promocodes => "promocodes",
+            Self::Next => "next",
+            Self::Current => "current",
+            Self::Previous => "previous",
+            Self::Endgame(_) => "endgame",
+            Self::BetaDiff(_) => "betadiff",
+            Self::Prompt(_) => "prompt",
+            Self::Stop => "stop",
+            Self::Model(_) => "model",
+            Self::Diff(_) => "diff",
+            Self::ResetLimit(_) => "resetlimit",
+            Self::AiUsers(_) => "aiusers",
+            Self::AiBan(_) => "aiban",
+            Self::AiUnban(_) => "aiunban",
+            Self::Da(_) => "da",
+            Self::Shiyu(_) => "shiyu",
+            Self::TopDeadly => "top_da",
+            Self::TopShiyu => "top_shiyu",
+            Self::Cookie(_) => "cookie",
+            Self::RefetchAll => "refetch_all",
+            Self::RefetchUid(_) => "refetch",
+            Self::Uids => "uids",
+        }
+    }
+}
+
 fn telegram_menu() -> Vec<teloxide::types::BotCommand> {
     let mut commands = Command::bot_commands();
     for command in &mut commands {
@@ -137,8 +172,11 @@ impl BotState {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    env_logger::init();
-    let _langfuse = rustverse_ai::telemetry::init("rustversebot")?;
+    // Keep tracing's log fallback from formatting instrument(err) payloads when export is disabled.
+    env_logger::Builder::from_default_env()
+        .filter_module("rustverse::bot", log::LevelFilter::Off)
+        .init();
+    let _telemetry = rustverse_ai::telemetry::init("rustversebot")?;
     log::info!("Starting ZZZ Endgame Tracker Bot");
 
     let admin_id = std::env::var("BOT_ADMIN_ID")
@@ -178,7 +216,7 @@ async fn main() -> anyhow::Result<()> {
     });
 
     let bot = Bot::from_env();
-    if let Err(error) = bot.set_my_commands(telegram_menu()).await {
+    if let Err(error) = bot.set_my_commands(telegram_menu()).traced().await {
         log::warn!("Could not update Telegram command menu: {error}");
     }
     log::info!("Bot connected");

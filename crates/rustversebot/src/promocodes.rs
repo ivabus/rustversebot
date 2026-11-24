@@ -57,6 +57,7 @@ impl Listing {
     }
 }
 
+#[tracing::instrument(target = "rustverse::bot", name = "promocodes.fetch", skip_all, err, fields(source = tracing::field::Empty))]
 pub async fn fetch(client: &reqwest::Client) -> anyhow::Result<Listing> {
     let primary = async {
         let html = client
@@ -86,6 +87,7 @@ pub async fn fetch(client: &reqwest::Client) -> anyhow::Result<Listing> {
     };
     let mut seen = HashSet::new();
     codes.retain(|entry| valid_code(&entry.code) && seen.insert(entry.code.to_ascii_uppercase()));
+    tracing::Span::current().record("source", source);
     Ok(Listing { source, codes })
 }
 

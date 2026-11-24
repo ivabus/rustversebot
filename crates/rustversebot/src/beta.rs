@@ -156,6 +156,12 @@ fn diff_status(previous: Option<&str>, current: Option<&str>, stage: DiffStage) 
     }
 }
 
+#[tracing::instrument(
+    target = "rustverse::bot",
+    name = "revision.deliver_part",
+    skip_all,
+    err
+)]
 async fn send_report_part(
     sender: &BotTemplateSender<'_>,
     chat: ChatId,
@@ -229,6 +235,7 @@ fn outstanding_revision(row: &Revision, confirmed: &HashSet<u64>) -> Revision {
     remaining
 }
 
+#[tracing::instrument(target = "rustverse::bot", name = "revision.deliver", skip_all, err)]
 async fn send_reports(
     bot: &Bot,
     state: &BotState,
@@ -604,6 +611,7 @@ impl ChatAgent for Diff {
     }
 }
 
+#[tracing::instrument(target = "rustverse::bot", name = "scheduler.revisions", skip_all, err)]
 pub async fn poll(bot: &Bot, state: &BotState, settings: &SchedulerSettings) -> Result<()> {
     if !state.db.has_diff_subscribers().await? || rustverse_ai::api_key().is_err() {
         return Ok(());
@@ -617,6 +625,7 @@ pub async fn poll(bot: &Bot, state: &BotState, settings: &SchedulerSettings) -> 
     Ok(())
 }
 
+#[tracing::instrument(target = "rustverse::bot", name = "gachabase.poll_branch", skip_all, err, fields(branch = branch.name()))]
 async fn poll_branch(
     bot: &Bot,
     state: &BotState,

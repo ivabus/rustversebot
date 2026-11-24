@@ -156,6 +156,12 @@ impl ZZZClient {
     // ── Public API ──
 
     /// Get the list of game records (linked games) for the HoYoLAB account.
+    #[tracing::instrument(
+        target = "rustverse::bot",
+        name = "hoyolab.game_record_cards",
+        skip_all,
+        err
+    )]
     pub async fn get_game_record_cards(
         &self,
     ) -> Result<Vec<crate::models::common::GameRecordCard>, HoyoverseError> {
@@ -174,6 +180,7 @@ impl ZZZClient {
     }
 
     /// Get the ZZZ Daily Note. Detect the server from the UID when it is `None`.
+    #[tracing::instrument(target = "rustverse::bot", name = "hoyolab.daily_note", skip_all, err)]
     pub async fn get_daily_note(
         &self,
         role_id: &str,
@@ -192,6 +199,12 @@ impl ZZZClient {
     }
 
     /// Get Shiyu Defense data. Detect the server from the UID when it is `None`.
+    #[tracing::instrument(
+        target = "rustverse::bot",
+        name = "hoyolab.shiyu_defense",
+        skip_all,
+        err
+    )]
     pub async fn get_shiyu_defense(
         &self,
         role_id: &str,
@@ -249,6 +262,12 @@ impl ZZZClient {
 
     /// Get Deadly Assault data for a `uid` and `region`.
     /// Detect the server from the UID when it is `None`.
+    #[tracing::instrument(
+        target = "rustverse::bot",
+        name = "hoyolab.deadly_assault",
+        skip_all,
+        err
+    )]
     pub async fn get_deadly_assault(
         &self,
         uid: &str,
@@ -274,6 +293,12 @@ impl ZZZClient {
     }
 
     /// Get the gacha (banner) calendar. Uses `uid`/`region`. Server auto-detected if None.
+    #[tracing::instrument(
+        target = "rustverse::bot",
+        name = "hoyolab.gacha_calendar",
+        skip_all,
+        err
+    )]
     pub async fn get_gacha_calendar(
         &self,
         uid: &str,
@@ -296,6 +321,7 @@ impl ZZZClient {
     /// Get the ZZZ game record index (profile summary + stats + avatar list).
     /// Use the public API domain for public third-party UID data.
     /// Detect the server from the UID when it is `None`.
+    #[tracing::instrument(target = "rustverse::bot", name = "hoyolab.index", skip_all, err)]
     pub async fn get_index(
         &self,
         role_id: &str,
@@ -319,6 +345,7 @@ impl ZZZClient {
 
     /// Get the player agent list.
     /// Detect the server from the UID when it is `None`.
+    #[tracing::instrument(target = "rustverse::bot", name = "hoyolab.avatar_list", skip_all, err)]
     pub async fn get_avatar_list(
         &self,
         role_id: &str,

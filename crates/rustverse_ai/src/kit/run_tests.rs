@@ -87,6 +87,12 @@ impl HttpClientExt for ReportFixture {
                 let history = body["input"].as_array().unwrap();
                 let input = &history.last().unwrap()["content"][0]["text"];
                 if step == 0 {
+                    assert!(
+                        history
+                            .iter()
+                            .any(|item| item.to_string().contains("@changes"))
+                            || body["instructions"].to_string().contains("@changes")
+                    );
                     let task = input.as_str().unwrap();
                     assert!(task.contains(crate::REPORT_TASK) && task.contains("beta_1.0.0_2"));
                     assert!(task.contains("1601") && task.contains("1651"));
@@ -332,7 +338,20 @@ impl HttpClientExt for Fixture {
                 }
                 let previous = self.summaries.fetch_add(1, Ordering::Relaxed);
                 assert_eq!(self.progress.borrow().stage, PromptStage::Compacting);
-                let data = body["input"].as_str().unwrap();
+                let input = body["input"].as_array().unwrap();
+                assert_eq!(input.len(), 2);
+                let question = &input[1];
+                assert_eq!(question["role"], "user");
+                assert_eq!(question["content"][0]["text"], self.question);
+                assert_eq!(
+                    question["content"][1]["image_url"],
+                    "data:image/jpeg;base64,/9j/"
+                );
+                assert_eq!(
+                    question["content"][2]["image_url"],
+                    "data:image/png;base64,iVBORw0KGgo="
+                );
+                let data = input[0]["content"].as_str().unwrap();
                 assert!(!data.contains("base64"));
                 assert!(data.contains(NOTES));
                 if previous == 0 {
@@ -392,6 +411,7 @@ impl Fixture {
     fn frames(&self, body: &Value) -> String {
         let tools = body["tools"].as_array().unwrap();
         assert_eq!(tools.len(), 8);
+        assert!(!body["tools"].to_string().contains("@changes"));
         assert!(tools.iter().any(|t| t["name"] == "list_revision_timeline"));
         let n = self.turns.fetch_add(1, Ordering::Relaxed) + 1;
         let input = body["input"].to_string();
@@ -682,6 +702,61 @@ async fn long_research_keeps_the_branch_and_numeric_sources_across_compactions()
 }
 
 #[tokio::test]
+async fn otlp_keeps_model_and_tool_spans_in_the_bot_trace_without_message_content() {
+    use opentelemetry_sdk::trace::{InMemorySpanExporter, SdkTracerProvider, SimpleSpanProcessor};
+    use tracing::Instrument;
+
+    let exporter = InMemorySpanExporter::default();
+    let provider = SdkTracerProvider::builder()
+        .with_span_processor(crate::telemetry::SessionProcessor(
+            SimpleSpanProcessor::new(exporter.clone()),
+        ))
+        .build();
+    let _guard =
+        tracing::subscriber::set_default(crate::telemetry::subscriber(&provider, true, false));
+    let command = tracing::info_span!(target: "rustverse::bot", "telegram.command");
+    async {
+        assert!(!crate::telemetry::content_enabled());
+        let prompt = tracing::info_span!(target: "rustverse::ai", "prompt");
+        crate::telemetry::set_prompt_session(&prompt, "session".into());
+        check_answer(&[Some(EDITED), Some("SAME")], EDITED)
+            .instrument(prompt)
+            .await;
+        tracing::error!(target: "rustverse::bot", error = "secret cookie");
+    }
+    .instrument(command)
+    .await;
+    let spans = exporter.get_finished_spans().unwrap();
+    let command = spans.iter().find(|s| s.name == "telegram.command").unwrap();
+    assert_eq!(command.status, opentelemetry::trace::Status::error(""));
+    let prompt = spans.iter().find(|s| s.name == "prompt").unwrap();
+    assert_eq!(prompt.parent_span_id, command.span_context.span_id());
+    assert!(
+        spans
+            .iter()
+            .all(|s| s.span_context.trace_id() == command.span_context.trace_id())
+    );
+    assert!(spans.iter().any(|s| s.name == "execute_tool"));
+    assert!(spans.iter().any(|s| {
+        s.name == "chat"
+            && s.attributes
+                .iter()
+                .any(|kv| kv.key.as_str() == "gen_ai.usage.input_tokens")
+    }));
+    for secret in [
+        QUESTION,
+        NOTES,
+        FINAL,
+        EDITED,
+        "/9j/",
+        "iVBORw0KGgo=",
+        "secret cookie",
+    ] {
+        assert!(!format!("{spans:?}").contains(secret));
+    }
+}
+
+#[tokio::test]
 async fn langfuse_records_multimodal_research_tools_compaction_and_editing() {
     use opentelemetry_sdk::trace::{InMemorySpanExporter, SdkTracerProvider, SimpleSpanProcessor};
     use tracing::Instrument;
@@ -692,7 +767,8 @@ async fn langfuse_records_multimodal_research_tools_compaction_and_editing() {
             SimpleSpanProcessor::new(exporter.clone()),
         ))
         .build();
-    let _guard = tracing::subscriber::set_default(crate::telemetry::subscriber(&provider));
+    let _guard =
+        tracing::subscriber::set_default(crate::telemetry::subscriber(&provider, false, true));
     let root = tracing::info_span!(target: "rustverse::ai", "prompt");
     let session_id = "020d2bcc-6631-4535-9399-c439f12c0374";
     crate::telemetry::set_prompt_session(&root, session_id.to_owned());
@@ -967,7 +1043,7 @@ async fn decisions_trace_keeps_the_session_usage_choice_and_fallback() {
             SimpleSpanProcessor::new(exporter.clone()),
         ))
         .build();
-    let _guard = tracing::subscriber::set_default(crate::telemetry::subscriber(&otel));
+    let _guard = tracing::subscriber::set_default(crate::telemetry::subscriber(&otel, false, true));
     for (choice, selected) in [
         ("high", SOL_HIGH),
         ("refusal", SOL_MEDIUM),

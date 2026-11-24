@@ -1,4 +1,5 @@
 use super::*;
+use crate::telegram_trace::TraceRequest;
 use anyhow::{Context, ensure};
 use futures_util::StreamExt;
 use std::{
@@ -15,6 +16,7 @@ use tokio::{
     sync::Mutex,
     time::{Instant, sleep_until},
 };
+use tracing::Instrument;
 
 // Includes the current turn and any earlier attachments reloaded for the same branch.
 pub(super) const IMAGE_BUDGET: usize = 24 * 1024 * 1024;
@@ -60,6 +62,7 @@ struct Album {
 #[derive(Clone, Default)]
 pub(crate) struct Albums(Arc<Mutex<HashMap<AlbumKey, Album>>>);
 
+#[tracing::instrument(target = "rustverse::bot", name = "telegram.media", skip_all, err, fields(outcome = tracing::field::Empty, otel.status_code = tracing::field::Empty))]
 pub(crate) async fn receive(
     bot: Bot,
     msg: Message,
@@ -90,7 +93,7 @@ pub(crate) async fn receive(
                     }
                 }
             }
-        });
+        }.in_current_span());
     }
     Ok(())
 }
@@ -189,6 +192,7 @@ fn media_question<'a>(messages: &'a [Message], username: &str) -> Option<MediaQu
     })
 }
 
+#[tracing::instrument(target = "rustverse::bot", name = "prompt.media_group", skip_all, err, fields(items = messages.len(), outcome = tracing::field::Empty, otel.status_code = tracing::field::Empty))]
 async fn dispatch(
     bot: &Bot,
     messages: &[Message],
@@ -225,6 +229,7 @@ pub(super) async fn download(
         ensure!(budget > 0, SIZE_ERROR);
         let file = bot
             .get_file(id)
+            .traced()
             .await
             .map_err(|_| anyhow::anyhow!("Не удалось получить изображение из Telegram."))?;
         ensure!(

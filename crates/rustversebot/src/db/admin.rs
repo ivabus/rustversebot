@@ -39,6 +39,7 @@ pub(crate) struct SessionTurn {
 }
 
 impl Db {
+    #[tracing::instrument(target = "rustverse::bot", name = "db.observe_chat", skip_all, err)]
     pub(crate) async fn observe_chat(&self, chat: i64, title: Option<&str>) -> Result<()> {
         self.connection.execute(
             "INSERT INTO chat_features(chat_id,title) VALUES(?1,?2)
@@ -47,6 +48,7 @@ impl Db {
         Ok(())
     }
 
+    #[tracing::instrument(target = "rustverse::bot", name = "db.feature_enabled", skip_all, err)]
     pub(crate) async fn feature_enabled(&self, chat: i64, feature: AiFeature) -> Result<bool> {
         let sql = match feature {
             AiFeature::Prompt => "SELECT prompt FROM chat_features WHERE chat_id=?1",
@@ -62,6 +64,7 @@ impl Db {
             != 0)
     }
 
+    #[tracing::instrument(target = "rustverse::bot", name = "db.set_feature", skip_all, err)]
     pub(crate) async fn set_feature(
         &self,
         chat: i64,
@@ -82,6 +85,12 @@ impl Db {
         Ok(())
     }
 
+    #[tracing::instrument(
+        target = "rustverse::bot",
+        name = "db.has_diff_subscribers",
+        skip_all,
+        err
+    )]
     pub(crate) async fn has_diff_subscribers(&self) -> Result<bool> {
         let mut rows = self
             .connection
@@ -93,6 +102,7 @@ impl Db {
         Ok(rows.next().await?.is_some())
     }
 
+    #[tracing::instrument(target = "rustverse::bot", name = "db.admin_chats", skip_all, err)]
     pub(crate) async fn admin_chats(&self) -> Result<Vec<ChatSettings>> {
         let mut rows = self.connection.query(
             "WITH players AS (SELECT chat_id,count(*) AS n FROM users GROUP BY chat_id),
@@ -114,6 +124,7 @@ impl Db {
         Ok(chats)
     }
 
+    #[tracing::instrument(target = "rustverse::bot", name = "db.admin_sessions", skip_all, err)]
     pub(crate) async fn admin_sessions(
         &self,
         chat: Option<i64>,
@@ -149,6 +160,7 @@ impl Db {
         Ok(sessions)
     }
 
+    #[tracing::instrument(target = "rustverse::bot", name = "db.admin_turns", skip_all, err)]
     pub(crate) async fn admin_turns(&self, chat: i64, root: i32) -> Result<Vec<SessionTurn>> {
         let mut rows = self.connection.query(
             "WITH RECURSIVE thread(message_id,topic_id) AS (

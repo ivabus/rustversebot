@@ -1,3 +1,4 @@
+use crate::telegram_trace::TraceRequest;
 use anyhow::Result;
 use rustverse_ai::{PromptProgress, PromptStage};
 use serde_json::json;
@@ -106,12 +107,15 @@ enum Update {
 
 impl LiveOutput<'_> {
     // teloxide 0.13 predates sendMessageDraft. Never expose its tokenized URL in errors.
+    #[tracing::instrument(target = "rustverse::bot", name = "telegram.request", skip_all,
+        fields(otel.kind = "client", rpc.method = "SendMessageDraft", http.response.status_code = tracing::field::Empty, otel.status_code = tracing::field::Empty))]
     async fn draft(&self, text: &str) -> Update {
         let Ok(url) = self
             .bot
             .api_url()
             .join(&format!("./bot{}/sendMessageDraft", self.bot.token()))
         else {
+            tracing::Span::current().record("otel.status_code", "ERROR");
             return Update::Unavailable;
         };
         let mut body = json!({"chat_id":self.address.chat.0,"draft_id":self.address.message_id.0.max(1),"text":text,"parse_mode":"HTML"});
@@ -127,11 +131,14 @@ impl LiveOutput<'_> {
             .send()
             .await
         else {
+            tracing::Span::current().record("otel.status_code", "ERROR");
             return Update::Unavailable;
         };
+        tracing::Span::current().record("http.response.status_code", response.status().as_u16());
         if response.status().is_success() {
             return Update::Sent;
         }
+        tracing::Span::current().record("otel.status_code", "ERROR");
         if response.status().as_u16() == 429
             && let Ok(body) = response.json::<serde_json::Value>().await
             && let Some(seconds) = body
@@ -153,7 +160,7 @@ impl LiveOutput<'_> {
         if let Some(mode) = mode {
             request = request.parse_mode(mode);
         }
-        match request.await {
+        match request.traced().await {
             Ok(_) | Err(teloxide::RequestError::Api(teloxide::ApiError::MessageNotModified)) => {
                 Ok(())
             }
@@ -161,6 +168,12 @@ impl LiveOutput<'_> {
         }
     }
 
+    #[tracing::instrument(
+        target = "rustverse::bot",
+        name = "telegram.initial_status",
+        skip_all,
+        err
+    )]
     pub(crate) async fn start(
         &self,
         status: RenderedTemplate,
@@ -274,7 +287,12 @@ impl LiveOutput<'_> {
         let settings = crate::scheduler::SchedulerSettings::from_env();
         let attempts = settings.retry_attempts.max(1);
         for attempt in 1..=attempts {
-            match self.bot.delete_message(self.address.chat, id).await {
+            match self
+                .bot
+                .delete_message(self.address.chat, id)
+                .traced()
+                .await
+            {
                 Ok(_)
                 | Err(teloxide::RequestError::Api(teloxide::ApiError::MessageToDeleteNotFound)) => {
                     return Ok(());
@@ -294,6 +312,12 @@ impl LiveOutput<'_> {
 
     // Replace the group's status with the first final chunk, and append subsequent
     // chunks. Retry only the chunk Telegram rejected. A deleted status can be replaced.
+    #[tracing::instrument(
+        target = "rustverse::bot",
+        name = "telegram.deliver_part",
+        skip_all,
+        err
+    )]
     pub(crate) async fn send(
         &self,
         rendered: RenderedTemplate,

@@ -10,14 +10,16 @@ use tokio::{
     sync::{OwnedSemaphorePermit, Semaphore, watch},
     task::JoinSet,
 };
+use tracing::{Instrument, instrument::Instrumented};
 
 pub(crate) type Job = Pin<Box<dyn Future<Output = Result<()>> + Send>>;
 const ACTIVE: usize = 4;
 const WAITING: usize = 8;
 
 struct Entry {
+    wait: tracing::Span,
     id: Option<uuid::Uuid>,
-    job: Job,
+    job: Instrumented<Job>,
     _slot: OwnedSemaphorePermit,
 }
 
@@ -83,8 +85,9 @@ impl Permit<'_> {
             return;
         }
         entries.push_back(Entry {
+            wait: tracing::info_span!(target: "rustverse::bot", "ai.queue.wait", outcome = "cancelled"),
             id: cancellation.map(|(id, _)| id),
-            job,
+            job: job.in_current_span(),
             _slot: self.slot,
         });
         self.sender.wake.send_replace(());
@@ -92,16 +95,14 @@ impl Permit<'_> {
 }
 
 impl Receiver {
-    pub fn try_recv(&self) -> Option<Job> {
-        self.queue
-            .entries
-            .lock()
-            .unwrap()
-            .pop_front()
-            .map(|entry| entry.job)
+    pub fn try_recv(&self) -> Option<Instrumented<Job>> {
+        self.queue.entries.lock().unwrap().pop_front().map(|entry| {
+            entry.wait.record("outcome", "started");
+            entry.job
+        })
     }
 
-    async fn recv(&mut self) -> Option<Job> {
+    async fn recv(&mut self) -> Option<Instrumented<Job>> {
         loop {
             if let Some(job) = self.try_recv() {
                 return Some(job);
@@ -142,6 +143,30 @@ pub(crate) async fn run(mut queue: Receiver, mut shutdown: watch::Receiver<bool>
 mod tests {
     use super::*;
     use tokio::sync::mpsc;
+
+    #[tokio::test]
+    async fn worker_resumes_the_span_of_the_command_that_submitted_the_job() {
+        let _guard = tracing::subscriber::set_default(tracing_subscriber::registry());
+        let (queue, rx) = channel();
+        let (stop, shutdown) = watch::channel(false);
+        let worker = tokio::spawn(run(rx, shutdown));
+        let (done, received) = tokio::sync::oneshot::channel();
+        let command = tracing::info_span!(target: "rustverse::bot", "telegram.command");
+        let root = command.id().unwrap();
+        command.in_scope(|| {
+            queue.try_reserve().unwrap().send(
+                None,
+                Box::pin(async move {
+                    done.send(tracing::Span::current().id()).unwrap();
+                    Ok(())
+                }),
+            )
+        });
+        drop(command);
+        assert_eq!(received.await.unwrap(), Some(root));
+        stop.send(true).unwrap();
+        worker.await.unwrap();
+    }
 
     #[tokio::test]
     async fn active_and_waiting_jobs_are_bounded_and_stop_on_shutdown() {

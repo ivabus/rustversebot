@@ -1,4 +1,5 @@
 use crate::season_time::{EUROPE_SERVER, display_wall_time, moscow_date, moscow_time};
+use crate::telegram_trace::TraceRequest;
 use chrono::{DateTime, Utc};
 use nanoka::types::{EndgameType, SeasonMeta};
 use std::{collections::HashMap, sync::Arc};
@@ -24,6 +25,7 @@ fn endgame_name(endgame_type: &str) -> &str {
 }
 
 /// Main command dispatcher.
+#[tracing::instrument(target = "rustverse::bot", name = "telegram.command", skip_all, err, fields(command = cmd.trace_name(), outcome = tracing::field::Empty, otel.status_code = tracing::field::Empty))]
 pub async fn command_handler(
     bot: Bot,
     msg: Message,
@@ -126,7 +128,7 @@ pub async fn command_handler(
     }?;
 
     // Delete the command message to keep chats clean
-    let _ = bot.delete_message(chat_id, message_id).await;
+    let _ = bot.delete_message(chat_id, message_id).traced().await;
 
     Ok(())
 }
@@ -283,7 +285,9 @@ async fn send_endgame_info(
             rustverse_images::shiyu_info(&detail).await?
         }
     };
-    bot.send_photo(chat_id, InputFile::memory(png)).await?;
+    bot.send_photo(chat_id, InputFile::memory(png))
+        .traced()
+        .await?;
     Ok(())
 }
 
@@ -304,6 +308,7 @@ async fn cmd_endgame_pair(
             chat_id,
             format!("Не удалось найти полную пару сезонов для /{}.", command),
         )
+        .traced()
         .await?;
         return Ok(());
     };
@@ -340,7 +345,7 @@ async fn cmd_endgame_pair(
         ),
         InputMedia::Photo(InputMediaPhoto::new(InputFile::memory(shiyu_png))),
     ];
-    bot.send_media_group(chat_id, media).await?;
+    bot.send_media_group(chat_id, media).traced().await?;
     Ok(())
 }
 
@@ -363,6 +368,13 @@ fn missing_endgame_kind(text: Option<&str>) -> Option<()> {
     .filter(|_| parts.next().is_none())
 }
 
+#[tracing::instrument(
+    target = "rustverse::bot",
+    name = "telegram.command",
+    skip_all,
+    err,
+    fields(command = "endgame")
+)]
 pub async fn missing_endgame_command_handler(
     bot: Bot,
     msg: Message,
@@ -385,8 +397,9 @@ pub async fn missing_endgame_command_handler(
     bot.send_message(msg.chat.id, rendered.text)
         .parse_mode(parse_mode)
         .reply_markup(keyboard)
+        .traced()
         .await?;
-    let _ = bot.delete_message(msg.chat.id, msg.id).await;
+    let _ = bot.delete_message(msg.chat.id, msg.id).traced().await;
     Ok(())
 }
 
@@ -403,6 +416,7 @@ fn missing_detail_kind(text: Option<&str>) -> Option<&'static str> {
     }
 }
 
+#[tracing::instrument(target = "rustverse::bot", name = "telegram.command", skip_all, err, fields(command = missing_detail_kind(msg.text()).map(|kind| if kind == "sd" { "shiyu" } else { "da" })))]
 pub async fn missing_detail_command_handler(
     bot: Bot,
     msg: Message,
@@ -412,21 +426,23 @@ pub async fn missing_detail_command_handler(
         return Ok(());
     };
     send_uid_choice(&bot, msg.chat.id, kind, &state).await?;
-    let _ = bot.delete_message(msg.chat.id, msg.id).await;
+    let _ = bot.delete_message(msg.chat.id, msg.id).traced().await;
     Ok(())
 }
 
+#[tracing::instrument(target = "rustverse::bot", name = "telegram.callback", skip_all, err, fields(action = tracing::field::Empty, outcome = tracing::field::Empty, otel.status_code = tracing::field::Empty))]
 pub async fn callback_handler(
     bot: Bot,
     query: CallbackQuery,
     state: Arc<BotState>,
 ) -> anyhow::Result<()> {
     let Some(data) = query.data.as_deref() else {
-        bot.answer_callback_query(query.id).await?;
+        bot.answer_callback_query(query.id).traced().await?;
         return Ok(());
     };
     if let Some(action) = data.strip_prefix("diff:") {
-        bot.answer_callback_query(query.id.clone()).await?;
+        tracing::Span::current().record("action", "diff");
+        bot.answer_callback_query(query.id.clone()).traced().await?;
         if let Some(message) = &query.message {
             let address =
                 message
@@ -442,17 +458,20 @@ pub async fn callback_handler(
         return Ok(());
     }
     if let Some(endgame_callback) = parse_endgame_callback(data) {
+        tracing::Span::current().record("action", "endgame");
         return handle_endgame_callback(&bot, query, endgame_callback, &state).await;
     }
     let Some((kind, uid)) = parse_detail_callback(data) else {
         bot.answer_callback_query(query.id)
             .text("Некорректная кнопка")
             .show_alert(true)
+            .traced()
             .await?;
         return Ok(());
     };
+    tracing::Span::current().record("action", kind);
     let Some(message) = query.message.as_ref() else {
-        bot.answer_callback_query(query.id).await?;
+        bot.answer_callback_query(query.id).traced().await?;
         return Ok(());
     };
     let chat_id = message.chat().id;
@@ -460,10 +479,11 @@ pub async fn callback_handler(
         bot.answer_callback_query(query.id)
             .text("Этот UID больше не зарегистрирован в чате")
             .show_alert(true)
+            .traced()
             .await?;
         return Ok(());
     }
-    bot.answer_callback_query(query.id).await?;
+    bot.answer_callback_query(query.id).traced().await?;
     send_detail(&bot, chat_id, kind, uid, &state).await
 }
 
@@ -517,13 +537,13 @@ async fn handle_endgame_callback(
     state: &BotState,
 ) -> anyhow::Result<()> {
     let Some(message) = query.message.as_ref() else {
-        bot.answer_callback_query(query.id).await?;
+        bot.answer_callback_query(query.id).traced().await?;
         return Ok(());
     };
     let chat_id = message.chat().id;
     match callback {
         EndgameCallback::Mode(endgame_type) => {
-            bot.answer_callback_query(query.id).await?;
+            bot.answer_callback_query(query.id).traced().await?;
             let keyboard = endgame_season_keyboard(endgame_type, state).await?;
             let rendered = state.templates.render(
                 "endgame_choose_season",
@@ -535,6 +555,7 @@ async fn handle_endgame_callback(
             bot.edit_message_text(chat_id, message.id(), rendered.text)
                 .parse_mode(parse_mode)
                 .reply_markup(keyboard)
+                .traced()
                 .await?;
         }
         EndgameCallback::Season { endgame_type, id } => {
@@ -542,10 +563,11 @@ async fn handle_endgame_callback(
                 bot.answer_callback_query(query.id)
                     .text("Этот сезон больше недоступен")
                     .show_alert(true)
+                    .traced()
                     .await?;
                 return Ok(());
             };
-            bot.answer_callback_query(query.id).await?;
+            bot.answer_callback_query(query.id).traced().await?;
             send_endgame_info(bot, chat_id, endgame_type, &season, state).await?;
         }
     }
@@ -843,6 +865,7 @@ async fn cmd_refetch_all(bot: &Bot, msg: Message, state: &BotState) -> anyhow::R
         return Ok(());
     }
 
+    tracing::Span::current().record("cache.hit", false);
     let cookie = match state.db.get_cookie().await? {
         Some(c) => c,
         None => {
@@ -991,6 +1014,7 @@ async fn send_detail(
     }
 }
 
+#[tracing::instrument(target = "rustverse::bot", name = "card.deadly_assault", skip_all, err, fields(cache.hit = tracing::field::Empty))]
 async fn send_da(bot: &Bot, chat_id: ChatId, uid: &str, state: &BotState) -> anyhow::Result<()> {
     if let Some(json) = state
         .db
@@ -999,6 +1023,7 @@ async fn send_da(bot: &Bot, chat_id: ChatId, uid: &str, state: &BotState) -> any
         && let Ok(data) = serde_json::from_str::<rustverse::models::zzz::ZZZDeadlyAssault>(&json)
         && data.has_data.unwrap_or(true)
     {
+        tracing::Span::current().record("cache.hit", true);
         let nick = resolve_nickname(state, uid, data.nick_name.as_deref()).await?;
         let png = render_da(data).await?;
         send_detail_photo(
@@ -1014,6 +1039,7 @@ async fn send_da(bot: &Bot, chat_id: ChatId, uid: &str, state: &BotState) -> any
         return Ok(());
     }
 
+    tracing::Span::current().record("cache.hit", false);
     let cookie = match state.db.get_cookie().await? {
         Some(c) => c,
         None => {
@@ -1079,6 +1105,7 @@ async fn send_da(bot: &Bot, chat_id: ChatId, uid: &str, state: &BotState) -> any
     Ok(())
 }
 
+#[tracing::instrument(target = "rustverse::bot", name = "card.shiyu", skip_all, err, fields(cache.hit = tracing::field::Empty))]
 async fn send_shiyu(bot: &Bot, chat_id: ChatId, uid: &str, state: &BotState) -> anyhow::Result<()> {
     if let Some(json) = state
         .db
@@ -1087,6 +1114,7 @@ async fn send_shiyu(bot: &Bot, chat_id: ChatId, uid: &str, state: &BotState) -> 
         && let Ok(data) = serde_json::from_str::<rustverse::models::zzz::ZZZShiyuDefense>(&json)
         && data.hadal_begin_time.is_some()
     {
+        tracing::Span::current().record("cache.hit", true);
         let nick = resolve_nickname(state, uid, None).await?;
         let png = render_shiyu(data, &nick, state).await?;
         send_detail_photo(

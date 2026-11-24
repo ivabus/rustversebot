@@ -252,6 +252,12 @@ impl NanokaClient {
 
     /// Fetch the season, scale each mode at the requested level and resolve its images.
     /// See [`BossSeasonDetail::scale_all_modes_in_place`] for level selection.
+    #[tracing::instrument(
+        target = "rustverse::bot",
+        name = "nanoka.resolve_deadly_assault",
+        skip_all,
+        err
+    )]
     pub async fn get_boss_detail_resolved(
         &self,
         id: u64,
@@ -270,6 +276,12 @@ impl NanokaClient {
     ///
     /// Equivalent to [`get_detail`](Self::get_detail) followed by
     /// [`resolve_images`](Self::resolve_images).
+    #[tracing::instrument(
+        target = "rustverse::bot",
+        name = "nanoka.resolve_season",
+        skip_all,
+        err
+    )]
     pub async fn get_detail_resolved(&self, id: u64) -> Result<AnySeasonDetail, Error> {
         let mut detail = self.get_detail(id).await?;
         self.resolve_images(&mut detail);
@@ -350,6 +362,7 @@ impl NanokaClient {
     //  Internal helpers
     // ------------------------------------------------------------------
 
+    #[tracing::instrument(target = "rustverse::bot", name = "nanoka.fetch", skip_all, err)]
     async fn get_json<T: serde::de::DeserializeOwned>(&self, url: &str) -> Result<T, Error> {
         let resp = self.http.get(url).send().await?;
         let status = resp.status();

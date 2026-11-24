@@ -14,6 +14,7 @@ use rustverse::models::zzz::{ZZZDeadlyAssault, ZZZShiyuDefense};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tokio::{fs, process::Command};
+use tracing::Instrument;
 
 #[derive(Debug, Clone, Copy)]
 pub enum Template {
@@ -106,6 +107,7 @@ async fn download(
     Ok(Some(path))
 }
 
+#[tracing::instrument(target = "rustverse::bot", name = "render.assets", skip_all, err)]
 async fn stage_images(
     input: &Value,
     season: Option<&Value>,
@@ -187,7 +189,14 @@ async fn pipeline(
         .spawn()
         .context("starting resvg CLI")?;
     let (compiled, rendered) = tokio::time::timeout(Duration::from_secs(120), async {
-        tokio::try_join!(compiler.wait_with_output(), rasterizer.wait_with_output())
+        tokio::try_join!(
+            compiler
+                .wait_with_output()
+                .instrument(tracing::info_span!(target: "rustverse::bot", "render.typst")),
+            rasterizer
+                .wait_with_output()
+                .instrument(tracing::info_span!(target: "rustverse::bot", "render.resvg"))
+        )
     })
     .await
     .context("image rendering exceeded 120 seconds")??;
@@ -210,6 +219,7 @@ async fn pipeline(
 }
 
 /// Stage available images from the cache or remote sources before rendering.
+#[tracing::instrument(target = "rustverse::bot", name = "card.render", skip_all, err, fields(template = ?template))]
 pub async fn render(
     template: Template,
     input: &Value,

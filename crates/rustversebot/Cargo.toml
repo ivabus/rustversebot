@@ -29,5 +29,6 @@ rustverse_images = { version = "0.1.0", path = "../rustverse_images" }
 rustverse_ai = { path = "../rustverse_ai" }
 
 [dev-dependencies]
+tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt"] }
 tempfile = "3"
 tower = "0.5"

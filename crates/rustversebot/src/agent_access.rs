@@ -29,6 +29,7 @@ pub(crate) async fn check_chat(
     Ok(false)
 }
 
+#[tracing::instrument(target = "rustverse::bot", name = "ai.admit", skip_all, err, fields(decision = tracing::field::Empty))]
 pub async fn admit<'a>(
     bot: &Bot,
     chat: ChatId,
@@ -56,6 +57,7 @@ pub async fn admit<'a>(
             command,
             decision
         );
+        tracing::Span::current().record("decision", decision.as_str());
         match decision.as_str() {
             "admin" | "allowed" => return Ok(slot),
             "busy" => "ai_busy",
@@ -64,6 +66,7 @@ pub async fn admit<'a>(
             _ => anyhow::bail!("unknown AI access decision"),
         }
     } else {
+        tracing::Span::current().record("decision", "missing_identity");
         "ai_identity"
     };
     BotTemplateSender::new(bot, &state.templates)

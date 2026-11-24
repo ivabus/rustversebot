@@ -103,6 +103,20 @@ Telegram-бот для Zenless Zone Zero. В чате можно посмотр�
 
 Для Mac с Apple Silicon доступен `nix run .#rustversebot` с включёнными Typst и resvg. Для Linux с systemd в репозитории есть файлы службы. Служба запускает `/usr/local/bin/rustversebot` от пользователя `rustversebot`, читает `/etc/rustversebot/rustversebot.env` и хранит данные в `/var/lib/rustversebot`. [Файл службы](deploy/rustversebot.service) · [Пример окружения systemd](deploy/rustversebot.env.example)
 
+### Трассировка бота в Grafana
+
+Бот отправляет трейсы по OTLP/HTTP (protobuf). Для Grafana Cloud скопируйте базовый адрес и заголовок авторизации из настроек подключения OpenTelemetry в переменные `OTEL_EXPORTER_OTLP_ENDPOINT` и `OTEL_EXPORTER_OTLP_HEADERS`. SDK добавит к базовому адресу `/v1/traces`. Для Tempo или Alloy на том же хосте можно задать полный адрес приёмника в окружении службы:
+
+```sh
+OTEL_EXPORTER_OTLP_TRACES_ENDPOINT=http://127.0.0.1:4318/v1/traces
+```
+
+После перезапуска бота отправьте `/da <uid>`. В Grafana откройте **Explore**, выберите источник Tempo и выполните запрос `{ resource.service.name = "rustversebot" && span.command = "da" }`. В трейсе видны чтение снимка, признак `cache.hit`, обращение к HoYoLAB при промахе, рендер и ответ Telegram. Typst и resvg работают через канал, поэтому их интервалы перекрываются. Для `/prompt` в одном трейсе видны решение о допуске, ожидание в `ai.queue.wait`, вызовы модели и инструментов и доставка ответа по частям. Для фоновых заданий и HTTP-запросов выберите сервис `rustversebot` без фильтра команды.
+
+По умолчанию общий экспорт включает длительности, статусы, модель и расход токенов. Шаблон HTTP-маршрута и название Telegram-команды записываются без параметров. Чтобы дополнительно отправлять содержимое ИИ-запросов, задайте `RUSTVERSE_TRACE_AI_CONTENT=true`. Тогда читателям трейсов будут доступны история диалога, скриншоты в Base64, ответы и результаты инструментов. Большие изображения могут превысить лимит размера трейса у приёмника.
+
+Полный адрес `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` и заголовки `OTEL_EXPORTER_OTLP_TRACES_HEADERS` имеют приоритет над соответствующими общими настройками OTLP. Если задан адрес OTLP, бот использует только этот приёмник. Без адреса OTLP действует настройка Langfuse ниже. Без обоих вариантов экспорт выключен.
+
 ### Трейсы ИИ в Langfuse Cloud
 
 Создайте тестовый проект в Langfuse Cloud. В настройках проекта откройте **API Keys**, создайте пару ключей и задайте `LANGFUSE_PUBLIC_KEY` и `LANGFUSE_SECRET_KEY` в окружении бота. Регион `LANGFUSE_REGION` по умолчанию равен `eu`. Для проекта в другом регионе укажите `us`, `jp` или `hipaa`. Перезапустите бота с новым окружением. Он отправляет трейсы в фоне по HTTPS прямо в проект. Без ключей экспорт выключен. [Приём OpenTelemetry в Langfuse](https://langfuse.com/integrations/native/opentelemetry)

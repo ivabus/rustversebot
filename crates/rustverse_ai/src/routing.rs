@@ -6,7 +6,7 @@ use rig_core::{
 };
 use serde_json::{Value, json};
 use tokio::sync::watch;
-use tracing::{Span, field::Empty};
+use tracing::field::Empty;
 
 use crate::{ImagePromptTurn, PromptInput, PromptProgress, transport::Provider};
 
@@ -89,7 +89,9 @@ pub(super) async fn choose(
     let mut usage = Usage::new();
     let decision = crate::telemetry::observe(span.clone(), async {
         let body = payload(input, history)?;
-        Span::current().record("langfuse.observation.input", body.as_str());
+        if crate::telemetry::content_enabled() {
+            span.record("langfuse.observation.input", body.as_str());
+        }
         let response = provider.decide(body).await?;
         usage = decision_usage(&response["usage"]);
         span.record("gen_ai.usage.input_tokens", usage.input_tokens);
@@ -113,7 +115,7 @@ pub(super) async fn choose(
         let [answer] = answers.as_slice() else {
             bail!("Expected one Decisions answer")
         };
-        if !span.is_disabled() {
+        if crate::telemetry::content_enabled() {
             span.record("langfuse.observation.output", answer.to_string());
         }
         ensure!(
@@ -138,7 +140,9 @@ pub(super) async fn choose(
     }
     span.record("langfuse.observation.metadata.fallback", decision.is_err());
     let (tier, model) = decision.unwrap_or_else(|err| {
-        span.record("langfuse.observation.status_message", err.to_string());
+        if crate::telemetry::content_enabled() {
+            span.record("langfuse.observation.status_message", err.to_string());
+        }
         log::warn!("Question routing failed; using the middle research tier: {err}");
         MEDIUM_TIER
     });

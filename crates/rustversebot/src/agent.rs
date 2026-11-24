@@ -29,6 +29,22 @@ pub(crate) enum Status<'a> {
 }
 
 impl Status<'_> {
+    fn trace(&self, command: &'static str, model: &str) -> tracing::Span {
+        use tracing::field::Empty;
+        let span = tracing::info_span!(target: "rustverse::ai", "telegram.command",
+            otel.name = command, langfuse.observation.type = "span", selected_model = model,
+            source = "telegram", image_count = Empty, history_image_count = Empty,
+            langfuse.observation.input = Empty, langfuse.observation.output = Empty,
+            otel.status_code = Empty);
+        if let Self::Question { text, session_id } = self {
+            rustverse_ai::telemetry::set_prompt_session(&span, session_id.to_string());
+            if rustverse_ai::telemetry::content_enabled() {
+                span.record("langfuse.observation.input", text);
+            }
+        }
+        span
+    }
+
     fn render(
         &self,
         templates: &TemplateEngine,
@@ -78,7 +94,7 @@ pub(crate) async fn launch(
     bot: &Bot,
     address: MessageAddress,
     user: Option<&User>,
-    command: &str,
+    command: &'static str,
     state: &Arc<BotState>,
     agent: impl ChatAgent,
 ) -> Result<()> {
@@ -104,15 +120,6 @@ pub(crate) async fn launch(
     .await?;
     let bot = bot.clone();
     let state = state.clone();
-    let span = tracing::info_span!(target: "rustverse::ai", "telegram.command",
-        otel.name = command, langfuse.observation.type = "span", selected_model = %model, source = "telegram",
-        image_count = tracing::field::Empty, history_image_count = tracing::field::Empty,
-        langfuse.observation.input = tracing::field::Empty, langfuse.observation.output = tracing::field::Empty,
-        otel.status_code = tracing::field::Empty);
-    if let Status::Question { text, session_id } = initial {
-        rustverse_ai::telemetry::set_prompt_session(&span, session_id.to_string());
-        span.record("langfuse.observation.input", text);
-    }
     let registration = match initial {
         Status::Question { .. } => Some(state.prompts.register(
             address,
@@ -127,6 +134,7 @@ pub(crate) async fn launch(
     slot.send(
         cancellation,
         Box::pin(async move {
+            let span = agent.initial_status().trace(command, &model);
             let mut run = AgentRun {
                 output: LiveOutput {
                     bot: &bot,
@@ -150,16 +158,33 @@ pub(crate) async fn launch(
             let outcome = if let Some((guard, _, signal)) = registration {
                 let Ok(outcome) = futures_util::future::Abortable::new(generate, signal).await
                 else {
+                    tracing::Span::current().record("outcome", "cancelled");
                     return Ok(());
                 };
                 if !guard.claim() {
+                    tracing::Span::current().record("outcome", "cancelled");
                     return Ok(());
                 }
                 outcome
             } else {
                 generate.await
             };
-            run.finish(agent.initial_status(), outcome, &state.db).await
+            let generation_failed = outcome.is_err();
+            let delivered = run.finish(agent.initial_status(), outcome, &state.db).await;
+            if generation_failed || delivered.is_err() {
+                tracing::Span::current().record("otel.status_code", "ERROR");
+            }
+            tracing::Span::current().record(
+                "outcome",
+                if delivered.is_err() {
+                    "delivery_failed"
+                } else if generation_failed {
+                    "generation_failed"
+                } else {
+                    "delivered"
+                },
+            );
+            delivered
         }),
     );
     Ok(())

@@ -1,4 +1,4 @@
-//! Optional Langfuse Cloud export shared by the bot and the diff CLI.
+//! OTLP trace export shared by the bot and the diff CLI.
 use anyhow::{Context, Result, bail};
 use base64::{Engine, engine::general_purpose::STANDARD};
 use opentelemetry::{
@@ -25,12 +25,12 @@ use tracing_subscriber::{Layer, filter::filter_fn, prelude::*};
 mod tools;
 pub(crate) use tools::GenerationTrace;
 
-pub struct Langfuse(SdkTracerProvider);
+pub struct Telemetry(SdkTracerProvider);
 
-impl Drop for Langfuse {
+impl Drop for Telemetry {
     fn drop(&mut self) {
         if let Err(error) = self.0.shutdown_with_timeout(Duration::from_secs(5)) {
-            eprintln!("Langfuse trace shutdown failed: {error}");
+            eprintln!("Trace export shutdown failed: {error}");
         }
     }
 }
@@ -43,46 +43,68 @@ fn setting(name: &str) -> Result<Option<String>> {
     }
 }
 
-pub fn init(service: &'static str) -> Result<Option<Langfuse>> {
-    let credentials = (
-        setting("LANGFUSE_PUBLIC_KEY")?,
-        setting("LANGFUSE_SECRET_KEY")?,
-    );
-    let (public, secret) = match credentials {
-        (None, None) => return Ok(None),
-        (Some(public), Some(secret)) => (public, secret),
-        _ => bail!("Set both LANGFUSE_PUBLIC_KEY and LANGFUSE_SECRET_KEY"),
+pub fn init(service: &'static str) -> Result<Option<Telemetry>> {
+    let whole_bot = setting("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT")?.is_some()
+        || setting("OTEL_EXPORTER_OTLP_ENDPOINT")?.is_some();
+    let exporter = if whole_bot {
+        // The SDK resolves the signal-specific endpoint and headers before the base settings.
+        SpanExporter::builder()
+            .with_http()
+            .with_protocol(Protocol::HttpBinary)
+    } else {
+        let (public, secret) = match (
+            setting("LANGFUSE_PUBLIC_KEY")?,
+            setting("LANGFUSE_SECRET_KEY")?,
+        ) {
+            (None, None) => return Ok(None),
+            (Some(public), Some(secret)) => (public, secret),
+            _ => bail!("Set both LANGFUSE_PUBLIC_KEY and LANGFUSE_SECRET_KEY"),
+        };
+        let region = setting("LANGFUSE_REGION")?;
+        if setting("OTEL_EXPORTER_OTLP_TRACES_HEADERS")?.is_some()
+            || setting("OTEL_EXPORTER_OTLP_HEADERS")?.is_some()
+        {
+            bail!("Set the OTLP endpoint for the configured OTLP headers before enabling export");
+        }
+        cloud_exporter(region.as_deref().unwrap_or("eu"), &public, &secret)?
     };
-    let region = setting("LANGFUSE_REGION")?;
-    let exporter = cloud_exporter(region.as_deref().unwrap_or("eu"), &public, &secret)?
+    let content = match setting("RUSTVERSE_TRACE_AI_CONTENT")?.as_deref() {
+        None => !whole_bot,
+        Some("true") => true,
+        Some("false") => false,
+        Some(_) => bail!("RUSTVERSE_TRACE_AI_CONTENT must be true or false"),
+    };
+    let exporter = exporter
         .build()
-        .context("Could not initialize the Langfuse exporter")?;
+        .context("Could not initialize the OTLP exporter")?;
     // A single turn can carry 24 MiB of images before Base64 encoding. Combining
     // several turns in one OTLP request can exceed the exporter's 64 MiB limit.
+    let mut batch = BatchConfigBuilder::default();
+    if content {
+        batch = batch.with_max_export_batch_size(1);
+    }
     let processor = BatchSpanProcessor::builder(exporter)
-        .with_batch_config(
-            BatchConfigBuilder::default()
-                .with_max_export_batch_size(1)
-                .build(),
-        )
+        .with_batch_config(batch.build())
         .build();
     let provider = SdkTracerProvider::builder()
         .with_resource(Resource::builder_empty().with_service_name(service).build())
         .with_span_processor(SessionProcessor(processor))
         .build();
-    tracing::subscriber::set_global_default(subscriber(&provider))?;
-    Ok(Some(Langfuse(provider)))
+    tracing::subscriber::set_global_default(subscriber(&provider, whole_bot, content))?;
+    Ok(Some(Telemetry(provider)))
 }
 
 #[derive(Clone)]
 struct PromptSessionId(String);
 
-/// Each Telegram request starts a fresh trace, carrying the conversation UUID
-/// locally through its OTel parent contexts (including Rig's internal spans).
+/// Attach the conversation UUID while keeping the current Telegram trace as parent.
 pub fn set_prompt_session(root: &Span, session_id: String) {
     if !root.is_disabled()
-        && let Err(error) =
-            root.set_parent(OtelContext::new().with_value(PromptSessionId(session_id)))
+        && let Err(error) = root.set_parent(
+            Span::current()
+                .context()
+                .with_value(PromptSessionId(session_id)),
+        )
     {
         log::warn!("Could not attach the Langfuse session: {error}");
     }
@@ -94,12 +116,19 @@ pub(crate) struct SessionProcessor<P>(pub(crate) P);
 impl<P: SpanProcessor> SpanProcessor for SessionProcessor<P> {
     fn on_start(&self, span: &mut SdkSpan, cx: &OtelContext) {
         if let Some(session) = cx.get::<PromptSessionId>() {
+            span.set_attribute(KeyValue::new("gen_ai.conversation.id", session.0.clone()));
             span.set_attribute(KeyValue::new("langfuse.session.id", session.0.clone()));
         }
         self.0.on_start(span, cx);
     }
 
-    fn on_end(&self, span: SpanData) {
+    fn on_end(&self, mut span: SpanData) {
+        // #[instrument(err)] marks failed operations. Its event can contain a URL,
+        // a Telegram token, or a provider response. Export only the status code.
+        span.events.events.clear();
+        if matches!(span.status, opentelemetry::trace::Status::Error { .. }) {
+            span.status = opentelemetry::trace::Status::error("");
+        }
         self.0.on_end(span);
     }
     fn force_flush(&self) -> OTelSdkResult {
@@ -136,16 +165,38 @@ fn cloud_exporter(
         ])))
 }
 
-pub(crate) fn subscriber(provider: &SdkTracerProvider) -> impl Subscriber + Send + Sync {
-    // Only export our AI spans and Rig's GenAI operations. HTTP clients and Telegram
-    // can emit events containing full URLs or response bodies.
-    let filter = filter_fn(|meta| {
-        meta.is_span()
-            && (meta.target() == "rustverse::ai"
-                || (meta.fields().field("gen_ai.operation.name").is_some()
-                    && (meta.target().starts_with("rig::")
-                        || meta.target().starts_with("rig_agent::"))))
-    });
+struct TraceFilter {
+    whole_bot: bool,
+    content: bool,
+}
+
+impl<S> tracing_subscriber::layer::Filter<S> for TraceFilter {
+    fn enabled(
+        &self,
+        meta: &tracing::Metadata<'_>,
+        _: &tracing_subscriber::layer::Context<'_, S>,
+    ) -> bool {
+        match meta.target() {
+            "rustverse::bot" => {
+                self.whole_bot
+                    && (meta.is_span()
+                        || (*meta.level() == tracing::Level::ERROR
+                            && meta.fields().field("error").is_some()))
+            }
+            "rustverse::ai" => meta.is_span(),
+            target if target.starts_with("rig::") || target.starts_with("rig_agent::") => {
+                meta.is_span() && meta.fields().field("gen_ai.operation.name").is_some()
+            }
+            _ => false,
+        }
+    }
+}
+
+pub(crate) fn subscriber(
+    provider: &SdkTracerProvider,
+    whole_bot: bool,
+    content: bool,
+) -> impl Subscriber + Send + Sync {
     let diagnostics = tracing_subscriber::fmt::layer()
         .with_writer(std::io::stderr)
         .with_filter(filter_fn(|meta| {
@@ -155,10 +206,10 @@ pub(crate) fn subscriber(provider: &SdkTracerProvider) -> impl Subscriber + Send
         }));
     tracing_subscriber::registry().with(diagnostics).with(
         tracing_opentelemetry::layer()
-            .with_tracer(provider.tracer("rustverse_ai"))
+            .with_tracer(provider.tracer("rustverse"))
             .with_location(false)
             .with_threads(false)
-            .with_filter(filter),
+            .with_filter(TraceFilter { whole_bot, content }),
     )
 }
 
@@ -174,9 +225,13 @@ pub fn diff_span(
         agent_count, otel.status_code = tracing::field::Empty)
 }
 
-/// Build full Rig payloads only when the application is collecting AI spans.
-pub(crate) fn content_enabled() -> bool {
-    tracing::span_enabled!(target: "rustverse::ai", tracing::Level::INFO)
+/// Read the content policy of this dispatcher, independently of enabled span targets.
+pub fn content_enabled() -> bool {
+    tracing::dispatcher::get_default(|dispatch| {
+        dispatch
+            .downcast_ref::<TraceFilter>()
+            .is_some_and(|f| f.content)
+    })
 }
 
 /// Record failure without exposing provider errors or user input in the trace.
@@ -220,14 +275,14 @@ mod tests {
         let provider = SdkTracerProvider::builder()
             .with_batch_exporter(exporter)
             .build();
-        let _guard = tracing::subscriber::set_default(subscriber(&provider));
+        let _guard = tracing::subscriber::set_default(subscriber(&provider, false, true));
         observe(
             diff_span("scheduler", "model", "before", "after", 2),
             async { Ok(()) },
         )
         .await
         .unwrap();
-        drop(Langfuse(provider));
+        drop(Telemetry(provider));
 
         let request = rx.try_recv().unwrap();
         assert_eq!(request.method(), "POST");

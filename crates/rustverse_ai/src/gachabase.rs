@@ -91,6 +91,7 @@ impl Comparison {
             .with_context(|| format!("Не удалось прочитать дифф GachaBase ({lang})"))
     }
 
+    #[tracing::instrument(target = "rustverse::bot", name = "gachabase.diff_page", skip_all, err)]
     async fn page(&self, client: &Client, endpoint: &Url, lang: &str) -> Result<Value> {
         let body: Value = client
             .get(endpoint.clone())

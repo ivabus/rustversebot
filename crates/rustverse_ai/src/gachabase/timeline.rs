@@ -42,6 +42,7 @@ impl Build {
 pub(crate) struct Timeline(Vec<Build>);
 
 impl Timeline {
+    #[tracing::instrument(target = "rustverse::bot", name = "gachabase.timeline", skip_all, err)]
     pub async fn load(client: &Client) -> Result<Self> {
         let page: Value = client
             .get("https://zzz.gachabase.net/timeline/__data.json")

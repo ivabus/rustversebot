@@ -56,6 +56,7 @@ impl Index {
         self.entries.iter().any(|entry| entry.id == id)
     }
 
+    #[tracing::instrument(target = "rustverse::bot", name = "gachabase.index", skip_all, err)]
     pub async fn load(
         client: &Client,
         category: Category,
@@ -278,6 +279,7 @@ pub(crate) fn agent_entry(snapshot: Value) -> Value {
     dto
 }
 
+#[tracing::instrument(target = "rustverse::bot", name = "gachabase.detail", skip_all, err)]
 pub(crate) async fn detail(
     client: &Client,
     category: Category,

@@ -7,13 +7,14 @@
 use crate::BotState;
 use axum::{
     Json, Router,
-    extract::{Path, State},
+    extract::{MatchedPath, Path, Request, State},
     http::{StatusCode, header},
     response::{Html, IntoResponse, Response},
     routing::get,
 };
 use serde::Serialize;
 use std::{net::SocketAddr, sync::Arc};
+use tracing::Instrument;
 
 const INDEX: &str = include_str!("../web/index.html");
 const STYLE: &str = concat!(
@@ -78,7 +79,34 @@ fn router(state: Arc<BotState>, token: Option<Arc<str>>) -> Router {
         .route("/api/chats/{chat_id}/leaderboard/{kind}", get(leaderboard))
         .route("/api/users/{uid}/history", get(history))
         .fallback(not_found)
+        .layer(axum::middleware::from_fn(trace_request))
         .with_state(state)
+}
+
+async fn trace_request(req: Request, next: axum::middleware::Next) -> Response {
+    let route = req
+        .extensions()
+        .get::<MatchedPath>()
+        .map_or("unmatched", MatchedPath::as_str);
+    let method = match req.method().as_str() {
+        method @ ("GET" | "PUT" | "HEAD" | "POST" | "DELETE" | "OPTIONS" | "PATCH" | "TRACE"
+        | "CONNECT") => method,
+        _ => "_OTHER",
+    };
+    let span = tracing::info_span!(target: "rustverse::bot", "http.request",
+        otel.kind = "server", http.route = route, http.request.method = method,
+        http.response.status_code = tracing::field::Empty, otel.status_code = tracing::field::Empty);
+    async move {
+        let response = next.run(req).await;
+        let status = response.status();
+        tracing::Span::current().record("http.response.status_code", status.as_u16());
+        if status.is_server_error() {
+            tracing::Span::current().record("otel.status_code", "ERROR");
+        }
+        response
+    }
+    .instrument(span)
+    .await
 }
 
 async fn index() -> Html<String> {
@@ -288,6 +316,44 @@ mod tests {
                 .await
                 .unwrap();
             assert_eq!(response.status(), expected, "unexpected status for {uri}");
+        }
+    }
+
+    #[tokio::test]
+    async fn web_spans_include_route_templates_and_status_without_request_data() {
+        use tracing_subscriber::fmt::format::FmtSpan;
+        let app = router(test_state().await, Some(Arc::from("admin-secret")));
+        let file = tempfile::NamedTempFile::new().unwrap();
+        let subscriber = tracing_subscriber::fmt()
+            .with_span_events(FmtSpan::CLOSE)
+            .with_writer(file.reopen().unwrap())
+            .finish();
+        let _guard = tracing::subscriber::set_default(subscriber);
+        for path in [
+            "/api/users/123456789/history?token=secret-query",
+            "/api/admin/sessions/42/77",
+            "/private-unknown",
+        ] {
+            admin_request(&app, "GET", path, Some("wrong-secret"), "").await;
+        }
+        let traces = std::fs::read_to_string(file.path()).unwrap();
+        for expected in [
+            "/api/users/{uid}/history",
+            "/api/admin/sessions/{chat}/{root}",
+            "401",
+            "unmatched",
+            "404",
+        ] {
+            assert!(traces.contains(expected), "missing {expected} in {traces}");
+        }
+        for private in [
+            "123456789",
+            "/42/77",
+            "secret-query",
+            "wrong-secret",
+            "private-unknown",
+        ] {
+            assert!(!traces.contains(private));
         }
     }
 

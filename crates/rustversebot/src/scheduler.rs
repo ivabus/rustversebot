@@ -169,6 +169,12 @@ const EVENT_TYPES: [(&str, &str); 2] = [
     ("shiyu_defense", "Shiyu Defense"),
 ];
 
+#[tracing::instrument(
+    target = "rustverse::bot",
+    name = "scheduler.promocodes",
+    skip_all,
+    err
+)]
 async fn announce_promocodes(
     bot: &Bot,
     state: &BotState,
@@ -242,6 +248,12 @@ async fn deliver_promo_listing(
 /// Fetch the Nanoka indexes and store their production schedule.
 ///
 /// Do not cache season details. Fetch a card only when the bot can deliver it.
+#[tracing::instrument(
+    target = "rustverse::bot",
+    name = "scheduler.refresh_seasons",
+    skip_all,
+    err
+)]
 async fn refresh_season_events(state: &BotState) -> anyhow::Result<()> {
     let (deadly, shiyu) =
         tokio::try_join!(state.nanoka.get_boss_seasons(), state.nanoka.get_seasons())?;
@@ -322,6 +334,7 @@ pub async fn fetch_single_user(cookie: &str, uid: &str, state: &BotState) -> any
     fetch_one_inner(&client, uid, None, state).await
 }
 
+#[tracing::instrument(target = "rustverse::bot", name = "player.fetch", skip_all, err)]
 async fn fetch_one_inner(
     client: &rustverse::client::zzz::ZZZClient,
     uid: &str,
@@ -469,6 +482,12 @@ async fn cache_avatar_names(
     }
 }
 
+#[tracing::instrument(
+    target = "rustverse::bot",
+    name = "scheduler.fetch_players",
+    skip_all,
+    err
+)]
 async fn fetch_all_bg(state: &Arc<BotState>) -> anyhow::Result<()> {
     let cookie = match state.db.get_cookie().await? {
         Some(c) => c,
@@ -481,6 +500,12 @@ async fn fetch_all_bg(state: &Arc<BotState>) -> anyhow::Result<()> {
     Ok(())
 }
 
+#[tracing::instrument(
+    target = "rustverse::bot",
+    name = "scheduler.announce_season",
+    skip_all,
+    err
+)]
 async fn announce_next_season(
     bot: &Bot,
     state: &BotState,
@@ -617,6 +642,7 @@ impl Checkpoint<'_> {
     }
 }
 
+#[tracing::instrument(target = "rustverse::bot", name = "checkpoint.deliver", skip_all, err)]
 async fn send_checkpoint(
     bot: &Bot,
     state: &BotState,
@@ -667,6 +693,12 @@ async fn send_checkpoint(
 }
 
 /// Post only checkpoints whose short delivery window is currently open.
+#[tracing::instrument(
+    target = "rustverse::bot",
+    name = "scheduler.checkpoints",
+    skip_all,
+    err
+)]
 async fn check_checkpoints(
     bot: &Bot,
     state: &Arc<BotState>,

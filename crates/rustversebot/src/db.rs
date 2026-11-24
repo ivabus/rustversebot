@@ -65,6 +65,7 @@ pub struct Db {
 
 impl Db {
     /// Open a local `file:path.db` database.
+    #[tracing::instrument(target = "rustverse::bot", name = "db.connect", skip_all, err)]
     pub async fn connect(url: &str) -> anyhow::Result<Self> {
         let path = url
             .strip_prefix("file:")
@@ -413,6 +414,7 @@ impl Db {
             .map_err(Into::into)
     }
 
+    #[tracing::instrument(target = "rustverse::bot", name = "db.get_cookie", skip_all, err)]
     pub async fn get_cookie(&self) -> anyhow::Result<Option<String>> {
         self.optional_string(
             "SELECT cookie_string FROM cookies ORDER BY id DESC LIMIT 1",
@@ -421,11 +423,13 @@ impl Db {
         .await
     }
 
+    #[tracing::instrument(target = "rustverse::bot", name = "db.model_override", skip_all, err)]
     pub async fn model_override(&self) -> anyhow::Result<Option<String>> {
         self.optional_string("SELECT setting FROM ai_model WHERE id=1", ())
             .await
     }
 
+    #[tracing::instrument(target = "rustverse::bot", name = "db.set_ai_model", skip_all, err)]
     pub async fn set_ai_model(&self, setting: &str) -> anyhow::Result<()> {
         let setting = if setting == "auto" {
             setting.to_owned()
@@ -443,6 +447,7 @@ impl Db {
     }
 
     /// Follow only the selected answer's live ancestors, in conversational order.
+    #[tracing::instrument(target = "rustverse::bot", name = "db.prompt_session", skip_all, err)]
     pub async fn prompt_session(
         &self,
         chat: i64,
@@ -494,6 +499,7 @@ impl Db {
         Ok(session)
     }
 
+    #[tracing::instrument(target = "rustverse::bot", name = "db.save_prompt_turn", skip_all, err)]
     pub async fn save_prompt_turn(
         &self,
         chat: i64,
@@ -515,6 +521,7 @@ impl Db {
         Ok(())
     }
 
+    #[tracing::instrument(target = "rustverse::bot", name = "db.save_prompt_part", skip_all, err)]
     pub async fn save_prompt_part(
         &self,
         chat: i64,
@@ -532,6 +539,12 @@ impl Db {
         Ok(())
     }
 
+    #[tracing::instrument(
+        target = "rustverse::bot",
+        name = "db.expire_prompt_sessions",
+        skip_all,
+        err
+    )]
     pub async fn expire_prompt_sessions(&self) -> anyhow::Result<()> {
         self.connection()?
             .execute("DELETE FROM prompt_turns WHERE expires_at<=unixepoch()", ())
@@ -539,6 +552,7 @@ impl Db {
         Ok(())
     }
 
+    #[tracing::instrument(target = "rustverse::bot", name = "db.admit_ai", skip_all, err)]
     pub async fn admit_ai(
         &self,
         user: i64,
@@ -559,6 +573,7 @@ impl Db {
             .await?.context("missing AI access decision")
     }
 
+    #[tracing::instrument(target = "rustverse::bot", name = "db.ban_ai", skip_all, err)]
     pub async fn ban_ai(&self, user: i64, banned: bool) -> anyhow::Result<()> {
         let sql = if banned {
             "INSERT OR IGNORE INTO ai_bans VALUES(?1)"
@@ -569,6 +584,7 @@ impl Db {
         Ok(())
     }
 
+    #[tracing::instrument(target = "rustverse::bot", name = "db.ai_users", skip_all, err)]
     pub async fn ai_users(&self, page: u32) -> anyhow::Result<Vec<AgentUser>> {
         let mut rows=self.connection()?.query(
           "SELECT r.user_id,substr(r.username,1,32),substr(replace(replace(r.full_name,char(10),' '),char(13),' '),1,64),datetime(r.at_unix,'unixepoch','+3 hours'),
@@ -592,6 +608,7 @@ impl Db {
         Ok(users)
     }
 
+    #[tracing::instrument(target = "rustverse::bot", name = "db.reset_ai_limit", skip_all, err)]
     pub async fn reset_ai_limit(&self, user: i64) -> anyhow::Result<()> {
         self.connection()?
             .execute("DELETE FROM ai_cooldowns WHERE user_id=?1", [user])
@@ -599,6 +616,7 @@ impl Db {
         Ok(())
     }
 
+    #[tracing::instrument(target = "rustverse::bot", name = "db.revision_cursors", skip_all, err)]
     pub async fn revision_cursors(
         &self,
         branch: &str,
@@ -625,6 +643,7 @@ impl Db {
         Ok(out)
     }
 
+    #[tracing::instrument(target = "rustverse::bot", name = "db.revision_pending", skip_all, err)]
     pub(crate) async fn revision_pending(
         &self,
         chat: i64,
@@ -642,6 +661,7 @@ impl Db {
         Ok(rows.next().await?.is_some())
     }
 
+    #[tracing::instrument(target = "rustverse::bot", name = "db.advance_revision", skip_all, err)]
     pub async fn advance_revision(
         &self,
         chat: i64,
@@ -658,6 +678,12 @@ impl Db {
         Ok(())
     }
 
+    #[tracing::instrument(
+        target = "rustverse::bot",
+        name = "db.delivered_beta_agents",
+        skip_all,
+        err
+    )]
     pub async fn delivered_beta_agents(
         &self,
         chat: i64,
@@ -677,6 +703,12 @@ impl Db {
         Ok(agents)
     }
 
+    #[tracing::instrument(
+        target = "rustverse::bot",
+        name = "db.pending_beta_parts",
+        skip_all,
+        err
+    )]
     pub async fn pending_beta_parts(
         &self,
         chat: i64,
@@ -699,6 +731,12 @@ impl Db {
         Ok(tails)
     }
 
+    #[tracing::instrument(
+        target = "rustverse::bot",
+        name = "db.save_pending_beta_text",
+        skip_all,
+        err
+    )]
     pub async fn save_pending_beta_text(
         &self,
         chat: i64,
@@ -712,6 +750,12 @@ impl Db {
         Ok(())
     }
 
+    #[tracing::instrument(
+        target = "rustverse::bot",
+        name = "db.mark_beta_delivered",
+        skip_all,
+        err
+    )]
     pub async fn mark_beta_delivered(
         &self,
         chat: i64,
@@ -742,6 +786,7 @@ impl Db {
         Ok(())
     }
 
+    #[tracing::instrument(target = "rustverse::bot", name = "db.beta_report", skip_all, err)]
     pub async fn beta_report(
         &self,
         prev: &str,
@@ -756,6 +801,7 @@ impl Db {
         )
         .await
     }
+    #[tracing::instrument(target = "rustverse::bot", name = "db.save_beta_report", skip_all, err)]
     pub async fn save_beta_report(
         &self,
         prev: &str,
@@ -774,6 +820,7 @@ impl Db {
             .await?;
         Ok(())
     }
+    #[tracing::instrument(target = "rustverse::bot", name = "db.set_cookie", skip_all, err)]
     pub async fn set_cookie(&self, cookie: &str) -> anyhow::Result<()> {
         self.connection()?
             .execute(
@@ -783,6 +830,7 @@ impl Db {
             .await?;
         Ok(())
     }
+    #[tracing::instrument(target = "rustverse::bot", name = "db.add_user", skip_all, err)]
     pub async fn add_user(
         &self,
         chat_id: i64,
@@ -799,6 +847,7 @@ impl Db {
             .await?;
         Ok(())
     }
+    #[tracing::instrument(target = "rustverse::bot", name = "db.remove_user", skip_all, err)]
     pub async fn remove_user(&self, chat_id: i64, uid: &str) -> anyhow::Result<bool> {
         Ok(self
             .connection()?
@@ -809,6 +858,12 @@ impl Db {
             .await?
             > 0)
     }
+    #[tracing::instrument(
+        target = "rustverse::bot",
+        name = "db.get_users_by_chat",
+        skip_all,
+        err
+    )]
     pub async fn get_users_by_chat(&self, chat_id: i64) -> anyhow::Result<Vec<UserRow>> {
         self.users(
             "SELECT chat_id,telegram_user_id,uid,nickname FROM users WHERE chat_id=?1 ORDER BY id",
@@ -816,6 +871,7 @@ impl Db {
         )
         .await
     }
+    #[tracing::instrument(target = "rustverse::bot", name = "db.get_all_users", skip_all, err)]
     pub async fn get_all_users(&self) -> anyhow::Result<Vec<UserRow>> {
         self.users(
             "SELECT chat_id,telegram_user_id,uid,nickname FROM users ORDER BY id",
@@ -840,6 +896,12 @@ impl Db {
         }
         Ok(out)
     }
+    #[tracing::instrument(
+        target = "rustverse::bot",
+        name = "db.find_uid_by_nickname",
+        skip_all,
+        err
+    )]
     pub async fn find_uid_by_nickname(
         &self,
         chat_id: i64,
@@ -851,6 +913,12 @@ impl Db {
         )
         .await
     }
+    #[tracing::instrument(
+        target = "rustverse::bot",
+        name = "db.get_nickname_for_uid",
+        skip_all,
+        err
+    )]
     pub async fn get_nickname_for_uid(&self, uid: &str) -> anyhow::Result<Option<String>> {
         self.optional_string(
             "SELECT nickname FROM users WHERE uid=?1 AND nickname IS NOT NULL LIMIT 1",
@@ -858,9 +926,16 @@ impl Db {
         )
         .await
     }
+    #[tracing::instrument(target = "rustverse::bot", name = "db.get_user", skip_all, err)]
     pub async fn get_user(&self, chat_id: i64, uid: &str) -> anyhow::Result<Option<UserRow>> {
         Ok(self.users("SELECT chat_id,telegram_user_id,uid,nickname FROM users WHERE chat_id=?1 AND uid=?2",params![chat_id,uid]).await?.into_iter().next())
     }
+    #[tracing::instrument(
+        target = "rustverse::bot",
+        name = "db.get_distinct_chats",
+        skip_all,
+        err
+    )]
     pub async fn get_distinct_chats(&self) -> anyhow::Result<Vec<i64>> {
         let mut rows = self
             .connection()?
@@ -872,6 +947,7 @@ impl Db {
         }
         Ok(out)
     }
+    #[tracing::instrument(target = "rustverse::bot", name = "db.insert_result", skip_all, err)]
     pub async fn insert_result(
         &self,
         uid: &str,
@@ -884,6 +960,12 @@ impl Db {
         self.connection()?.execute("INSERT OR IGNORE INTO endgame_results(uid,endgame_type,season_start,season_end,total_score,data_json) VALUES(?1,?2,?3,?4,?5,?6)",params![uid,endgame_type,season_start,season_end,total_score,data_json]).await?;
         Ok(())
     }
+    #[tracing::instrument(
+        target = "rustverse::bot",
+        name = "db.get_latest_results",
+        skip_all,
+        err
+    )]
     pub async fn get_latest_results(
         &self,
         chat_id: i64,
@@ -907,6 +989,12 @@ impl Db {
         }
         Ok(out)
     }
+    #[tracing::instrument(
+        target = "rustverse::bot",
+        name = "db.get_latest_season_start",
+        skip_all,
+        err
+    )]
     pub async fn get_latest_season_start(
         &self,
         chat_id: i64,
@@ -917,6 +1005,12 @@ impl Db {
             params![chat_id,endgame_type]).await
     }
 
+    #[tracing::instrument(
+        target = "rustverse::bot",
+        name = "db.checkpoint_candidates",
+        skip_all,
+        err
+    )]
     pub async fn checkpoint_candidates(
         &self,
         kind: &str,
@@ -936,6 +1030,12 @@ impl Db {
         }
         Ok(candidates)
     }
+    #[tracing::instrument(
+        target = "rustverse::bot",
+        name = "db.get_latest_result_json",
+        skip_all,
+        err
+    )]
     pub async fn get_latest_result_json(
         &self,
         uid: &str,
@@ -943,6 +1043,12 @@ impl Db {
     ) -> anyhow::Result<Option<String>> {
         self.optional_string("SELECT data_json FROM endgame_results WHERE uid=?1 AND endgame_type=?2 ORDER BY id DESC LIMIT 1",params![uid,endgame_type]).await
     }
+    #[tracing::instrument(
+        target = "rustverse::bot",
+        name = "db.get_current_and_previous_result",
+        skip_all,
+        err
+    )]
     pub async fn get_current_and_previous_result(
         &self,
         uid: &str,
@@ -962,6 +1068,7 @@ impl Db {
         }
         Ok(out)
     }
+    #[tracing::instrument(target = "rustverse::bot", name = "db.cache_avatars", skip_all, err)]
     pub async fn cache_avatars(&self, uid: &str, names: &[(i64, &str)]) -> anyhow::Result<()> {
         let conn = self.connection()?;
         let tx = conn.transaction().await?;
@@ -971,6 +1078,12 @@ impl Db {
         tx.commit().await?;
         Ok(())
     }
+    #[tracing::instrument(
+        target = "rustverse::bot",
+        name = "db.resolve_avatar_name",
+        skip_all,
+        err
+    )]
     pub async fn resolve_avatar_name(
         &self,
         uid: &str,
@@ -982,6 +1095,12 @@ impl Db {
         )
         .await
     }
+    #[tracing::instrument(
+        target = "rustverse::bot",
+        name = "db.is_checkpoint_posted",
+        skip_all,
+        err
+    )]
     pub async fn is_checkpoint_posted(
         &self,
         chat_id: i64,
@@ -997,6 +1116,12 @@ impl Db {
             .get::<i64>(0)?
             != 0)
     }
+    #[tracing::instrument(
+        target = "rustverse::bot",
+        name = "db.mark_checkpoint_posted",
+        skip_all,
+        err
+    )]
     pub async fn mark_checkpoint_posted(
         &self,
         chat_id: i64,
@@ -1007,6 +1132,12 @@ impl Db {
         self.connection()?.execute("INSERT OR IGNORE INTO checkpoints_posted(chat_id,endgame_type,season_start,checkpoint) VALUES(?1,?2,?3,?4)",params![chat_id,endgame_type,season_start,checkpoint]).await?;
         Ok(())
     }
+    #[tracing::instrument(
+        target = "rustverse::bot",
+        name = "db.is_season_announcement_posted",
+        skip_all,
+        err
+    )]
     pub async fn is_season_announcement_posted(
         &self,
         chat_id: i64,
@@ -1028,6 +1159,12 @@ impl Db {
             .get::<i64>(0)?
             != 0)
     }
+    #[tracing::instrument(
+        target = "rustverse::bot",
+        name = "db.mark_season_announcement_posted",
+        skip_all,
+        err
+    )]
     pub async fn mark_season_announcement_posted(
         &self,
         chat_id: i64,
@@ -1046,6 +1183,12 @@ impl Db {
     }
     /// Seed newly registered chats from the first successful poll, including an empty list.
     /// Only confirmed Telegram deliveries belong in promo_announcements.
+    #[tracing::instrument(
+        target = "rustverse::bot",
+        name = "db.pending_promo_announcements",
+        skip_all,
+        err
+    )]
     pub async fn pending_promo_announcements(
         &self,
         active_codes: &[&str],
@@ -1078,6 +1221,12 @@ impl Db {
         Ok(pending)
     }
 
+    #[tracing::instrument(
+        target = "rustverse::bot",
+        name = "db.mark_promo_announced",
+        skip_all,
+        err
+    )]
     pub async fn mark_promo_announced(&self, chat: i64, code: &str) -> anyhow::Result<()> {
         self.connection()?
             .execute(
@@ -1088,6 +1237,12 @@ impl Db {
         Ok(())
     }
 
+    #[tracing::instrument(
+        target = "rustverse::bot",
+        name = "db.cache_season_events",
+        skip_all,
+        err
+    )]
     pub async fn cache_season_events(&self, events: &[SeasonEvent]) -> anyhow::Result<()> {
         let conn = self.connection()?;
         let tx = conn.transaction().await?;
@@ -1113,6 +1268,12 @@ impl Db {
         tx.commit().await?;
         Ok(())
     }
+    #[tracing::instrument(
+        target = "rustverse::bot",
+        name = "db.next_season_event",
+        skip_all,
+        err
+    )]
     pub async fn next_season_event(
         &self,
         endgame_type: &str,
@@ -1139,6 +1300,12 @@ impl Db {
             })
             .transpose()
     }
+    #[tracing::instrument(
+        target = "rustverse::bot",
+        name = "db.active_season_events",
+        skip_all,
+        err
+    )]
     pub async fn active_season_events(&self, now: &str) -> anyhow::Result<Vec<SeasonEvent>> {
         let mut rows = self.connection()?.query(
             "SELECT endgame_type,season_id,starts_at,ends_at,name FROM season_events
@@ -1157,6 +1324,12 @@ impl Db {
         }
         Ok(events)
     }
+    #[tracing::instrument(
+        target = "rustverse::bot",
+        name = "db.cleanup_old_results",
+        skip_all,
+        err
+    )]
     pub async fn cleanup_old_results(&self, retention_days: i64) -> anyhow::Result<usize> {
         if retention_days <= 0 {
             bail!("retention_days must be greater than zero");
@@ -1164,6 +1337,7 @@ impl Db {
         let changed=self.connection()?.execute("DELETE FROM endgame_results WHERE fetched_at < datetime('now','-' || ?1 || ' days') AND id NOT IN(SELECT MAX(id) FROM endgame_results GROUP BY uid,endgame_type,season_start)",params![retention_days]).await?;
         usize::try_from(changed).context("affected row count is too large")
     }
+    #[tracing::instrument(target = "rustverse::bot", name = "db.web_chats", skip_all, err)]
     pub async fn web_chats(&self) -> anyhow::Result<Vec<WebChatSummary>> {
         let mut rows = self
             .connection()?
@@ -1181,6 +1355,7 @@ impl Db {
         }
         Ok(out)
     }
+    #[tracing::instrument(target = "rustverse::bot", name = "db.web_leaderboard", skip_all, err)]
     pub async fn web_leaderboard(
         &self,
         chat_id: i64,
@@ -1203,6 +1378,7 @@ impl Db {
         }
         Ok(out)
     }
+    #[tracing::instrument(target = "rustverse::bot", name = "db.web_history", skip_all, err)]
     pub async fn web_history(
         &self,
         uid: &str,

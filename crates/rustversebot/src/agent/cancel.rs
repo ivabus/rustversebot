@@ -1,3 +1,4 @@
+use crate::telegram_trace::TraceRequest;
 use std::{
     collections::HashMap,
     sync::{Arc, Mutex},
@@ -144,6 +145,7 @@ pub(crate) async fn stop(bot: &Bot, msg: &Message, state: &BotState) -> Result<(
             |user| async move {
                 Ok(bot
                     .get_chat_administrators(here.chat)
+                    .traced()
                     .await?
                     .iter()
                     .any(|m| m.user.id == user))

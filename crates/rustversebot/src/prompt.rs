@@ -66,6 +66,7 @@ async fn replied_session(msg: &Message, db: &crate::db::Db) -> Result<Option<Pro
     .await
 }
 
+#[tracing::instrument(target = "rustverse::bot", name = "telegram.follow_up", skip_all, err, fields(outcome = tracing::field::Empty, otel.status_code = tracing::field::Empty))]
 pub async fn follow_up(bot: Bot, msg: Message, state: std::sync::Arc<BotState>) -> Result<()> {
     continue_reply(&bot, &msg, msg.text().unwrap_or_default(), &state, vec![]).await
 }
@@ -173,7 +174,9 @@ impl ChatAgent for Question {
                 .await
             })
             .await?;
-        tracing::Span::current().record("langfuse.observation.output", &answer.text);
+        if rustverse_ai::telemetry::content_enabled() {
+            tracing::Span::current().record("langfuse.observation.output", &answer.text);
+        }
         Ok(Outcome::Answer {
             text: answer.text,
             image_ids: self.images.clone(),

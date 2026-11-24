@@ -167,6 +167,7 @@ fn decode_group(body: &str, branch: Branch) -> Result<(Vec<Revision>, Option<Str
     bail!("GachaBase не вернул журнал изменений")
 }
 
+#[tracing::instrument(target = "rustverse::bot", name = "gachabase.compare", skip_all, err)]
 pub async fn compare_revisions(client: &Client, prev: &str, cur: &str) -> Result<Revision> {
     revision_group(prev)?;
     revision_group(cur)?;
@@ -246,6 +247,7 @@ pub async fn revisions(
     branch_revisions(client, branch, prev, cur).await
 }
 
+#[tracing::instrument(target = "rustverse::bot", name = "gachabase.revisions", skip_all, err)]
 pub async fn branch_revisions(
     client: &Client,
     branch: Branch,
